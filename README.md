@@ -29,6 +29,9 @@ This first implementation uses configurable research rules. It has not been
 validated against historical OPRA data or connected to live credentials in its
 initial development tests. The configured universe is intentional; nightly
 analysis evaluates those names only and does not claim to scan every U.S. stock.
+The intended production value for `LOTTO_UNIVERSE` is the same list as the
+existing unusual-options scanner's `UOA_CORE_UNIVERSE`, with `UOA_IN_PLAY` names
+appended when that temporary list is used.
 
 ## Alert restraint
 

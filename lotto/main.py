@@ -19,6 +19,14 @@ from .store import Store
 
 LOG = logging.getLogger(__name__)
 
+DEFAULT_UNIVERSE = (
+    "SPY,QQQ,IWM,DIA,SMH,SOXX,XLK,XLF,XLE,GLD,USO,SLV,MTUM,AAPL,MSFT,NVDA,TSLA,META,AMZN,GOOGL,NFLX,"
+    "AVGO,AMD,PLTR,COIN,HOOD,MSTR,MU,TSM,ARM,QCOM,MRVL,INTC,AMAT,LRCX,KLAC,ASML,SNDK,SMCI,DELL,VRT,"
+    "ANET,NBIS,AAOI,NOW,ORCL,CRM,ADBE,SNOW,DDOG,NET,CRWD,PANW,ZS,OKTA,TEAM,MDB,SHOP,BE,VST,CEG,NRG,"
+    "OKLO,FSLR,ENPH,PYPL,SOFI,AFRM,UPST,RBLX,UBER,ABNB,JPM,BAC,MS,GS,C,SCHW,V,MA,AXP,WMT,TGT,COST,"
+    "MCD,CMG,LULU,NKE,SBUX,HD,LOW,LLY,UNH,MRNA,REGN,ISRG,BA,LMT,CAT,DE,XOM,CVX"
+)
+
 
 def env_settings() -> Settings:
     defaults = Settings()
@@ -91,8 +99,12 @@ def main():
         print(json.dumps({"mode": args.mode, "synthetic": args.mode == "demo", "alerts": store.summary()}, indent=2))
         return
     client = Schwab(str(data_dir))
-    symbols = sorted({s.strip().upper() for s in os.getenv("LOTTO_UNIVERSE",
-                     "NVDA,AMD,ARM,INTC,TSLA,META,AMZN,MSFT,GOOGL,AVGO,MU,SMCI,HOOD,COIN,MSTR,MRNA").split(",") if s.strip()})
+    configured_universe = os.getenv("LOTTO_UNIVERSE")
+    if not configured_universe:
+        # Keep a compatible fallback for deployments that already carry the
+        # unusual-options scanner's universe variables.
+        configured_universe = ",".join(filter(None, (os.getenv("UOA_CORE_UNIVERSE", ""), os.getenv("UOA_IN_PLAY", "")))) or DEFAULT_UNIVERSE
+    symbols = sorted({s.strip().upper() for s in configured_universe.split(",") if s.strip()})
     if not symbols:
         raise SystemExit("LOTTO_UNIVERSE must contain at least one symbol")
     poll_seconds = max(30, int(os.getenv("LOTTO_POLL_SECONDS", "60")))
