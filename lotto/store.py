@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, time
 from hashlib import sha256
 from pathlib import Path
 
@@ -46,6 +46,78 @@ class Store:
     def recent(self, symbol: str, day: str) -> list[Snapshot]:
         rows = self.db.execute("SELECT payload FROM snapshots WHERE symbol=? ORDER BY at DESC LIMIT 20", (symbol,))
         return sorted([s for r in rows if (s := Snapshot.from_dict(json.loads(r[0]))).day == day], key=lambda s: s.at)
+
+    def session_snapshots(self, day: str) -> list[Snapshot]:
+        """Return every stored observation for one session in timestamp order.
+
+        This is intentionally separate from ``recent``: nightly research needs the
+        complete captured session, while live evaluation only needs a short window.
+        """
+        rows = self.db.execute("SELECT payload FROM snapshots ORDER BY at")
+        return [s for r in rows if (s := Snapshot.from_dict(json.loads(r[0]))).day == day]
+
+    def end_of_day_options(self, day: str, close_time: time = time(15, 59)) -> list[dict]:
+        """Calculate sampled open-to-close option returns for observed contracts.
+
+        Entry uses the first valid ask observed during regular hours. Exit uses the
+        latest valid bid observed no later than close_time. ``max_return`` and
+        ``min_return`` are sampled quote excursions, not a complete NBBO tape.
+        Contracts without both sides are reported as unavailable rather than given
+        a fabricated return.
+        """
+        observations: dict[str, list[tuple[Snapshot, object]]] = {}
+        for snap in self.session_snapshots(day):
+            local = snap.at.astimezone(ET)
+            if local.time() < time(9, 30) or local.time() > close_time:
+                continue
+            for option in snap.options:
+                if option.quote_time.tzinfo is None:
+                    continue
+                quote_local = option.quote_time.astimezone(ET)
+                if quote_local.date().isoformat() != day or quote_local.time() < time(9, 30) or quote_local.time() > close_time:
+                    continue
+                if option.ask <= 0 or option.bid < 0 or option.bid > option.ask:
+                    continue
+                observations.setdefault(option.symbol, []).append((snap, option))
+
+        result = []
+        for contract, values in observations.items():
+            values.sort(key=lambda pair: pair[1].quote_time)
+            first = next((pair for pair in values if pair[1].ask > 0), None)
+            last = next((pair for pair in reversed(values) if pair[1].bid >= 0), None)
+            if first is None or last is None or first[1].ask <= 0:
+                continue
+            entry = first[1].ask
+            sampled = [(option.quote_time, option.bid / entry - 1) for _, option in values if option.bid >= 0]
+            if not sampled:
+                continue
+            max_quote = max(sampled, key=lambda pair: pair[1])
+            min_quote = min(sampled, key=lambda pair: pair[1])
+            option = first[1]
+            last_option = last[1]
+            result.append({
+                "day": day,
+                "underlying": option.symbol.split("_")[0] if "_" in option.symbol else first[0].symbol,
+                "contract": contract,
+                "expiry": option.expiry.isoformat(),
+                "side": option.side,
+                "strike": option.strike,
+                "dte_at_open": (option.expiry - first[0].at.astimezone(ET).date()).days,
+                "entry_ask": entry,
+                "close_bid": last_option.bid,
+                "open_to_close_return": last_option.bid / entry - 1,
+                "max_bid": max_quote[1] * entry,
+                "max_return": max_quote[1],
+                "max_return_at": max_quote[0].isoformat(),
+                "min_bid": min_quote[1] * entry,
+                "min_return": min_quote[1],
+                "min_return_at": min_quote[0].isoformat(),
+                "first_quote": option.quote_time.isoformat(),
+                "last_quote": last_option.quote_time.isoformat(),
+                "quote_count": len(values),
+                "sampled_path": True,
+            })
+        return sorted(result, key=lambda row: (row["underlying"], -row["max_return"], row["contract"]))
 
     def count(self, day: str, symbol: str | None = None) -> int:
         query, args = "SELECT COUNT(*) FROM alerts WHERE day=?", [day]

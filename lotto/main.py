@@ -6,7 +6,7 @@ import os
 import signal
 import time
 from dataclasses import fields, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import Settings
@@ -40,17 +40,35 @@ def replay_frames(path):
 
 def main():
     parser = argparse.ArgumentParser(description="Selective potential options runner alerts")
-    parser.add_argument("mode", choices=("demo", "replay", "live", "report"), nargs="?", default="demo")
+    parser.add_argument("mode", choices=("demo", "replay", "live", "report", "nightly"), nargs="?", default="demo")
     parser.add_argument("--input", help="Replay JSONL: one snapshot array per scan cycle")
     parser.add_argument("--db", help="SQLite state path")
+    parser.add_argument("--day", help="Session date for nightly EOD analysis (YYYY-MM-DD)")
     parser.add_argument("--once", action="store_true", help="Poll one live cycle, retaining warmup requirements")
     args = parser.parse_args()
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
     data_dir = Path(os.getenv("DATA_DIR", "data"))
     data_dir.mkdir(parents=True, exist_ok=True)
-    database = args.db or str(data_dir / ("live.sqlite3" if args.mode in {"live", "report"} else f"{args.mode}.sqlite3"))
+    database = args.db or str(data_dir / ("live.sqlite3" if args.mode in {"live", "report", "nightly"} else f"{args.mode}.sqlite3"))
     if args.mode == "report":
         print(json.dumps(Store(database).summary(), indent=2))
+        return
+    if args.mode == "nightly":
+        store = Store(database)
+        day = args.day or (datetime.now(ET).date() - timedelta(days=1)).isoformat()
+        rows = store.end_of_day_options(day)
+        report_dir = data_dir / "nightly"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / f"options-{day}.json"
+        report_path.write_text(json.dumps({
+            "day": day,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "method": "first_valid_ask_to_latest_3_59pm_bid",
+            "sampled_quote_path": True,
+            "warning": "Returns use captured snapshots and can miss intraday NBBO highs/lows.",
+            "contracts": rows,
+        }, indent=2))
+        print(json.dumps({"day": day, "contracts": len(rows), "report": str(report_path)}, indent=2))
         return
     Path(database).parent.mkdir(parents=True, exist_ok=True)
     lock = open(database + ".lock", "w")

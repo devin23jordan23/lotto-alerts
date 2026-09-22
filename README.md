@@ -21,11 +21,14 @@ The scanner does not predict or promise a 500% return, and places no orders.
   open. A large existing percentage gain does not automatically disqualify a name.
 - Contract selection by quoted price, spread, delta, gamma, moneyness and DTE.
 - SQLite persistence for observations, decisions, queued alerts and outcomes.
+- Nightly end-of-day option report for the configured universe: first valid
+  regular-session ask versus the latest bid captured by 3:59 PM, plus sampled
+  favorable/adverse excursions.
 
 This first implementation uses configurable research rules. It has not been
 validated against historical OPRA data or connected to live credentials in its
-initial development tests. The configured universe is a watchlist, not an
-all-market discovery feed.
+initial development tests. The configured universe is intentional; nightly
+analysis evaluates those names only and does not claim to scan every U.S. stock.
 
 ## Alert restraint
 
@@ -85,6 +88,26 @@ Last available quote timestamps remain visible in the report.
 Milestones are saved to the database; this version posts only new potential
 ideas to Discord, keeping the channel concise. Tracking continues after the
 entry cutoff and after the new-alert budget is exhausted.
+
+## Nightly end-of-day review
+
+After the session, run:
+
+```bash
+python3 -m lotto.main nightly --db /app/data/live.sqlite3 --day YYYY-MM-DD
+```
+
+If `--day` is omitted, the previous calendar day is used. The command reads the
+captured snapshots for the configured `LOTTO_UNIVERSE` and writes
+`/app/data/nightly/options-YYYY-MM-DD.json`. For each contract observed from
+9:30 AM through 3:59 PM it records the first valid ask, latest valid bid,
+open-to-close return, and sampled maximum/minimum bid return. A contract must
+have valid captured quotes; the job does not infer missing prices.
+
+This is a sampled quote report. It can miss a brief intraday high between polls,
+and it cannot reconstruct contracts that were never captured. It is intended to
+describe what happened in the configured universe and improve the scanner's
+research dataset, not to claim a complete historical options tape.
 
 ## Railway setup
 

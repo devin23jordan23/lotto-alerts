@@ -152,6 +152,23 @@ class ScannerTests(unittest.TestCase):
             send.assert_not_called()
         self.assertEqual(self.store.summary()[0]["delivery"], "expired")
 
+    def test_end_of_day_uses_ask_to_bid_and_sampled_excursions(self):
+        self.run_frames()
+        rows = self.store.end_of_day_options("2026-09-21")
+        self.assertTrue(rows)
+        row = next(item for item in rows if item["contract"] == "DEMO-110C")
+        self.assertAlmostEqual(row["entry_ask"], .8)
+        self.assertAlmostEqual(row["close_bid"], 4.95)
+        self.assertAlmostEqual(row["open_to_close_return"], 4.95 / .8 - 1)
+        self.assertGreaterEqual(row["max_return"], row["open_to_close_return"])
+        self.assertTrue(row["sampled_path"])
+
+    def test_end_of_day_does_not_fabricate_without_a_valid_exit_bid(self):
+        self.run_frames(lambda s: replace(s, options=tuple(replace(o, bid=0) for o in s.options)))
+        rows = self.store.end_of_day_options("2026-09-21")
+        self.assertTrue(rows)
+        self.assertTrue(all(row["close_bid"] == 0 for row in rows))
+
 
 if __name__ == "__main__":
     unittest.main()
