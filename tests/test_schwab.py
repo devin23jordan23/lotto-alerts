@@ -1,6 +1,9 @@
+import io
+import json
+import tempfile
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from lotto.models import ET
 from lotto.schwab import Schwab
@@ -11,6 +14,22 @@ class AdapterTests(unittest.TestCase):
         self.client = Schwab.__new__(Schwab)
         self.client.baselines = {}
         self.client.calendar_cache = {}
+
+    def test_broker_mode_needs_no_local_refresh_credentials(self):
+        response = Mock()
+        response.__enter__ = Mock(return_value=io.BytesIO(json.dumps({
+            "access_token": "broker-token",
+            "expires_in": 240,
+        }).encode()))
+        response.__exit__ = Mock(return_value=False)
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {
+            "SCHWAB_TOKEN_BROKER_URL": "https://broker.test/schwab-token",
+            "SCHWAB_TOKEN_BROKER_KEY": "shared-secret",
+        }, clear=True), patch("lotto.schwab.urlopen", return_value=response) as open_url:
+            client = Schwab(directory)
+            self.assertEqual(client.token(), "broker-token")
+            self.assertEqual(client.token(), "broker-token")
+            self.assertEqual(open_url.call_count, 1)
 
     def test_baseline_excludes_today_and_uses_same_elapsed_time(self):
         today = datetime(2026, 9, 21, 10, 0, tzinfo=ET)

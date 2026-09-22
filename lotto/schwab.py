@@ -45,15 +45,26 @@ class Schwab:
         self.client_id = os.getenv("SCHWAB_CLIENT_ID", "")
         self.secret = os.getenv("SCHWAB_CLIENT_SECRET", "")
         self.seed = os.getenv("SCHWAB_REFRESH_TOKEN", "")
+        self.broker_url = os.getenv("SCHWAB_TOKEN_BROKER_URL", "").strip()
+        self.broker_key = os.getenv("SCHWAB_TOKEN_BROKER_KEY", "")
+        self.broker_token = ""
+        self.broker_deadline = 0.0
         self.token_path = Path(data_dir) / "schwab_tokens.json"
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.client_id or not self.secret or not (self.seed or self.token_path.exists()):
+        if bool(self.broker_url) != bool(self.broker_key):
+            raise ValueError("Schwab token broker URL and key must be set together")
+        if not self.broker_url and (not self.client_id or not self.secret or not (self.seed or self.token_path.exists())):
             raise ValueError("Schwab client ID, secret, and refresh token are required")
         self.last_request = 0
         self.baselines = {}
         self.calendar_cache = {}
 
     def token(self, force=False):
+        if self.broker_url:
+            if force:
+                self.broker_token = ""
+                self.broker_deadline = 0.0
+            return self.token_from_broker()
         tokens = json.loads(self.token_path.read_text()) if self.token_path.exists() else {"refresh_token": self.seed}
         if not force and tokens.get("access_token") and time.time() < tokens.get("expires_at", 0) - 120:
             return tokens["access_token"]
@@ -74,6 +85,26 @@ class Schwab:
             json.dump(fresh, stream)
         temporary.replace(self.token_path)
         return fresh["access_token"]
+
+    def token_from_broker(self):
+        if self.broker_token and time.monotonic() < self.broker_deadline:
+            return self.broker_token
+        request = Request(self.broker_url, headers={
+            "Authorization": f"Bearer {self.broker_key}",
+            "Accept": "application/json",
+        })
+        try:
+            with urlopen(request, timeout=15) as response:
+                payload = json.load(response)
+        except HTTPError as exc:
+            raise RuntimeError(f"Schwab token broker rejected request (HTTP {exc.code})") from None
+        token = payload.get("access_token", "")
+        if not token:
+            raise RuntimeError("Schwab token broker returned no access token")
+        ttl = max(30, min(int(payload.get("expires_in", 240)), 240) - 30)
+        self.broker_token = token
+        self.broker_deadline = time.monotonic() + ttl
+        return token
 
     def get(self, path: str, params: dict) -> dict:
         for attempt in range(2):
