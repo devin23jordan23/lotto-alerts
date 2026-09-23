@@ -1,12 +1,20 @@
 import json
 import sqlite3
+import zlib
 from dataclasses import asdict
-from datetime import datetime, time
+from datetime import datetime, time, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 
 from .features import Candidate, quote_ok
+from .config import Settings
 from .models import ET, Snapshot
+
+
+def read_snapshot(payload):
+    # SQLite accepts BLOBs in the existing payload column; retain compatibility
+    # with uncompressed observations from earlier deployments.
+    return Snapshot.from_dict(json.loads(zlib.decompress(payload) if isinstance(payload,bytes) else payload))
 
 
 class Store:
@@ -28,12 +36,27 @@ class Store:
             CREATE TABLE IF NOT EXISTS milestones (
                 alert_id TEXT, percent INTEGER, at TEXT, PRIMARY KEY(alert_id, percent));
             CREATE INDEX IF NOT EXISTS alerts_day ON alerts(day, symbol);
+            CREATE INDEX IF NOT EXISTS snapshots_at ON snapshots(at);
+            CREATE TABLE IF NOT EXISTS discovery (
+                day TEXT, symbol TEXT, at TEXT, promoted INTEGER, payload TEXT,
+                PRIMARY KEY(symbol, at));
+            CREATE INDEX IF NOT EXISTS discovery_day ON discovery(day);
+            CREATE TABLE IF NOT EXISTS nightly_runs (
+                day TEXT PRIMARY KEY, generated_at TEXT, report TEXT);
         """)
 
     def record(self, snap: Snapshot) -> None:
         with self.db:
             self.db.execute("INSERT OR IGNORE INTO snapshots VALUES (?, ?, ?)",
-                            (snap.symbol, snap.at.isoformat(), json.dumps(snap.to_dict())))
+                            (snap.symbol, snap.at.isoformat(), zlib.compress(json.dumps(snap.to_dict()).encode(),level=3)))
+
+    def record_discovery(self, rows):
+        with self.db:
+            for row in rows:
+                at = row["observed_at"]
+                self.db.execute("INSERT OR IGNORE INTO discovery VALUES (?, ?, ?, ?, ?)",
+                                (at.astimezone(ET).date().isoformat(), row["symbol"], at.isoformat(),
+                                 int(row["promoted"]), json.dumps(row, default=lambda v:v.isoformat())))
 
     def decision(self, snap: Snapshot, state: str, reason: str, candidate: Candidate | None = None):
         with self.db:
@@ -41,83 +64,73 @@ class Store:
                             (snap.symbol, snap.at.isoformat(), state, reason,
                              candidate.score if candidate else None,
                              json.dumps({"parts": candidate.parts, "metrics": candidate.metrics,
-                                         "score_change": candidate.score_change} if candidate else {})))
+                                         "score_change": candidate.score_change,
+                                         "setup": asdict(candidate.setup) if candidate.setup else None,
+                                         "side": candidate.option.side, "contract": candidate.option.symbol,
+                                         "spot": snap.spot, "entry_ask": candidate.option.ask,
+                                         "blockers": candidate.blockers} if candidate else {})))
 
     def recent(self, symbol: str, day: str) -> list[Snapshot]:
-        rows = self.db.execute("SELECT payload FROM snapshots WHERE symbol=? ORDER BY at DESC LIMIT 20", (symbol,))
-        return sorted([s for r in rows if (s := Snapshot.from_dict(json.loads(r[0]))).day == day], key=lambda s: s.at)
+        rows = self.db.execute("SELECT payload FROM snapshots WHERE symbol=? ORDER BY at DESC LIMIT 30", (symbol,))
+        return sorted([s for r in rows if (s := read_snapshot(r[0])).day == day], key=lambda s: s.at)
 
-    def session_snapshots(self, day: str) -> list[Snapshot]:
+    def session_snapshots(self, day: str):
         """Return every stored observation for one session in timestamp order.
 
         This is intentionally separate from ``recent``: nightly research needs the
         complete captured session, while live evaluation only needs a short window.
         """
-        rows = self.db.execute("SELECT payload FROM snapshots ORDER BY at")
-        return [s for r in rows if (s := Snapshot.from_dict(json.loads(r[0]))).day == day]
+        # Both UTC live records and ET replay records share the ET calendar date
+        # during the regular US session; avoid loading prior days' large payloads.
+        rows = self.db.execute("SELECT payload FROM snapshots WHERE at >= ? AND at < ? ORDER BY at",
+                               (day, (datetime.fromisoformat(day)+timedelta(days=1)).date().isoformat()))
+        for row in rows:
+            snap = read_snapshot(row[0])
+            if snap.day == day:
+                yield snap
 
-    def end_of_day_options(self, day: str, close_time: time = time(15, 59)) -> list[dict]:
-        """Calculate sampled open-to-close option returns for observed contracts.
-
-        Entry uses the first valid ask observed during regular hours. Exit uses the
-        latest valid bid observed no later than close_time. ``max_return`` and
-        ``min_return`` are sampled quote excursions, not a complete NBBO tape.
-        Contracts without both sides are reported as unavailable rather than given
-        a fabricated return.
-        """
-        observations: dict[str, list[tuple[Snapshot, object]]] = {}
+    def end_of_day_options(self, day: str, close_time: time | None = None) -> list[dict]:
+        """Stream fresh sampled quotes; never retain an entire day's chains in RAM."""
+        opening = datetime.fromisoformat(day).replace(hour=9, minute=30, tzinfo=ET)
+        default_close = opening.replace(hour=16, minute=0)
+        if close_time is not None:
+            default_close = min(default_close, datetime.combine(opening.date(), close_time, ET)+timedelta(minutes=1))
+        settings, records = Settings(), {}
         for snap in self.session_snapshots(day):
-            local = snap.at.astimezone(ET)
-            if local.time() < time(9, 30) or local.time() > close_time:
-                continue
+            closing = min(default_close, snap.session_end or default_close)
             for option in snap.options:
-                if option.quote_time.tzinfo is None:
+                if not quote_ok(option, snap, settings) or not opening <= option.quote_time < closing:
                     continue
-                quote_local = option.quote_time.astimezone(ET)
-                if quote_local.date().isoformat() != day or quote_local.time() < time(9, 30) or quote_local.time() > close_time:
+                row = records.get(option.symbol)
+                if row and option.quote_time <= row["_last"]:
                     continue
-                if option.ask <= 0 or option.bid < 0 or option.bid > option.ask:
-                    continue
-                observations.setdefault(option.symbol, []).append((snap, option))
-
-        result = []
-        for contract, values in observations.items():
-            values.sort(key=lambda pair: pair[1].quote_time)
-            first = next((pair for pair in values if pair[1].ask > 0), None)
-            last = next((pair for pair in reversed(values) if pair[1].bid >= 0), None)
-            if first is None or last is None or first[1].ask <= 0:
-                continue
-            entry = first[1].ask
-            sampled = [(option.quote_time, option.bid / entry - 1) for _, option in values if option.bid >= 0]
-            if not sampled:
-                continue
-            max_quote = max(sampled, key=lambda pair: pair[1])
-            min_quote = min(sampled, key=lambda pair: pair[1])
-            option = first[1]
-            last_option = last[1]
-            result.append({
-                "day": day,
-                "underlying": option.symbol.split("_")[0] if "_" in option.symbol else first[0].symbol,
-                "contract": contract,
-                "expiry": option.expiry.isoformat(),
-                "side": option.side,
-                "strike": option.strike,
-                "dte_at_open": (option.expiry - first[0].at.astimezone(ET).date()).days,
-                "entry_ask": entry,
-                "close_bid": last_option.bid,
-                "open_to_close_return": last_option.bid / entry - 1,
-                "max_bid": max_quote[1] * entry,
-                "max_return": max_quote[1],
-                "max_return_at": max_quote[0].isoformat(),
-                "min_bid": min_quote[1] * entry,
-                "min_return": min_quote[1],
-                "min_return_at": min_quote[0].isoformat(),
-                "first_quote": option.quote_time.isoformat(),
-                "last_quote": last_option.quote_time.isoformat(),
-                "quote_count": len(values),
-                "sampled_path": True,
-            })
-        return sorted(result, key=lambda row: (row["underlying"], -row["max_return"], row["contract"]))
+                if row is None:
+                    row = records[option.symbol] = {
+                        "day":day, "underlying":snap.symbol, "contract":option.symbol,
+                        "expiry":option.expiry.isoformat(), "side":option.side, "strike":option.strike,
+                        "entry_ask":option.ask, "max_bid":option.bid, "min_bid":option.bid,
+                        "max_return_at":option.quote_time.isoformat(), "min_return_at":option.quote_time.isoformat(),
+                        "first_quote":option.quote_time.isoformat(), "open_covered":option.quote_time < opening+timedelta(minutes=1),
+                        "quote_count":0, "sampled_path":True, "largest_quote_gap_seconds":0, "_last":option.quote_time,
+                    }
+                row["largest_quote_gap_seconds"] = max(row["largest_quote_gap_seconds"], (option.quote_time-row["_last"]).total_seconds())
+                row["_last"] = option.quote_time
+                row["last_quote"] = option.quote_time.isoformat()
+                row["quote_count"] += 1
+                row["last_observed_bid"] = option.bid
+                row["close_covered"] = option.quote_time >= closing-timedelta(minutes=1)
+                if option.bid > row["max_bid"]:
+                    row["max_bid"], row["max_return_at"] = option.bid, option.quote_time.isoformat()
+                if option.bid < row["min_bid"]:
+                    row["min_bid"], row["min_return_at"] = option.bid, option.quote_time.isoformat()
+        for row in records.values():
+            row.pop("_last")
+            row["observed_return"] = row["last_observed_bid"]/row["entry_ask"]-1 if row["quote_count"]>1 else None
+            row["close_bid"] = row["last_observed_bid"] if row["close_covered"] else None
+            row["open_to_close_return"] = row["observed_return"] if row["open_covered"] and row["close_covered"] else None
+            row["max_return"] = row["max_bid"]/row["entry_ask"]-1
+            row["min_return"] = row["min_bid"]/row["entry_ask"]-1
+        return sorted(records.values(), key=lambda row:(row["underlying"], -row["max_return"], row["contract"]))
 
     def count(self, day: str, symbol: str | None = None) -> int:
         query, args = "SELECT COUNT(*) FROM alerts WHERE day=?", [day]

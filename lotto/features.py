@@ -9,6 +9,7 @@ from math import isfinite, log
 
 from .config import Settings
 from .models import ET, Option, Snapshot
+from .patterns import Setup, detect_setup, path_features
 
 
 def clamp(value: float) -> float:
@@ -26,6 +27,8 @@ class Candidate:
     qualifying: bool
     score_change: float = 0.0
     state: str = "DISCOVERY"
+    setup: Setup | None = None
+    blockers: tuple[str, ...] = ()
 
 
 def quote_ok(option: Option, snap: Snapshot, settings: Settings) -> bool:
@@ -51,44 +54,49 @@ def contract_ok(option: Option, snap: Snapshot, settings: Settings) -> bool:
 
 
 def stock_features(snap: Snapshot, direction: int) -> tuple[dict, dict]:
-    bars = snap.bars
-    total_volume = sum(b.volume for b in bars)
-    vwap = sum((b.high + b.low + b.close) / 3 * b.volume for b in bars) / max(1, total_volume)
-    older = bars[:-5]
-    old_volume = sum(b.volume for b in older)
-    old_vwap = sum((b.high + b.low + b.close) / 3 * b.volume for b in older) / max(1, old_volume)
-    pace = total_volume / bars[-1].expected_cumulative_volume
-    old_baseline = older[-1].expected_cumulative_volume
-    old_pace = old_volume / old_baseline if old_baseline and old_baseline > 0 else pace
-    recent_volume = sum(b.volume for b in bars[-5:])
-    previous_volume = sum(b.volume for b in bars[-10:-5])
-    volume_acceleration = recent_volume / max(1, previous_volume)
-    ret5 = direction * (bars[-1].close / bars[-6].close - 1)
-    ret_previous = direction * (bars[-6].close / bars[-11].close - 1)
-    excursion = max(b.high for b in bars) if direction == 1 else min(b.low for b in bars)
-    distance = direction * (excursion - snap.spot) / excursion
-    path = sum(abs(bars[i].close - bars[i - 1].close) for i in range(len(bars) - 10, len(bars)))
-    efficiency = abs(bars[-1].close - bars[-11].close) / path if path else 0
-    above_share = sum(direction * (b.close - vwap) > 0 for b in bars[-5:]) / 5
-    opposing_volume = sum(b.volume for b in bars[-5:] if direction * (b.close - b.open) < 0)
-    opposing_share = opposing_volume / max(1, recent_volume)
-    trend = (5 * above_share + 4 * (direction * (vwap - old_vwap) > 0)
-             + 4 * clamp(1 - max(0, distance) / .02)
-             + 4 * efficiency + 3 * clamp(ret5 / .01))
-    volume = (10 * clamp(pace / 3) + 5 * clamp(pace / max(.01, old_pace))
-              + 5 * clamp(volume_acceleration / 1.5))
-    metrics = {
-        "pace_rvol": pace, "pace_persistence": pace / max(.01, old_pace),
-        "volume_acceleration": volume_acceleration, "return_5m_directional": ret5,
-        "price_acceleration": ret5 - ret_previous, "extreme_distance": distance,
-        "vwap": vwap, "vwap_slope_directional": direction * (vwap - old_vwap),
-        "above_vwap_share": above_share, "efficiency": efficiency,
-        "opposing_volume_share": opposing_share,
-        "return_from_close": snap.spot / snap.prior_close - 1,
-        "opening_gap": bars[0].open / snap.prior_close - 1,
-        "return_from_open": snap.spot / bars[0].open - 1,
-    }
+    metrics = path_features(snap, direction)
+    setup = detect_setup(snap, direction, metrics)
+    trend = (5 * metrics["above_vwap_share"]
+             + 4 * (metrics["ema_slope_directional"] > 0)
+             + 4 * clamp(1 - max(0, metrics["extreme_distance"]) / .02)
+             + 4 * metrics["efficiency"] + 3 * clamp(metrics["return_5m_directional"] / .01))
+    if setup and setup.name == "COILED_CONTINUATION":
+        # Compression is the setup: low directional efficiency is expected here.
+        trend = (5 * metrics["above_vwap_share"] + 4 * (metrics["ema_slope_directional"] >= 0)
+                 + 4 * metrics["near_extreme_share"] + 4 + 3)
+    elif setup and setup.name == "REVERSAL":
+        trend = (5 * metrics["above_vwap_share"] + 4 * (metrics["ema_slope_directional"] > 0)
+                 + 4 * clamp(metrics["return_from_adverse_extreme"] / .01)
+                 + 4 * metrics["efficiency"] + 3 * clamp(metrics["return_3m_directional"] / .005))
+    volume = (10 * clamp(max(metrics["pace_rvol"], metrics["local_rvol_5m"]) / 3) + 5 * clamp(metrics["pace_persistence"])
+              + 5 * clamp(metrics["volume_acceleration"] / 1.5))
     return metrics, {"price_structure": trend, "volume_persistence": volume}
+
+
+def persistent_activity(snap, history, contract_ids, settings):
+    """Twenty minutes of replenishment, using identical contracts and fresh samples."""
+    frames = sorted([s for s in history if snap.at-timedelta(minutes=22) <= s.at < snap.at] + [snap], key=lambda s:s.at)
+    endpoints = []
+    for minutes in (20, 15, 10, 5, 0):
+        target = snap.at-timedelta(minutes=minutes)
+        eligible = [s for s in frames if s.at <= target and (target-s.at).total_seconds() <= 90]
+        if not eligible:
+            return False
+        endpoints.append(eligible[-1])
+    window = [s for s in frames if s.at >= endpoints[0].at]
+    if any((b.at-a.at).total_seconds() > 150 for a,b in zip(window, window[1:])):
+        return False
+    totals = []
+    for frame in window:
+        options = {o.symbol:o for o in frame.options}
+        if any(i not in options or not quote_ok(options[i], frame, settings) for i in contract_ids):
+            return False
+        totals.append({i:options[i].volume for i in contract_ids})
+    if any(b[i] < a[i] for a,b in zip(totals,totals[1:]) for i in contract_ids):
+        return False
+    values = [sum(o.volume for o in f.options if o.symbol in contract_ids) for f in endpoints]
+    rates = [(b-a)/((y.at-x.at).total_seconds()/300) for a,b,x,y in zip(values,values[1:],endpoints,endpoints[1:])]
+    return all(v >= settings.min_strike_volume_5m*len(contract_ids) for v in rates) and rates[-1] >= .8*rates[0]
 
 
 def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> list[Candidate]:
@@ -148,6 +156,8 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         centroid_prev = sum(prev_vol[o.symbol] * log(o.strike / five.spot) for o in common) / prev_total
         migration = direction * (centroid_now - centroid_prev)
         metrics, parts = stock_features(snap, direction)
+        setup = detect_setup(snap, direction, metrics)
+        persistent = persistent_activity(snap, history, {o.symbol for o in best}, settings)
         option = max(eligible, key=lambda o: (
             2 * (1 - (o.ask - o.bid) / o.ask) + clamp(now_vol[o.symbol] / 1000)
             + (1 - abs(abs(o.delta) - .30)), o.symbol))
@@ -155,29 +165,54 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
                          and snap.context_time is not None
                          and 0 <= (snap.at - snap.context_time).total_seconds() <= settings.max_quote_age_seconds)
         context = direction * snap.context_return_5m if context_valid else 0
+        relative = metrics["return_5m_directional"] - context
+        peer_valid = (snap.peer_return_5m is not None and isfinite(snap.peer_return_5m)
+                      and snap.peer_time is not None
+                      and 0 <= (snap.at-snap.peer_time).total_seconds() <= settings.max_quote_age_seconds)
+        peer = direction*snap.peer_return_5m if peer_valid else 0
+        independent = snap.context_label != snap.symbol
+        # Relative leadership can qualify against a flat/slightly opposing tape.
+        etf_leadership = snap.symbol in {"SPY", "QQQ", "IWM", "DIA", "SMH", "SOXX", "XLK", "XLF", "XLE", "GLD", "USO", "SLV", "MTUM"} and context >= -.001
+        leadership = relative >= .001 and (peer > 0 or etf_leadership)
+        context_confirms = context_valid and independent and (context > 0 or leadership)
+        if snap.market_return_5m is not None and snap.market_time is not None:
+            if 0 <= (snap.at-snap.market_time).total_seconds() <= settings.max_quote_age_seconds:
+                metrics["relative_market_5m"] = metrics["return_5m_directional"] - direction*snap.market_return_5m
         parts.update({
-            "option_velocity": 12 * clamp(acceleration / 3),
+            "option_velocity": 12 * max(clamp(acceleration / 3), .8 if persistent else 0),
             "signed_flow_unavailable": 0,
             "strike_breadth": 12 * clamp(len(best) / 5),
             "spot_adjusted_migration": 13 * clamp(migration / .01),
-            "sector_context": 5 * clamp(context / .003),
+            "sector_context": 5 * clamp(max(context, relative if leadership else 0) / .003),
             "catalyst_unavailable": 0,
             "liquidity": 5 * clamp(1 - (option.ask - option.bid) / option.ask),
         })
         metrics.update({"option_acceleration": acceleration, "cluster_size": len(best),
                         "migration": migration, "option_volume_5m": now_total,
-                        "context_directional_return": context})
+                        "context_directional_return": context, "relative_sector_5m": relative,
+                        "peer_directional_return": peer, "options_persistent_20m": int(persistent)})
         score = round(sum(parts.values()), 2)
-        # No prior-close % veto. Strong structure and replenishing demand are required.
-        qualifying = (score >= settings.min_score and metrics["pace_rvol"] >= settings.min_pace_rvol
-                      and metrics["pace_persistence"] >= .80
-                      and metrics["return_5m_directional"] > 0
-                      and metrics["vwap_slope_directional"] > 0 and metrics["above_vwap_share"] >= .8
-                      and metrics["extreme_distance"] <= .01 and metrics["efficiency"] >= .55
-                      and metrics["opposing_volume_share"] <= .40
-                      and acceleration >= settings.min_option_acceleration
-                      and context_valid and context > 0)
-        reasons = [f"Stock pace {metrics['pace_rvol']:.1f}×", f"Options velocity {acceleration:.1f}×",
-                   f"{len(best)} neighboring strikes", f"{snap.context_label or 'Benchmark'} confirms"]
-        results.append(Candidate(snap, option, score, parts, metrics, reasons, qualifying))
+        coil = setup is not None and setup.name == "COILED_CONTINUATION"
+        local_burst = (metrics["local_rvol_5m"] >= settings.min_local_rvol
+                       and metrics["volume_acceleration"] >= settings.min_local_acceleration
+                       and metrics["atr_available"] and metrics["session_range_atr"] >= settings.min_range_atr)
+        metrics["local_volume_burst"] = int(bool(local_burst))
+        checks = {
+            "score below threshold": score >= settings.min_score,
+            "stock volume pace/burst below threshold": metrics["pace_rvol"] >= settings.min_pace_rvol or local_burst,
+            "stock volume pace fading": metrics["pace_persistence"] >= .80,
+            "no developing price setup": setup is not None,
+            "opposing volume dominates": metrics["opposing_volume_share"] <= (.65 if coil else .40),
+            "options activity not replenishing": persistent if coil else acceleration >= settings.min_option_acceleration or persistent,
+            "independent sector/peer confirmation missing": context_confirms,
+        }
+        blockers = tuple(k for k,v in checks.items() if not v)
+        qualifying = not blockers
+        reasons = [f"Stock pace {metrics['pace_rvol']:.1f}× · 5m local RVOL {metrics['local_rvol_5m']:.1f}×", f"Options velocity {acceleration:.1f}×",
+                   f"{len(best)} neighboring strikes", f"{snap.context_label or 'Benchmark'} {'confirms' if context_confirms else 'unconfirmed'}"]
+        if persistent:
+            reasons.append("Options activity sustained 20m")
+        if peer_valid and peer > 0:
+            reasons.append("Peers: " + ", ".join(snap.peer_leaders))
+        results.append(Candidate(snap, option, score, parts, metrics, reasons, qualifying, setup=setup, blockers=blockers))
     return results

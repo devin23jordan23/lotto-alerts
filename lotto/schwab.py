@@ -15,11 +15,16 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .models import Bar, ET, Option, Snapshot
+from .discovery import Discovery
 
 LOG = logging.getLogger(__name__)
 BASE = "https://api.schwabapi.com/marketdata/v1"
-SECTORS = {**dict.fromkeys(("NVDA", "AMD", "ARM", "INTC", "MU", "AVGO", "SMCI"), "SMH"),
+SECTORS = {**dict.fromkeys(("TSM", "NVDA", "AMD", "ARM", "INTC", "MU", "AVGO", "SMCI", "QCOM", "MRVL", "AMAT", "LRCX", "KLAC", "ASML", "SNDK", "SKHY"), "SMH"),
            **dict.fromkeys(("COIN", "HOOD", "MSTR"), "IBIT"), "MRNA": "XBI"}
+
+
+def benchmark_for(symbol):
+    return "SPY" if symbol in {"QQQ", "SMH", "SOXX", "XLK"} else SECTORS.get(symbol, "QQQ")
 
 
 def number(value):
@@ -58,6 +63,8 @@ class Schwab:
         self.last_request = 0
         self.baselines = {}
         self.calendar_cache = {}
+        self.atrs = {}
+        self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "12")))
 
     def token(self, force=False):
         if self.broker_url:
@@ -149,6 +156,22 @@ class Schwab:
         if key in self.baselines:
             return self.baselines[key]
         data = self.candles(symbol, now - timedelta(days=45), now)
+        daily = defaultdict(list)
+        for raw in data.get("candles", []):
+            at = epoch(raw.get("datetime"))
+            if at and at.astimezone(ET).date() < day and wall_time(9,30) <= at.astimezone(ET).time() < wall_time(16):
+                if all(number(raw.get(k)) is not None for k in ("high", "low", "close")):
+                    daily[at.astimezone(ET).date()].append(raw)
+        ranges, previous = [], None
+        for d in sorted(daily):
+            rows = sorted(daily[d], key=lambda r:r["datetime"])
+            high, low = max(r["high"] for r in rows), min(r["low"] for r in rows)
+            if previous:
+                ranges.append(max(high-low, abs(high-previous), abs(low-previous)))
+            previous = rows[-1]["close"]
+        if not hasattr(self, "atrs"):
+            self.atrs = {}
+        self.atrs[key] = sum(ranges[-14:])/14 if len(ranges) >= 14 else None
         profiles = defaultdict(dict)
         for raw in data.get("candles", []):
             at = epoch(raw.get("datetime"))
@@ -192,6 +215,20 @@ class Schwab:
             bars[end] = Bar(end, *values[:4], int(values[4]), baseline.get(offset))
         return tuple(bars[k] for k in sorted(bars))
 
+    def warm_universe(self, symbols, now):
+        session = self.session(now)
+        if not session or now >= session[0]-timedelta(minutes=5):
+            return
+        day=now.astimezone(ET).date()
+        missing=[s for s in symbols if (s,day) not in self.baselines]
+        for symbol in missing[:8]:
+            try:
+                self.baseline(symbol,now)
+            except Exception as exc:
+                LOG.warning("Baseline warmup %s unavailable (%s)",symbol,type(exc).__name__)
+        if missing:
+            LOG.info("Pre-open baselines loaded: %d/%d",sum((s,day) in self.baselines for s in symbols),len(symbols))
+
     @staticmethod
     def parse_chain(data: dict) -> tuple[Option, ...]:
         if data.get("isDelayed") is True:
@@ -215,36 +252,47 @@ class Schwab:
 
     def poll(self, symbols: list[str], tracked: dict, max_dte: int) -> list[Snapshot]:
         now = datetime.now(timezone.utc)
+        self.discovery.observations = []
         session = self.session(now)
         if not session or not session[0] <= now < session[1]:
             return []
-        contexts = {}
-        for benchmark in sorted({SECTORS.get(s, "QQQ") for s in symbols}):
-            try:
-                bars = self.bars(benchmark, now, with_baseline=False)
-                if len(bars) >= 6 and (bars[-1].end - bars[-6].end).total_seconds() == 300:
-                    contexts[benchmark] = (bars[-1].close / bars[-6].close - 1, bars[-1].end)
-            except Exception as exc:
-                LOG.warning("Context %s unavailable (%s)", benchmark, type(exc).__name__)
+        benchmarks = {benchmark_for(s) for s in symbols} | {"SPY", "QQQ", "SMH"}
+        requested = sorted(set(symbols) | benchmarks)
+        quotes = self.get("/quotes", {"symbols": ",".join(requested)})
+        parsed = {}
+        for symbol, item in quotes.items():
+            if item.get("realtime") is False:
+                continue
+            q = item.get("quote", {})
+            parsed[symbol] = {
+                "price":number(q.get("lastPrice")), "previous":number(q.get("closePrice")),
+                "open":number(q.get("openPrice")), "volume":number(q.get("totalVolume")),
+                "high":number(q.get("highPrice")), "low":number(q.get("lowPrice")),
+                "at":epoch(q.get("tradeTime")),
+            }
+        selected = self.discovery.update(parsed, datetime.now(timezone.utc), set(symbols), tracked)
         result = []
-        for symbol in symbols:
+        began = time.monotonic()
+        # Continue unfinished cold-start work first; a slow baseline must not starve later names.
+        selected.sort(key=lambda s: (s not in tracked, getattr(self, "last_polled", {}).get(s, 0)))
+        for symbol in selected:
+            if time.monotonic()-began >= 40:
+                LOG.warning("Chain cycle time budget reached; remaining candidates resume next cycle")
+                break
+            if not hasattr(self, "last_polled"):
+                self.last_polled = {}
+            self.last_polled[symbol] = time.monotonic()
             try:
-                # Fetch bars/baselines first so their startup latency cannot age the quote.
                 bars = self.bars(symbol, datetime.now(timezone.utc))
                 data = self.get("/chains", {"symbol": symbol, "contractType": "ALL", "strategy": "SINGLE",
                                             "includeUnderlyingQuote": "true", "strikeCount": 80,
                                             "fromDate": now.astimezone(ET).date().isoformat(),
                                             "toDate": (now.astimezone(ET).date() + timedelta(days=max_dte)).isoformat()})
                 options = list(self.parse_chain(data))
-                quote_response = self.get("/quotes", {"symbols": symbol})
-                item = quote_response.get(symbol, {})
-                if item.get("realtime") is False or data.get("isDelayed") is True:
-                    raise ValueError("delayed entitlement")
-                quote = item.get("quote", {})
-                spot, previous = number(quote.get("lastPrice")), number(quote.get("closePrice"))
-                spot_time = epoch(quote.get("tradeTime"))
-                if not spot_time or not spot or not previous:
-                    raise ValueError("missing underlying source timestamp or price")
+                q = parsed.get(symbol, {})
+                spot, previous, spot_time = q.get("price"), q.get("previous"), q.get("at")
+                if data.get("isDelayed") is True or not spot_time or not spot or not previous:
+                    raise ValueError("missing fresh underlying or delayed entitlement")
                 existing = {o.symbol for o in options}
                 missing = [o for o in tracked.get(symbol, []) if o.symbol not in existing]
                 if missing:
@@ -256,11 +304,29 @@ class Schwab:
                         if qt and bid is not None and ask is not None and item.get("realtime") is not False:
                             options.append(replace(option, quote_time=qt, bid=bid, ask=ask,
                                                    volume=int(number(q.get("totalVolume")) or option.volume)))
-                benchmark = SECTORS.get(symbol, "QQQ")
-                context, context_time = contexts.get(benchmark, (None, None))
-                result.append(Snapshot(symbol, datetime.now(timezone.utc), spot, spot_time, previous,
-                                       bars, tuple(options), context, context_time, benchmark, "schwab", session[1]))
+                at = datetime.now(timezone.utc)
+                benchmark = benchmark_for(symbol)
+                context, context_time = self.discovery.return_5m(benchmark, at)
+                market = "QQQ" if symbol == "SPY" else "SPY"
+                market_return, market_time = self.discovery.return_5m(market, at)
+                peers = []
+                # Genuine peers only; exclude the target and sector ETF itself.
+                for peer in symbols:
+                    if peer != symbol and peer in SECTORS and SECTORS.get(peer) == SECTORS.get(symbol) and symbol in SECTORS:
+                        value, timestamp = self.discovery.return_5m(peer, at)
+                        if value is not None:
+                            peers.append((peer, value, timestamp))
+                peer_return = median(p[1] for p in peers) if len(peers) >= 2 else None
+                leaders = tuple(p[0] for p in sorted(peers, key=lambda p:abs(p[1]), reverse=True)[:3]
+                                if peer_return is not None and p[1]*peer_return > 0)
+                result.append(Snapshot(symbol, at, spot, spot_time, previous, bars, tuple(options),
+                                       context, context_time, benchmark, "schwab", session[1],
+                                       prior_atr=self.atrs.get((symbol, now.astimezone(ET).date())),
+                                       market_return_5m=market_return, market_time=market_time, market_label=market,
+                                       peer_return_5m=peer_return, peer_time=min((p[2] for p in peers), default=None),
+                                       peer_leaders=leaders))
             except Exception as exc:
-                # Exception type only: network errors may embed token-bearing URLs.
                 LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)
+        LOG.info("Discovery: %d/%d fresh quotes, %d promoted, %d chains observed",
+                 len(self.discovery.observations), len(symbols), len(selected), len(result))
         return result

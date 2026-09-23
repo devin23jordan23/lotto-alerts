@@ -6,6 +6,9 @@ class Settings:
     # Research defaults, not fitted probabilities or proven thresholds.
     min_score: float = 72
     min_pace_rvol: float = 2.0
+    min_local_rvol: float = 1.5
+    min_local_acceleration: float = 1.2
+    min_range_atr: float = .2
     min_option_acceleration: float = 1.5
     min_cluster: int = 3
     min_strike_volume_5m: int = 100
@@ -26,7 +29,7 @@ class Settings:
     entry_cutoff_minutes: int = 30
 
     def __post_init__(self):
-        if not 0 < self.min_score <= 100 or self.min_pace_rvol <= 0:
+        if not 0 < self.min_score <= 100 or min(self.min_pace_rvol,self.min_local_rvol,self.min_local_acceleration,self.min_range_atr) <= 0:
             raise ValueError("Invalid score or RVOL threshold")
         for name in ("confirmation_minutes", "max_alerts_per_day", "max_alerts_per_ticker",
                      "max_alerts_per_cycle", "ticker_cooldown_minutes", "rearm_minutes",

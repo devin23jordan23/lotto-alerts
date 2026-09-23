@@ -2,11 +2,13 @@ import io
 import json
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 from lotto.models import ET
 from lotto.schwab import Schwab
+from lotto.discovery import Discovery
+from lotto.main import DEFAULT_UNIVERSE
 
 
 class AdapterTests(unittest.TestCase):
@@ -66,3 +68,27 @@ class AdapterTests(unittest.TestCase):
         self.client.get.return_value = {"equity": {"EQ": {"isOpen": True, "sessionHours": {
             "regularMarket": [{"start": "2026-11-27T09:30:00-05:00", "end": "2026-11-27T13:00:00-05:00"}]}}}}
         self.assertEqual(self.client.session(now)[1].hour, 13)
+
+    def test_full_universe_uses_one_quote_batch_and_bounded_chains(self):
+        now=datetime.now(timezone.utc)
+        client=self.client
+        client.discovery=Discovery(12)
+        client.atrs={}
+        client.session=Mock(return_value=(now-timedelta(hours=1),now+timedelta(hours=1)))
+        client.bars=Mock(return_value=())
+        symbols=DEFAULT_UNIVERSE.split(',')
+        calls=[]
+        def get(path,params):
+            calls.append((path,params))
+            if path=='/quotes':
+                return {s:{'realtime':True,'quote':{'lastPrice':101,'openPrice':100,'closePrice':100,
+                           'totalVolume':100000,'tradeTime':now.timestamp()*1000,'highPrice':102,'lowPrice':99}}
+                        for s in params['symbols'].split(',')}
+            return {'isDelayed':False}
+        client.get=get
+        frame=client.poll(symbols,{},7)
+        self.assertEqual(len(frame),12)
+        self.assertEqual(sum(path=='/quotes' for path,_ in calls),1)
+        self.assertEqual(sum(path=='/chains' for path,_ in calls),12)
+        self.assertEqual(client.bars.call_count,12)
+        self.assertEqual(len(client.discovery.observations),102)

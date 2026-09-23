@@ -15,11 +15,16 @@ def alert_payload(candidate: Candidate) -> dict:
     snap, option = candidate.snapshot, candidate.option
     dte = (option.expiry - snap.at.astimezone(ET).date()).days
     side = "C" if option.side == "CALL" else "P"
+    setup = candidate.setup
+    structure = (f"**{setup.name.replace('_', ' ').title()} · {'BUILDING' if setup.building else 'TRIGGERED'}**\n"
+                 f"Watch ${setup.trigger:.2f} · Invalidation ${setup.invalidation:.2f}\n") if setup else ""
+    metrics = candidate.metrics
     return {"username": "Lotto Scanner", "allowed_mentions": {"parse": []}, "embeds": [{
         "title": "🚨 POTENTIAL LOTTO" if candidate.state != "RUNNER" else "🚀 POTENTIAL RUNNER — NEW LEG",
         "description": f"**{snap.symbol} {option.strike:g}{side} · {option.expiry.isoformat()} · {dte}DTE**\n"
                        f"Ask **${option.ask:.2f}** · Bid ${option.bid:.2f}\n"
-                       f"Runner score: **{candidate.score:.0f}/100**\n" + " · ".join(candidate.reasons),
+                       + structure + f"Stock ${snap.spot:.2f} · From open {metrics['return_from_open']:+.2%} · From prior close {metrics['return_from_close']:+.2%}\n"
+                       f"Setup score: **{candidate.score:.0f}/100** ({candidate.score_change:+.1f} over 3m)\n" + " · ".join(candidate.reasons),
         "color": 0x2ECC71 if option.side == "CALL" else 0xE74C3C,
         "timestamp": snap.at.isoformat(),
     }]}

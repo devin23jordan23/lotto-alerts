@@ -68,6 +68,13 @@ class Snapshot:
     context_label: str = ""
     source: str = "replay"
     session_end: datetime | None = None  # Required for live; respects holidays/early closes.
+    prior_atr: float | None = None  # Completed prior daily sessions only.
+    market_return_5m: float | None = None
+    market_time: datetime | None = None
+    market_label: str = "SPY"
+    peer_return_5m: float | None = None
+    peer_time: datetime | None = None
+    peer_leaders: tuple[str, ...] = ()
 
     @property
     def day(self) -> str:
@@ -87,15 +94,16 @@ class Snapshot:
     @classmethod
     def from_dict(cls, data: dict) -> "Snapshot":
         data = dict(data)
-        for key in ("at", "spot_time", "context_time", "session_end"):
+        for key in ("at", "spot_time", "context_time", "session_end", "market_time", "peer_time"):
             if data.get(key) is not None:
                 data[key] = timestamp(data[key])
         data["bars"] = tuple(Bar(**{**b, "end": timestamp(b["end"])}) for b in data["bars"])
         data["options"] = tuple(Option(**{**o, "expiry": date.fromisoformat(o["expiry"]),
                                            "quote_time": timestamp(o["quote_time"])}) for o in data["options"])
+        data["peer_leaders"] = tuple(data.get("peer_leaders", ()))
         return cls(**data)
 
-    def problems(self, max_age: int = 90) -> list[str]:
+    def problems(self, max_age: int = 90, min_bars: int = 11) -> list[str]:
         if self.at.tzinfo is None or self.spot_time.tzinfo is None:
             return ["timezone missing"]
         local = self.at.astimezone(ET)
@@ -107,8 +115,8 @@ class Snapshot:
             return ["invalid underlying price"]
         if not 0 <= (self.at - self.spot_time).total_seconds() <= max_age:
             return ["stale or future underlying quote"]
-        if len(self.bars) < 16:
-            return ["warming up: 16 completed bars required"]
+        if len(self.bars) < min_bars:
+            return ["warming up: opening range plus one completed bar required"]
         if not 0 <= (self.at - self.bars[-1].end).total_seconds() <= max_age:
             return ["stale or future underlying bars"]
         if len({o.symbol for o in self.options}) != len(self.options):

@@ -16,6 +16,8 @@ from .engine import Engine
 from .models import ET, Snapshot
 from .schwab import Schwab
 from .store import Store
+from .nightly import maybe_nightly, run_nightly
+from .health import check
 
 LOG = logging.getLogger(__name__)
 
@@ -48,7 +50,7 @@ def replay_frames(path):
 
 def main():
     parser = argparse.ArgumentParser(description="Selective potential options runner alerts")
-    parser.add_argument("mode", choices=("demo", "replay", "live", "report", "nightly"), nargs="?", default="demo")
+    parser.add_argument("mode", choices=("demo", "replay", "live", "report", "nightly", "check"), nargs="?", default="demo")
     parser.add_argument("--input", help="Replay JSONL: one snapshot array per scan cycle")
     parser.add_argument("--db", help="SQLite state path")
     parser.add_argument("--day", help="Session date for nightly EOD analysis (YYYY-MM-DD)")
@@ -57,6 +59,11 @@ def main():
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
     data_dir = Path(os.getenv("DATA_DIR", "data"))
     data_dir.mkdir(parents=True, exist_ok=True)
+    if args.mode == "check":
+        symbols=sorted({s.strip().upper() for s in os.getenv("LOTTO_UNIVERSE",DEFAULT_UNIVERSE).split(',') if s.strip()})
+        result=check(Schwab(str(data_dir)),symbols,data_dir)
+        print(json.dumps(result,indent=2))
+        raise SystemExit(0 if result['ready'] else 1)
     database = args.db or str(data_dir / ("live.sqlite3" if args.mode in {"live", "report", "nightly"} else f"{args.mode}.sqlite3"))
     if args.mode == "report":
         print(json.dumps(Store(database).summary(), indent=2))
@@ -64,19 +71,8 @@ def main():
     if args.mode == "nightly":
         store = Store(database)
         day = args.day or (datetime.now(ET).date() - timedelta(days=1)).isoformat()
-        rows = store.end_of_day_options(day)
-        report_dir = data_dir / "nightly"
-        report_dir.mkdir(parents=True, exist_ok=True)
-        report_path = report_dir / f"options-{day}.json"
-        report_path.write_text(json.dumps({
-            "day": day,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "method": "first_valid_ask_to_latest_3_59pm_bid",
-            "sampled_quote_path": True,
-            "warning": "Returns use captured snapshots and can miss intraday NBBO highs/lows.",
-            "contracts": rows,
-        }, indent=2))
-        print(json.dumps({"day": day, "contracts": len(rows), "report": str(report_path)}, indent=2))
+        report_path = run_nightly(store,day,data_dir)
+        print(json.dumps({"day":day,"report":str(report_path)},indent=2))
         return
     Path(database).parent.mkdir(parents=True, exist_ok=True)
     lock = open(database + ".lock", "w")
@@ -115,12 +111,17 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
     LOG.info("Lotto worker started: %d symbols, delivery=%s, daily cap=%d", len(symbols), live_delivery, engine.settings.max_alerts_per_day)
+    try:
+        LOG.info("Startup preflight: %s", json.dumps(check(client,symbols,data_dir)))
+    except Exception as exc:
+        LOG.error("Startup preflight failed (%s); live loop will retry market-data connectivity",type(exc).__name__)
     while not stop:
         began = time.monotonic()
         try:
             today = datetime.now(ET).date().isoformat()
             tracked = store.active_options(today)
             frame = client.poll(sorted(set(symbols) | set(tracked)), tracked, engine.settings.max_dte)
+            store.record_discovery(client.discovery.observations)
             # Poll latency cannot turn an old candidate into a current alert.
             now = datetime.now(timezone.utc)
             frame = [s for s in frame if 0 <= (now - s.at).total_seconds() <= 90]
@@ -137,6 +138,13 @@ def main():
                     store.db.execute("UPDATE alerts SET closed=1 WHERE day=?", (today,))
             engine.history = {k: v for k, v in engine.history.items() if k[0] == today}
             LOG.info("Cycle complete: %d symbols observed, %d potential alerts", len(frame), len(alerts))
+            # Useful reasons must be visible in deployment logs, including a zero-alert day.
+            counts = store.db.execute("SELECT reason,COUNT(*) AS n FROM decisions WHERE at>=? GROUP BY reason ORDER BY n DESC LIMIT 5",
+                                     ((now-timedelta(minutes=5)).isoformat(),)).fetchall()
+            if counts:
+                LOG.info("Recent decision reasons: %s", "; ".join(f"{r['n']}× {r['reason']}" for r in counts))
+            maybe_nightly(store,client,symbols,data_dir,now)
+            client.warm_universe(symbols, now)
         except Exception as exc:
             detail = str(exc) if type(exc) is RuntimeError else type(exc).__name__
             LOG.error("Cycle failed (%s); retaining state for retry", detail)

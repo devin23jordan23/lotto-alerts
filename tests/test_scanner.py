@@ -116,8 +116,8 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(len(restarted_store.summary()), 1)
 
     def test_one_bar_repeated_cannot_confirm(self):
-        self.run_frames(frames=self.frames[:26])
-        snap = self.frames[25][0]
+        self.run_frames(frames=self.frames[:12])
+        snap = self.frames[11][0]
         for second in (10, 20, 30, 40, 50):
             self.assertFalse(self.engine.process([replace(snap, at=snap.at+timedelta(seconds=second))]))
         self.assertFalse(self.store.summary())
@@ -158,16 +158,18 @@ class ScannerTests(unittest.TestCase):
         self.assertTrue(rows)
         row = next(item for item in rows if item["contract"] == "DEMO-110C")
         self.assertAlmostEqual(row["entry_ask"], .8)
-        self.assertAlmostEqual(row["close_bid"], 4.95)
-        self.assertAlmostEqual(row["open_to_close_return"], 4.95 / .8 - 1)
-        self.assertGreaterEqual(row["max_return"], row["open_to_close_return"])
+        self.assertAlmostEqual(row["last_observed_bid"], 4.95)
+        self.assertAlmostEqual(row["observed_return"], 4.95 / .8 - 1)
+        self.assertIsNone(row["close_bid"])
+        self.assertIsNone(row["open_to_close_return"])
+        self.assertAlmostEqual(row["max_bid"], 4.95)
         self.assertTrue(row["sampled_path"])
 
     def test_end_of_day_does_not_fabricate_without_a_valid_exit_bid(self):
         self.run_frames(lambda s: replace(s, options=tuple(replace(o, bid=0) for o in s.options)))
         rows = self.store.end_of_day_options("2026-09-21")
         self.assertTrue(rows)
-        self.assertTrue(all(row["close_bid"] == 0 for row in rows))
+        self.assertTrue(all(row["last_observed_bid"] == 0 for row in rows))
 
 
 if __name__ == "__main__":

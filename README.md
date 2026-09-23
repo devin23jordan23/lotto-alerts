@@ -1,171 +1,149 @@
 # Lotto Alerts
 
-Selective intraday **potential** options runner alerts using Schwab market data,
-a Railway worker, and a dedicated Discord webhook. The goal is a few strong
-opportunities that can be followed for outsized options moves, including 500%+.
-The scanner does not predict or promise a 500% return, and places no orders.
+Selective intraday **potential** options ideas using Schwab, Railway and Discord.
+No orders are placed. Scores are research rules, not probabilities or promised returns.
 
-## Current version
+## Universe and collection
 
-- Discovery → confirmed ignition → runner tracking → cooling/rearm.
-- Symmetric bullish calls and bearish puts, evaluated separately by expiration.
-- Same-time stock RVOL using the median of up to 20 prior sessions, requiring
-  at least 10 usable sessions. Today's observations never enter the baseline.
-- Completed one-minute bars, rising/falling VWAP, directional efficiency,
-  proximity to the session extreme, controlled opposing volume, and momentum.
-- Option volume changes over rolling five-minute windows, acceleration,
-  adjacent active strikes, and spot-adjusted strike migration.
-- Sector confirmation: SMH for semiconductors, IBIT as a **Bitcoin ETF proxy**
-  for crypto equities, XBI for MRNA, and QQQ as the default benchmark.
-- Separate prior-close return, opening gap, and return from the regular-session
-  open. A large existing percentage gain does not automatically disqualify a name.
-- Contract selection by quoted price, spread, delta, gamma, moneyness and DTE.
-- SQLite persistence for observations, decisions, queued alerts and outcomes.
-- Nightly end-of-day option report for the configured universe: first valid
-  regular-session ask versus the latest bid captured by 3:59 PM, plus sampled
-  favorable/adverse excursions.
+The default universe is the same 102 names as the unusual-options scanner.
+Set `LOTTO_UNIVERSE` explicitly in Railway; an old environment value overrides
+the code default. No case-study ticker list replaces the configured universe.
 
-This first implementation uses configurable research rules. It has not been
-validated against historical OPRA data or connected to live credentials in its
-initial development tests. The configured universe is intentional; nightly
-analysis evaluates those names only and does not claim to scan every U.S. stock.
-The intended production value for `LOTTO_UNIVERSE` is the same list as the
-existing unusual-options scanner's `UOA_CORE_UNIVERSE`, with `UOA_IN_PLAY` names
-appended when that temporary list is used.
+Every cycle requests stock quotes for the **whole universe** in one batch.
+Up to `LOTTO_CHAIN_CAPACITY=12` developing names receive minute bars and options
+chains, plus previously alerted names for outcome tracking. Promotion uses price
+movement, intraday range and recent volume acceleration. Leases preserve up to
+25 minutes of option history; a much stronger newcomer can displace one name.
+All discovery observations and promotions are recorded. Names outside that pool
+do not have continuous option-chain coverage, and option warmup follows promotion.
 
-## Alert restraint
+A 40-second chain collection budget prevents the old multi-minute full-chain loop
+from silently aging out most observations. Cold starts resume unfinished names
+first. Before the open, historical volume baselines are loaded eight names per
+cycle. One worker and a persistent volume are required.
 
-Defaults are **at most five new ideas per trading day**, one per scan cycle,
-two per ticker, with a 45-minute ticker cooldown. A setup must persist for three
-minutes across distinct completed bars. Re-alerting also needs a measured reset,
-a fresh qualifying setup and a different contract. Zero alerts is valid.
+## Developing setups
 
-Candidates are ranked across the scan before the daily budget is spent. No new
-entries are issued in the last 30 minutes of the regular session. Schwab market
-hours determine holidays and early closes. The live worker must obtain that
-calendar successfully before scanning.
+The same symmetric call/put rules apply to every name:
 
-Example format (illustrative, not a real signal):
+- Opening break: the first ten-minute range breaks in the direction of the open,
+  prior close and VWAP.
+- Reversal: VWAP is reclaimed or lost with directional acceleration. A bullish
+  reversal need not already be above yesterday's close.
+- Coiled continuation: a prior impulse followed by a 30-, 60- or 120-minute
+  tight range, VWAP acceptance and sustained options activity.
+- Continuation: directional efficiency, VWAP acceptance and proximity to the
+  current session extreme.
 
-```text
-🚨 POTENTIAL LOTTO
-XYZ 105C · YYYY-MM-DD · 1DTE
-Ask $0.80 · Bid $0.75
-Runner score: 78/100
-Stock pace 3.1× · Options velocity 2.8× · 4 neighboring strikes · SMH confirms
-```
+Alerts distinguish **BUILDING** from **TRIGGERED**, with a trigger, invalidation,
+stock price, returns from open/prior close, stock volume, options activity and
+independent market/sector context. TSM maps to SMH; QQQ uses SPY rather than itself.
+Peer confirmation excludes the target. Relative ETF leadership can qualify
+against a flat benchmark.
 
-## Score and data limits
+Stock volume can qualify through either high cumulative same-time pace or a
+local five-minute volume burst accompanied by ATR expansion. Baselines use prior
+sessions only. ATR uses 14 prior true ranges. Thresholds remain uncalibrated
+research defaults; the historical case study is not proof of an edge.
 
-The original 100-point research framework is preserved: price 20, stock volume
-20, options flow 20, breadth 12, migration 13, context 10, liquidity 5.
-Schwab chain snapshots do **not** identify trade aggressors or new opening
-positions. This version awards at most 12/20 flow points from option velocity;
-the other 8 points remain unavailable. Sector confirmation supplies 5/10 context
-points; the remaining 5 catalyst points stay unavailable without a news feed.
-The obtainable score is therefore **87/100**, with a default threshold of 72;
-missing evidence is never normalized into full confidence. Scores are not odds.
+Options evidence requires synchronized fresh quotes, multiple neighboring active
+strikes, ten minutes of comparable counters and either acceleration or sustained
+twenty-minute activity. Coils require the sustained path. Volume-counter resets,
+missing observations and large time gaps invalidate that evidence. Chains do
+**not** establish ask-side buying, aggressor direction or opening-position intent.
 
-Option volume is cumulative snapshot data. Its differences are activity proxies,
-not signed premium, sweep detection, trade counts or verified buyer initiation.
-Contract-level historical same-time option RVOL is not available in this version.
-Migration is volume-weighted and spot-adjusted, not aggressor-weighted.
-0DTE, 1DTE and later eligible expirations are evaluated separately.
+Contract selection checks spread, price, delta, gamma, moneyness and DTE.
+Unavailable signed-flow and catalyst evidence receives no points: the research
+score's maximum is 87/100, with a default threshold of 72.
 
-Stale/future quotes, missing stock baselines, incomplete session bars, delayed
-entitlements, option volume-counter resets and large observation gaps block
-affected setups. An initial regular-session startup needs 16 completed bars,
-then roughly 10 minutes of options observations and 3 minutes of confirmation.
-A restart can reload recorded observations but must reconfirm persistence.
+## Alert restraint and observability
 
-## Outcome tracking
+Defaults: five ideas per day, one per cycle, two per ticker, three minutes of
+confirmation on distinct completed bars, 45-minute ticker cooldown and a fresh
+reset/new contract for re-alerting. The earliest possible opening signal is
+approximately 9:44 ET if observations begin at the open and all gates qualify.
+New ideas stop 30 minutes before the actual session close.
 
-Every emitted potential idea stores its original **entry ask**. Subsequent fresh
-bid quotes update observed favorable/adverse returns and first observed +50%,
-+100%, +200%, +300% and +500% milestones. A +500% gain means the later bid is
-six times the entry ask. Tracking is intraday; it closes at session end.
-Missing quotes are gaps, not fills or losses. These are sampled quote returns,
-not actual trade executions, and polling can miss intervening highs/lows.
-Last available quote timestamps remain visible in the report.
+Logs show the whole-universe quote count, promoted chain count, missing-data
+conditions, and recent rejection reasons. Decisions persist the setup, features,
+score, contract and blockers. Ranking rewards rising scores; materially falling
+scores cannot alert. An empty alert day is investigated through those records,
+not solved by manufacturing signals.
 
-Milestones are saved to the database; this version posts only new potential
-ideas to Discord, keeping the channel concise. Tracking continues after the
-entry cutoff and after the new-alert budget is exhausted.
+## Nightly review
 
-## Nightly end-of-day review
+The worker automatically reviews the session five minutes after Schwab's actual
+close, including early closes. Completion is persisted; a restart can catch up
+the most recent captured session outside market hours.
 
-After the session, run:
+The review downloads minute history for **every configured name**, including
+unpromoted names, and evaluates price prefixes without future input leakage.
+It saves failed and successful price hypotheses, captured candidate features,
+subsequent 5/15/30/60-minute stock returns, rejection reasons and discovery
+coverage. Reports are written to `DATA_DIR/nightly/YYYY-MM-DD/report.json`.
+This establishes a research feedback loop; it does not automatically rewrite
+live thresholds or claim to be a trained predictive model.
+
+Captured option returns use entry ask to subsequent bid, fresh deduplicated
+quotes and actual quote timestamps. Reports distinguish observed intervals from
+open-to-close coverage. The latter is unavailable without quotes in the first
+and last session minutes. Zero bids remain valid -100% observations. No final
+chain snapshot can reconstruct unrecorded intraday option quotes or peak returns.
+Returns are sampled quotes, not actual executions.
+
+Offline report from captured observations:
 
 ```bash
 python3 -m lotto.main nightly --db /app/data/live.sqlite3 --day YYYY-MM-DD
 ```
 
-If `--day` is omitted, the previous calendar day is used. The command reads the
-captured snapshots for the configured `LOTTO_UNIVERSE` and writes
-`/app/data/nightly/options-YYYY-MM-DD.json`. For each contract observed from
-9:30 AM through 3:59 PM it records the first valid ask, latest valid bid,
-open-to-close return, and sampled maximum/minimum bid return. A contract must
-have valid captured quotes; the job does not infer missing prices.
+Offline reports do not mark the automatic full-universe job complete. Daily
+cohorts count only the first symbol/side/setup observation, rather than treating
+overlapping minute samples as independent trials. No automatic parameter
+promotion occurs.
 
-This is a sampled quote report. It can miss a brief intraday high between polls,
-and it cannot reconstruct contracts that were never captured. It is intended to
-describe what happened in the configured universe and improve the scanner's
-research dataset, not to claim a complete historical options tape.
+## Railway
 
-## Railway setup
+- GitHub: `devin23jordan23/lotto-alerts`, branch `main`.
+- Dockerfile and `railway.json` run `python -m lotto.main live`.
+- One replica, persistent volume at `/app/data`, `DATA_DIR=/app/data`.
+- Shared authentication: `SCHWAB_TOKEN_BROKER_URL` and
+  `SCHWAB_TOKEN_BROKER_KEY`. Direct client/refresh credentials remain supported.
+- Dedicated channel: `DISCORD_LOTTO_WEBHOOK`.
+- Set `LOTTO_SEND_ALERTS=true` for delivery. False is shadow observation.
+- Set the complete `LOTTO_UNIVERSE`; see [.env.example](.env.example).
 
-1. Create a Railway service from `devin23jordan23/lotto-alerts`, branch `main`.
-2. The included Dockerfile and `railway.json` run `python -m lotto.main live`.
-   This is a long-running worker; no public domain or HTTP healthcheck is needed.
-3. Attach a persistent volume at `/app/data` and set `DATA_DIR=/app/data`.
-   Use **one replica** so daily budgets, duplicate suppression and tokens share
-   one state database. The worker also takes an exclusive file lock.
-4. Set `SCHWAB_CLIENT_ID`, `SCHWAB_CLIENT_SECRET`, `SCHWAB_REFRESH_TOKEN`, and
-   `DISCORD_LOTTO_WEBHOOK`. Use the existing authorized Schwab connection and a
-   dedicated lotto webhook. Never put real credentials in GitHub.
-5. Start with `LOTTO_SEND_ALERTS=false` for shadow observation, then set it to
-   `true` to enable Discord. Shadow ideas are tracked and consume that day's
-   budget; they are never retroactively sent when the flag changes.
+The worker logs a startup preflight. It reads quotes, a sample chain, session
+hours, database integrity and webhook metadata. It sends no test message.
+The manual equivalent is:
 
-All tuning variables are listed in [.env.example](.env.example). Railway injects
-them; the Python worker does not automatically load a local `.env` file.
-Tokens are refreshed and saved with restricted file permissions on the volume.
-Expired Schwab refresh authorization must be renewed through your existing
-authorization workflow; an invalid persisted token file must also be replaced.
-Saved raw observations accumulate for replay; provision storage and archive
-older observations as needed.
+```bash
+python3 -m lotto.main check
+```
 
-Discord alerts are persisted before delivery. An uncertain response is **not
-automatically resent**, avoiding duplicate posts after timeouts or crashes.
-Rate-limited pending alerts can retry next cycle, but expire after two minutes.
-Uncertain/failed/expired delivery remains visible in the report and still counts
-toward the budget. Check the channel before any manual resend.
+An after-hours preflight verifies configuration and connectivity, not intraday
+freshness or strategy performance. Snapshots and archived bars are compressed;
+older uncompressed snapshots remain readable. Raw observations accumulate; monitor volume
+usage and archive older sessions. Historical baseline caches are rebuilt after
+restart.
 
-Railway configuration follows the [official config-as-code reference](https://docs.railway.com/config-as-code/reference).
-Schwab endpoint behavior was cross-checked against the
-[schwab-py maintainer documentation](https://schwab-py.readthedocs.io/en/latest/client.html)
-and the existing scanner's read-only integration. Live entitlement and response
-compatibility still require a shadow run with the account.
+Discord messages are queued before delivery. Uncertain sends are not
+automatically repeated; expired, failed and uncertain states remain visible.
+Only potential ideas are posted; milestones and nightly research remain in
+the database/reports.
 
-## Local verification and replay
+## Verification
 
-Python 3.11+ on macOS/Linux; only the standard library is required.
+Python 3.11+ on macOS/Linux; standard library only.
 
 ```bash
 python3 -m unittest discover -s tests -v
 python3 -m lotto.main demo --db /tmp/lotto-demo.sqlite3
-python3 -m lotto.main report --db /tmp/lotto-demo.sqlite3
 python3 -m lotto.main replay --input observations.jsonl --db /tmp/lotto-replay.sqlite3
 ```
 
-The demo is explicitly synthetic and never sends to Discord. Replays also never
-send. Use a new database for each independent experiment; reusing one intentionally
-preserves its duplicate suppression. Replay JSONL accepts one array of snapshots
-per scan cycle, using `Snapshot.to_dict()` from `lotto/models.py`. Preserve the
-arrays so candidates are ranked together. Timestamps must include UTC offsets.
-Tests cover persistence, failure cases, call/put symmetry, liquidity gates,
-session boundaries, budgets, restart suppression and ask-to-bid milestone math.
+Demo and replay never send to Discord. Use a fresh database for independent
+experiments. Replay JSONL contains arrays of `Snapshot.to_dict()` observations,
+one array per cycle. All timestamps need offsets.
 
-Future calibration must compare runners against similar failed setups with
-timestamp-frozen features and actual executable quotes. The synthetic demo and
-unit tests establish software behavior, not an edge or a real-world hit rate.
+Case-study research: [September 21–22 review](docs/session-research-2026-09-22.md).

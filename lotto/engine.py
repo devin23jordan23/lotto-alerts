@@ -29,7 +29,7 @@ class Engine:
             key = (snap.day, snap.symbol)
             if key not in self.history:
                 self.history[key] = [s for s in self.store.recent(snap.symbol, snap.day)
-                                     if not s.problems(cfg.max_quote_age_seconds)]
+                                     if not s.problems(cfg.max_quote_age_seconds, min_bars=1)]
             history = self.history[key]
             if history and snap.at <= history[-1].at:
                 continue
@@ -37,6 +37,8 @@ class Engine:
             self.store.track(snap, cfg)
             problems = snap.problems(cfg.max_quote_age_seconds)
             if problems:
+                if not snap.problems(cfg.max_quote_age_seconds, min_bars=1):
+                    history.append(snap)  # Capture opening options history before price setup warmup.
                 self.store.decision(snap, "DISCOVERY", "; ".join(problems))
                 self._clear_confirmation(key)
                 self.cool_since.pop(key, None)
@@ -47,7 +49,7 @@ class Engine:
             self.last_bar[key] = snap.bars[-1].end
             evaluated = candidates(snap, history, cfg)
             history.append(snap)
-            self.history[key] = [s for s in history if snap.at - s.at <= timedelta(minutes=20)]
+            self.history[key] = [s for s in history if snap.at - s.at <= timedelta(minutes=25)]
             valid = [c for c in evaluated if c.qualifying]
             best = max(evaluated, key=lambda c: c.score, default=None)
             if not valid:
@@ -62,11 +64,11 @@ class Engine:
                 else:
                     self.cool_since.pop(key, None)
                 self.store.decision(snap, "COOLING" if self.store.last_alert(*key) else "DISCOVERY",
-                                    "waiting for synchronized, persistent qualifying structure", best)
+                                    "; ".join(best.blockers) if best else "options history, liquidity, or neighboring-strike activity unavailable", best)
                 continue
             self.cool_since.pop(key, None)
             best = max(valid, key=lambda c: c.score)
-            score_key = (*key, best.option.side, best.option.expiry.isoformat())
+            score_key = (*key, best.option.side, best.option.expiry.isoformat(), best.setup.name)
             for other in list(self.qualified_since):
                 if other[:2] == key and other != score_key:
                     self.qualified_since.pop(other, None)
@@ -105,7 +107,7 @@ class Engine:
             ready.append(best)
         alerts = []
         # Rank the whole scan cycle before spending the daily budget.
-        for candidate in sorted(ready, key=lambda c: (-c.score, -c.score_change, c.snapshot.symbol)):
+        for candidate in sorted(ready, key=lambda c: (-(c.score + 2*min(8, max(-8, c.score_change))), -c.score, c.snapshot.symbol)):
             snap = candidate.snapshot
             if (len(alerts) >= cfg.max_alerts_per_cycle
                     or self.store.count(snap.day) >= cfg.max_alerts_per_day
