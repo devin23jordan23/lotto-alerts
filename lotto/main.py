@@ -136,7 +136,10 @@ def main():
                 session = client.session(now)
                 if session and now >= session[1]:
                     store.db.execute("UPDATE alerts SET closed=1 WHERE day=?", (today,))
-            engine.history = {k: v for k, v in engine.history.items() if k[0] == today}
+            # Released candidates stay on disk; retaining every name's full chains
+            # in RAM all day can exhaust a small Railway worker.
+            engine.history = {k: v for k, v in engine.history.items()
+                              if k[0] == today and v and now-v[-1].at <= timedelta(minutes=30)}
             LOG.info("Cycle complete: %d symbols observed, %d potential alerts", len(frame), len(alerts))
             # Useful reasons must be visible in deployment logs, including a zero-alert day.
             counts = store.db.execute("SELECT reason,COUNT(*) AS n FROM decisions WHERE at>=? GROUP BY reason ORDER BY n DESC LIMIT 5",
