@@ -12,7 +12,7 @@ the code default. No case-study ticker list replaces the configured universe.
 Every cycle requests stock quotes for the **whole universe** in one batch.
 The worker also rotates `/chains` requests across every configured symbol:
 up to `LOTTO_SWEEP_PER_CYCLE=24` non-promoted names per minute, due again after
-`LOTTO_SWEEP_MINUTES=5`. Up to `LOTTO_CHAIN_CAPACITY=18` developing names
+`LOTTO_SWEEP_MINUTES=4`. Up to `LOTTO_CHAIN_CAPACITY=18` developing names
 receive minute bars and chains each cycle, plus previously alerted names for
 outcome tracking. At normal request speed, the 102-name chain sweep completes
 in roughly four cycles. The log reports the actual count covered within five

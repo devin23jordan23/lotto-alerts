@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 
 class ChainCoverage:
-    def __init__(self, interval_minutes=5):
+    def __init__(self, interval_minutes=4):
         self.interval = timedelta(minutes=interval_minutes)
         self.day = None
         self.last = {}

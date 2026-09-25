@@ -66,7 +66,7 @@ class Schwab:
         self.calendar_cache = {}
         self.atrs = {}
         self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "18")))
-        self.coverage = ChainCoverage(int(os.getenv("LOTTO_SWEEP_MINUTES", "5")))
+        self.coverage = ChainCoverage(int(os.getenv("LOTTO_SWEEP_MINUTES", "4")))
 
     def token(self, force=False):
         if self.broker_url:
