@@ -69,7 +69,7 @@ class AdapterTests(unittest.TestCase):
             "regularMarket": [{"start": "2026-11-27T09:30:00-05:00", "end": "2026-11-27T13:00:00-05:00"}]}}}}
         self.assertEqual(self.client.session(now)[1].hour, 13)
 
-    def test_full_universe_uses_one_quote_batch_and_bounded_chains(self):
+    def test_full_universe_chain_sweep_reaches_every_name(self):
         now=datetime.now(timezone.utc)
         client=self.client
         client.discovery=Discovery(18)
@@ -89,6 +89,9 @@ class AdapterTests(unittest.TestCase):
         frame=client.poll(symbols,{},7)
         self.assertEqual(len(frame),18)
         self.assertEqual(sum(path=='/quotes' for path,_ in calls),1)
-        self.assertEqual(sum(path=='/chains' for path,_ in calls),18)
-        self.assertEqual(client.bars.call_count,18)
+        self.assertEqual(sum(path=='/chains' for path,_ in calls),42)
+        for _ in range(3):
+            client.poll(symbols,{},7)
+        self.assertEqual({params['symbol'] for path,params in calls if path=='/chains'},set(symbols))
+        self.assertEqual(client.coverage.count_fresh(symbols,datetime.now(timezone.utc)),102)
         self.assertEqual(len(client.discovery.observations),102)

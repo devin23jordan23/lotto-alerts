@@ -77,10 +77,29 @@ def run_nightly(store, day, directory, symbols=(), client=None):
             grouped.setdefault(name,[]).append(value)
     coverage = [dict(r) for r in store.db.execute(
         "SELECT symbol, COUNT(*) AS quote_observations, SUM(promoted) AS promoted_observations FROM discovery WHERE day=? GROUP BY symbol",(day,))]
+    chain_coverage = [dict(r) for r in store.db.execute(
+        """SELECT symbol, COUNT(*) AS chain_observations,
+           SUM(promoted) AS deep_observations, MAX(flow_cluster) AS largest_three_strike_volume_increase,
+           SUM(CASE WHEN flow_cluster>=300 THEN 1 ELSE 0 END) AS flow_events
+           FROM chain_coverage WHERE day=? GROUP BY symbol""", (day,))]
+    flow_events = []
+    for row in store.db.execute("""SELECT symbol,at,spot,flow_side,flow_cluster FROM chain_coverage
+        WHERE day=? AND flow_cluster>=300 ORDER BY at""", (day,)):
+        at = datetime.fromisoformat(row["at"])
+        direction = 1 if row["flow_side"] == "CALL" else -1
+        prices = tape.get(row["symbol"], {})
+        labels = {}
+        for minutes in (5, 15, 30, 60):
+            target = at+timedelta(minutes=minutes)
+            matches = [(t,p) for t,p in prices.items() if target <= t <= target+timedelta(seconds=60)]
+            labels[f"stock_return_{minutes}m_directional"] = (
+                direction*(min(matches)[1]/row["spot"]-1) if matches and row["spot"] else None)
+        flow_events.append({**dict(row), "future_labels":labels})
     result = {
         "day":day,"generated_at":datetime.now(timezone.utc).isoformat(),
         "universe":list(symbols),"universe_size":len(symbols),"full_universe_price_research":client is not None,
-        "data_errors":errors,"discovery_coverage":coverage,
+        "data_errors":errors,"discovery_coverage":coverage,"chain_coverage":chain_coverage,
+        "universe_flow_events":flow_events,
         "research_notes":["Price setups are hypotheses, not confirmed option alerts.",
                           "Historical bars cannot reconstruct unrecorded intraday option quotes or aggressor side.",
                           "Future labels never enter the feature calculation. No automatic live threshold changes.",

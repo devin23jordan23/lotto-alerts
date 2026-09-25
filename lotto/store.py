@@ -43,6 +43,11 @@ class Store:
             CREATE INDEX IF NOT EXISTS discovery_day ON discovery(day);
             CREATE TABLE IF NOT EXISTS nightly_runs (
                 day TEXT PRIMARY KEY, generated_at TEXT, report TEXT);
+            CREATE TABLE IF NOT EXISTS chain_coverage (
+                day TEXT, symbol TEXT, at TEXT, promoted INTEGER, contracts INTEGER,
+                spot REAL, flow_side TEXT, flow_cluster INTEGER,
+                PRIMARY KEY(symbol, at));
+            CREATE INDEX IF NOT EXISTS chain_coverage_day ON chain_coverage(day, symbol);
         """)
 
     def record(self, snap: Snapshot) -> None:
@@ -57,6 +62,15 @@ class Store:
                 self.db.execute("INSERT OR IGNORE INTO discovery VALUES (?, ?, ?, ?, ?)",
                                 (at.astimezone(ET).date().isoformat(), row["symbol"], at.isoformat(),
                                  int(row["promoted"]), json.dumps(row, default=lambda v:v.isoformat())))
+
+    def record_chain_coverage(self, rows):
+        with self.db:
+            self.db.executemany("""INSERT OR IGNORE INTO chain_coverage
+                (day,symbol,at,promoted,contracts,spot,flow_side,flow_cluster)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                [(r["at"].astimezone(ET).date().isoformat(), r["symbol"], r["at"].isoformat(),
+                  int(r["promoted"]), r["contracts"], r["spot"], r["flow_side"], r["flow_cluster"])
+                 for r in rows])
 
     def decision(self, snap: Snapshot, state: str, reason: str, candidate: Candidate | None = None):
         with self.db:

@@ -129,6 +129,7 @@ def main():
             tracked = store.active_options(today)
             frame = client.poll(sorted(set(symbols) | set(tracked)), tracked, engine.settings.max_dte)
             store.record_discovery(client.discovery.observations)
+            store.record_chain_coverage(client.coverage.rows)
             # Poll latency cannot turn an old candidate into a current alert.
             now = datetime.now(timezone.utc)
             frame = [s for s in frame if 0 <= (now - s.at).total_seconds() <= 90]

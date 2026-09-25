@@ -16,7 +16,7 @@ class Discovery:
         self.day = None
         self.observations = []
 
-    def update(self, quotes, now, universe, tracked=()):
+    def update(self, quotes, now, universe, tracked=(), flow_priorities=None):
         day = now.date()
         if self.day != day:
             self.history.clear()
@@ -42,7 +42,8 @@ class Discovery:
             high, low = q.get("high"), q.get("low")
             excursion = max(abs(price/opening-1), abs(price/previous-1))
             intraday_range = (high-low)/opening if high and low else 0
-            score = 100*(abs(ret5 or 0)*3 + excursion + intraday_range*.5) + min(3, acceleration or 0)
+            score = (100*(abs(ret5 or 0)*3 + excursion + intraday_range*.5)
+                     + min(3, acceleration or 0) + (flow_priorities or {}).get(symbol, 0))
             record = {**q, "symbol":symbol, "observed_at":now, "return_5m":ret5,
                       "volume_5m":delta, "volume_acceleration":acceleration, "priority":score}
             if not history or at > history[-1]["at"]:

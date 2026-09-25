@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 from .models import Bar, ET, Option, Snapshot
 from .discovery import Discovery
+from .coverage import ChainCoverage
 
 LOG = logging.getLogger(__name__)
 BASE = "https://api.schwabapi.com/marketdata/v1"
@@ -65,6 +66,7 @@ class Schwab:
         self.calendar_cache = {}
         self.atrs = {}
         self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "18")))
+        self.coverage = ChainCoverage(int(os.getenv("LOTTO_SWEEP_MINUTES", "5")))
 
     def token(self, force=False):
         if self.broker_url:
@@ -252,6 +254,9 @@ class Schwab:
 
     def poll(self, symbols: list[str], tracked: dict, max_dte: int) -> list[Snapshot]:
         now = datetime.now(timezone.utc)
+        if not hasattr(self, "coverage"):
+            self.coverage = ChainCoverage()
+        self.coverage.reset(now.astimezone(ET))
         self.discovery.observations = []
         session = self.session(now)
         if not session or not session[0] <= now < session[1]:
@@ -270,14 +275,33 @@ class Schwab:
                 "high":number(q.get("highPrice")), "low":number(q.get("lowPrice")),
                 "at":epoch(q.get("tradeTime")),
             }
-        selected = self.discovery.update(parsed, datetime.now(timezone.utc), set(symbols), tracked)
+        selected = self.discovery.update(parsed, datetime.now(timezone.utc), set(symbols), tracked,
+                                         self.coverage.priorities(now))
         result = []
         began = time.monotonic()
+        sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "24")))
+        sweep_targets = self.coverage.due(symbols, now, selected, sweep_limit)
+        for symbol in sweep_targets:
+            if time.monotonic()-began >= 27:
+                LOG.warning("Universe chain sweep time budget reached; remaining names resume next cycle")
+                break
+            self.coverage.attempt(symbol, datetime.now(timezone.utc))
+            try:
+                data = self.get("/chains", {"symbol":symbol, "contractType":"ALL", "strategy":"SINGLE",
+                                            "includeUnderlyingQuote":"true", "strikeCount":80,
+                                            "fromDate":now.astimezone(ET).date().isoformat(),
+                                            "toDate":(now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()})
+                if data.get("isDelayed") is True:
+                    raise ValueError("delayed option chain")
+                self.coverage.observe(symbol, datetime.now(timezone.utc), self.parse_chain(data),
+                                      parsed.get(symbol, {}).get("price"))
+            except Exception as exc:
+                LOG.warning("Universe chain sweep %s unavailable (%s)", symbol, type(exc).__name__)
         # Continue unfinished cold-start work first; a slow baseline must not starve later names.
         selected.sort(key=lambda s: (s not in tracked, getattr(self, "last_polled", {}).get(s, 0)))
         for symbol in selected:
-            if time.monotonic()-began >= 40:
-                LOG.warning("Chain cycle time budget reached; remaining candidates resume next cycle")
+            if time.monotonic()-began >= 54:
+                LOG.warning("Deep chain time budget reached; remaining candidates resume next cycle")
                 break
             if not hasattr(self, "last_polled"):
                 self.last_polled = {}
@@ -289,6 +313,9 @@ class Schwab:
                                             "fromDate": now.astimezone(ET).date().isoformat(),
                                             "toDate": (now.astimezone(ET).date() + timedelta(days=max_dte)).isoformat()})
                 options = list(self.parse_chain(data))
+                if data.get("isDelayed") is not True:
+                    self.coverage.observe(symbol, datetime.now(timezone.utc), options,
+                                          parsed.get(symbol, {}).get("price"), promoted=True)
                 q = parsed.get(symbol, {})
                 spot, previous, spot_time = q.get("price"), q.get("previous"), q.get("at")
                 if data.get("isDelayed") is True or not spot_time or not spot or not previous:
@@ -327,6 +354,8 @@ class Schwab:
                                        peer_leaders=leaders))
             except Exception as exc:
                 LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)
-        LOG.info("Discovery: %d/%d fresh quotes, %d promoted, %d chains observed",
-                 len(self.discovery.observations), len(symbols), len(selected), len(result))
+        LOG.info("Discovery: %d/%d fresh quotes, %d promoted, %d deep chains; universe chains %d/%d fresh within %d min (%d this cycle)",
+                 len(self.discovery.observations), len(symbols), len(selected), len(result),
+                 self.coverage.count_fresh(symbols, datetime.now(timezone.utc)), len(symbols),
+                 self.coverage.interval.seconds//60, len(self.coverage.rows))
         return result

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from lotto.config import Settings
 from lotto.demo import demo_frames
 from lotto.discovery import Discovery
+from lotto.coverage import ChainCoverage
 from lotto.engine import Engine
 from lotto.features import candidates, persistent_activity
 from lotto.main import DEFAULT_UNIVERSE
@@ -75,6 +76,25 @@ class DevelopingTests(unittest.TestCase):
         self.assertEqual(len(discovery.observations),102)
         self.assertEqual({r['symbol'] for r in discovery.observations},set(symbols))
         self.assertEqual(sum(r['promoted'] for r in discovery.observations),12)
+
+    def test_unpromoted_three_strike_flow_promotes_early(self):
+        from dataclasses import replace
+        now=self.frames[20].at
+        flow=ChainCoverage()
+        options=self.frames[20].options[:3]
+        # Use a common expiry/side and adjacent strikes, like a call sweep.
+        options=tuple(replace(o, side='CALL', expiry=options[0].expiry,
+                              strike=100+i, volume=100) for i,o in enumerate(options))
+        flow.observe('QUIET',now,options)
+        flow.observe('QUIET',now+timedelta(minutes=5),
+                     tuple(replace(o,volume=250) for o in options))
+        self.assertGreaterEqual(flow.priorities(now+timedelta(minutes=5))['QUIET'],15)
+        d=Discovery(4)
+        symbols=['A','B','C','D','QUIET']
+        q={s:{'price':100,'open':100,'previous':100,'volume':1000,
+              'at':now+timedelta(minutes=5)} for s in symbols}
+        self.assertIn('QUIET',d.update(q,now+timedelta(minutes=5),set(symbols),
+                                       flow_priorities=flow.priorities(now+timedelta(minutes=5))))
 
     def test_lease_stability_and_strong_newcomer_promotion(self):
         now=self.frames[20].at; d=Discovery(4)

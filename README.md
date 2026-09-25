@@ -10,18 +10,27 @@ Set `LOTTO_UNIVERSE` explicitly in Railway; an old environment value overrides
 the code default. No case-study ticker list replaces the configured universe.
 
 Every cycle requests stock quotes for the **whole universe** in one batch.
-Up to `LOTTO_CHAIN_CAPACITY=18` developing names receive minute bars and options
-chains, plus previously alerted names for outcome tracking. Promotion uses price
-movement, intraday range and recent volume acceleration. Leases preserve up to
-25 minutes of option history; a much stronger newcomer can displace one name.
-One quarter of chain slots rotate through names not yet promoted that day.
-All discovery observations and promotions are recorded. Names outside that pool
-do not have continuous option-chain coverage, and option warmup follows promotion.
+The worker also rotates `/chains` requests across every configured symbol:
+up to `LOTTO_SWEEP_PER_CYCLE=24` non-promoted names per minute, due again after
+`LOTTO_SWEEP_MINUTES=5`. Up to `LOTTO_CHAIN_CAPACITY=18` developing names
+receive minute bars and chains each cycle, plus previously alerted names for
+outcome tracking. At normal request speed, the 102-name chain sweep completes
+in roughly four cycles. The log reports the actual count covered within five
+minutes; request failures or slow responses can lengthen that interval.
 
-A 40-second chain collection budget prevents the old multi-minute full-chain loop
-from silently aging out most observations. Cold starts resume unfinished names
-first. Before the open, historical volume baselines are loaded eight names per
-cycle. One worker and a persistent volume are required.
+Promotion uses price movement, range, stock-volume acceleration, **and** new
+option volume in three neighboring strikes of one expiry and side. Sweep
+observations alone never issue alerts. A new flow event can enter the deeper
+minute-level pool on the next cycle, where the same stock, liquidity, fresh
+quote, and persistence rules apply. Leases preserve up to 25 minutes of option
+history. All quote discovery and chain-coverage observations are recorded.
+Names outside the deep pool have sampled chain coverage rather than minute-level
+option history, so an intracycle move can still be missed.
+
+A 27-second sweep budget and 54-second total collection budget prevent slow
+responses from silently aging out most observations. Unfinished names resume
+next cycle. Before the open, historical volume baselines are loaded eight names
+per cycle. One worker and a persistent volume are required.
 
 ## Developing setups
 
@@ -79,6 +88,9 @@ the most recent captured session outside market hours.
 
 The review downloads minute history for **every configured name**, including
 unpromoted names, and evaluates price prefixes without future input leakage.
+It records early-session feature landmarks for all names, labels eventual
+near-high/near-low closes, and measures stock returns after observed multi-strike
+flow events so missed patterns can be compared with alerted ones.
 It saves failed and successful price hypotheses, captured candidate features,
 subsequent 5/15/30/60-minute stock returns, rejection reasons and discovery
 coverage. Reports are written to `DATA_DIR/nightly/YYYY-MM-DD/report.json`.
