@@ -29,7 +29,7 @@ option history, so an intracycle move can still be missed.
 
 A 27-second sweep budget and 54-second total collection budget prevent slow
 responses from silently aging out most observations. Unfinished names resume
-next cycle. Before the open, historical volume baselines are loaded eight names
+next cycle. Before the open, historical volume baselines are loaded sixteen names
 per cycle. One worker and a persistent volume are required.
 
 ## Developing setups

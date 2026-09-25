@@ -219,11 +219,11 @@ class Schwab:
 
     def warm_universe(self, symbols, now):
         session = self.session(now)
-        if not session or now >= session[0]-timedelta(minutes=5):
+        if not session or now >= session[0]:
             return
         day=now.astimezone(ET).date()
         missing=[s for s in symbols if (s,day) not in self.baselines]
-        for symbol in missing[:8]:
+        for symbol in missing[:16]:
             try:
                 self.baseline(symbol,now)
             except Exception as exc:
