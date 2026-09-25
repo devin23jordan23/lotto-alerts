@@ -64,7 +64,7 @@ class Schwab:
         self.baselines = {}
         self.calendar_cache = {}
         self.atrs = {}
-        self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "12")))
+        self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "18")))
 
     def token(self, force=False):
         if self.broker_url:

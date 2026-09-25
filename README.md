@@ -10,10 +10,11 @@ Set `LOTTO_UNIVERSE` explicitly in Railway; an old environment value overrides
 the code default. No case-study ticker list replaces the configured universe.
 
 Every cycle requests stock quotes for the **whole universe** in one batch.
-Up to `LOTTO_CHAIN_CAPACITY=12` developing names receive minute bars and options
+Up to `LOTTO_CHAIN_CAPACITY=18` developing names receive minute bars and options
 chains, plus previously alerted names for outcome tracking. Promotion uses price
 movement, intraday range and recent volume acceleration. Leases preserve up to
 25 minutes of option history; a much stronger newcomer can displace one name.
+One quarter of chain slots rotate through names not yet promoted that day.
 All discovery observations and promotions are recorded. Names outside that pool
 do not have continuous option-chain coverage, and option warmup follows promotion.
 
@@ -58,8 +59,8 @@ score's maximum is 87/100, with a default threshold of 72.
 
 ## Alert restraint and observability
 
-Defaults: five ideas per day, one per cycle, two per ticker, three minutes of
-confirmation on distinct completed bars, 45-minute ticker cooldown and a fresh
+Defaults: five ideas per day, one per cycle, two per ticker, two minutes of
+confirmation across three distinct completed bars, 45-minute ticker cooldown and a fresh
 reset/new contract for re-alerting. The earliest possible opening signal is
 approximately 9:44 ET if observations begin at the open and all gates qualify.
 New ideas stop 30 minutes before the actual session close.

@@ -173,7 +173,11 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         independent = snap.context_label != snap.symbol
         # Relative leadership can qualify against a flat/slightly opposing tape.
         etf_leadership = snap.symbol in {"SPY", "QQQ", "IWM", "DIA", "SMH", "SOXX", "XLK", "XLF", "XLE", "GLD", "USO", "SLV", "MTUM"} and context >= -.001
-        leadership = relative >= .001 and (peer > 0 or etf_leadership)
+        # A name can lead its group even while the broad tape is flat or weak.
+        # Independent, fresh context remains required; it is no longer a blanket
+        # veto of a strong stock + options setup.
+        leadership = (relative >= .001 and (peer > 0 or etf_leadership)
+                      or relative >= .002 and metrics["return_5m_directional"] >= .001)
         context_confirms = context_valid and independent and (context > 0 or leadership)
         if snap.market_return_5m is not None and snap.market_time is not None:
             if 0 <= (snap.at-snap.market_time).total_seconds() <= settings.max_quote_age_seconds:
@@ -208,8 +212,11 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         }
         blockers = tuple(k for k,v in checks.items() if not v)
         qualifying = not blockers
+        context_reason = (f"{snap.context_label} supportive" if context > 0
+                          else f"Outperforming {snap.context_label}" if context_confirms
+                          else f"{snap.context_label or 'Benchmark'} unconfirmed")
         reasons = [f"Stock pace {metrics['pace_rvol']:.1f}× · 5m local RVOL {metrics['local_rvol_5m']:.1f}×", f"Options velocity {acceleration:.1f}×",
-                   f"{len(best)} neighboring strikes", f"{snap.context_label or 'Benchmark'} {'confirms' if context_confirms else 'unconfirmed'}"]
+                   f"{len(best)} neighboring strikes", context_reason]
         if persistent:
             reasons.append("Options activity sustained 20m")
         if peer_valid and peer > 0:

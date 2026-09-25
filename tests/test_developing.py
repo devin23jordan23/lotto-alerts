@@ -87,6 +87,22 @@ class DevelopingTests(unittest.TestCase):
         self.assertIn('E',selected)
         self.assertEqual(len(set(initial)&set(selected)),3)
 
+    def test_exploration_reaches_unranked_names_after_lease_expires(self):
+        now=self.frames[20].at
+        symbols=[f"S{i:03d}" for i in range(40)]
+        discovery=Discovery(12)
+        def quotes(at):
+            return {s:{"price":101,"open":100,"previous":100,"volume":1000,
+                       "at":at,"high":102,"low":99} for s in symbols}
+        first=discovery.update(quotes(now),now,set(symbols))
+        first_explore=set(discovery.explore_leases)
+        self.assertEqual(len(first_explore),3)
+        later=now+timedelta(minutes=26)
+        second=discovery.update(quotes(later),later,set(symbols))
+        self.assertEqual(len(second),12)
+        self.assertFalse(first_explore & set(discovery.explore_leases))
+        self.assertEqual(len(discovery.observations),40)
+
     def test_no_self_confirming_benchmark(self):
         for s in DEFAULT_UNIVERSE.split(','):
             self.assertNotEqual(benchmark_for(s),s)
@@ -99,6 +115,23 @@ class DevelopingTests(unittest.TestCase):
         results=candidates(snap,self.frames[10:30],Settings())
         self.assertTrue(results)
         self.assertTrue(all('independent sector/peer confirmation missing' not in c.blockers for c in results))
+
+    def test_stock_leadership_can_confirm_against_weak_independent_sector(self):
+        snap=replace(self.frames[30],symbol='TSM',context_label='SMH',context_return_5m=-.001)
+        results=candidates(snap,self.frames[10:30],Settings())
+        self.assertTrue(results)
+        self.assertTrue(all('independent sector/peer confirmation missing' not in c.blockers for c in results))
+        self.assertTrue(any('Outperforming SMH' in reason for c in results for reason in c.reasons))
+
+    def test_three_distinct_minute_observations_confirm(self):
+        store=Store(':memory:');self.addCleanup(store.db.close)
+        engine=Engine(store)
+        for snap in self.frames[:12]:
+            self.assertFalse(engine.process([snap]))
+        self.assertEqual(len(engine.process([self.frames[12]])),1)
+        reasons=[r[0] for r in store.db.execute("SELECT reason FROM decisions WHERE at>=? ORDER BY at",
+                                                 (self.frames[10].at.isoformat(),))]
+        self.assertEqual(reasons[:2],['confirming persistence','confirming persistence'])
 
     def test_nightly_waits_for_early_close_and_runs_once(self):
         store=Store(':memory:'); self.addCleanup(store.db.close)

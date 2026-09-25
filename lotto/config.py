@@ -12,7 +12,7 @@ class Settings:
     min_option_acceleration: float = 1.5
     min_cluster: int = 3
     min_strike_volume_5m: int = 100
-    confirmation_minutes: int = 3
+    confirmation_minutes: int = 2  # Three distinct completed one-minute observations.
     max_alerts_per_day: int = 5
     max_alerts_per_ticker: int = 2
     max_alerts_per_cycle: int = 1

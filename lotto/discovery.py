@@ -11,6 +11,8 @@ class Discovery:
         self.capacity = capacity
         self.history = defaultdict(list)
         self.promoted = {}
+        self.explore_leases = {}
+        self.explored = set()
         self.day = None
         self.observations = []
 
@@ -19,6 +21,8 @@ class Discovery:
         if self.day != day:
             self.history.clear()
             self.promoted.clear()
+            self.explore_leases.clear()
+            self.explored.clear()
             self.day = day
         ranks = {}
         self.observations = []
@@ -48,10 +52,14 @@ class Discovery:
                 ranks[symbol] = score
                 self.observations.append(record)
         # Keep windows intact long enough for 20-minute option persistence research.
+        # Reserve a quarter of chain slots for names the price ranking has not
+        # reached today. They get the same 25-minute observation window.
+        explore_capacity = max(1, self.capacity//4)
+        core_capacity = self.capacity-explore_capacity
         held = {s:since for s,since in self.promoted.items() if s in ranks and now-since < timedelta(minutes=25)}
-        selected = sorted(held, key=lambda s:-ranks[s])[:self.capacity]
+        selected = sorted((s for s in held if s not in self.explore_leases), key=lambda s:-ranks[s])[:core_capacity]
         for symbol in sorted(ranks, key=lambda s:(-ranks[s], s)):
-            if symbol not in selected and len(selected) < self.capacity:
+            if symbol not in selected and len(selected) < core_capacity:
                 selected.append(symbol)
         # A genuinely stronger newcomer may displace at most one low-priority lease.
         newcomers = [s for s in ranks if s not in selected]
@@ -60,6 +68,23 @@ class Discovery:
             best, worst = max(newcomers, key=ranks.get), min(replaceable, key=ranks.get)
             if ranks[best] > max(2, ranks[worst]*2):
                 selected[selected.index(worst)] = best
+        exploring = [s for s in self.explore_leases if s in held and s not in selected][:explore_capacity]
+        for symbol in sorted(ranks):
+            if len(exploring) >= explore_capacity:
+                break
+            if symbol not in selected and symbol not in exploring and symbol not in self.explored:
+                exploring.append(symbol)
+                self.explored.add(symbol)
+        if len(exploring) < explore_capacity:
+            self.explored = set(exploring)
+            for symbol in sorted(ranks):
+                if len(exploring) >= explore_capacity:
+                    break
+                if symbol not in selected and symbol not in exploring:
+                    exploring.append(symbol)
+                    self.explored.add(symbol)
+        selected += exploring
+        self.explore_leases = {s:self.promoted.get(s,now) if s in held else now for s in exploring}
         self.promoted = {s:self.promoted.get(s, now) if s in held else now for s in selected}
         # Previously alerted contracts always retain outcome tracking; bounded by daily alert cap.
         selected = sorted(set(selected) | set(tracked))

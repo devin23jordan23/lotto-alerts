@@ -72,7 +72,7 @@ class AdapterTests(unittest.TestCase):
     def test_full_universe_uses_one_quote_batch_and_bounded_chains(self):
         now=datetime.now(timezone.utc)
         client=self.client
-        client.discovery=Discovery(12)
+        client.discovery=Discovery(18)
         client.atrs={}
         client.session=Mock(return_value=(now-timedelta(hours=1),now+timedelta(hours=1)))
         client.bars=Mock(return_value=())
@@ -87,8 +87,8 @@ class AdapterTests(unittest.TestCase):
             return {'isDelayed':False}
         client.get=get
         frame=client.poll(symbols,{},7)
-        self.assertEqual(len(frame),12)
+        self.assertEqual(len(frame),18)
         self.assertEqual(sum(path=='/quotes' for path,_ in calls),1)
-        self.assertEqual(sum(path=='/chains' for path,_ in calls),12)
-        self.assertEqual(client.bars.call_count,12)
+        self.assertEqual(sum(path=='/chains' for path,_ in calls),18)
+        self.assertEqual(client.bars.call_count,18)
         self.assertEqual(len(client.discovery.observations),102)
