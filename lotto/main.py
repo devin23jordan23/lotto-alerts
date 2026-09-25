@@ -18,6 +18,7 @@ from .schwab import Schwab
 from .store import Store
 from .nightly import maybe_nightly, run_nightly
 from .health import check
+from .audit import audit_store
 
 LOG = logging.getLogger(__name__)
 
@@ -111,6 +112,12 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
     LOG.info("Lotto worker started: %d symbols, delivery=%s, daily cap=%d", len(symbols), live_delivery, engine.settings.max_alerts_per_day)
+    previous_day=store.db.execute("SELECT day FROM discovery ORDER BY day DESC LIMIT 1").fetchone()
+    if previous_day and previous_day["day"] < datetime.now(ET).date().isoformat():
+        try:
+            LOG.info("Prior-session audit: %s",json.dumps(audit_store(store,previous_day["day"],engine.settings)))
+        except Exception as exc:
+            LOG.warning("Prior-session audit unavailable (%s)",type(exc).__name__)
     try:
         LOG.info("Startup preflight: %s", json.dumps(check(client,symbols,data_dir)))
     except Exception as exc:
