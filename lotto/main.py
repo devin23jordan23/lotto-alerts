@@ -18,7 +18,8 @@ from .schwab import Schwab
 from .store import Store
 from .nightly import maybe_nightly, run_nightly
 from .health import check
-from .audit import audit_store
+from .audit import audit_store, diagnose_symbols
+from .forensics import export_case
 
 LOG = logging.getLogger(__name__)
 
@@ -122,6 +123,33 @@ def main():
         LOG.info("Startup preflight: %s", json.dumps(check(client,symbols,data_dir)))
     except Exception as exc:
         LOG.error("Startup preflight failed (%s); live loop will retry market-data connectivity",type(exc).__name__)
+    diagnose = [s.strip().upper() for s in os.getenv("LOTTO_DIAGNOSE_SYMBOLS", "").split(",") if s.strip()]
+    if diagnose:
+        try:
+            LOG.info("Targeted session diagnostic: %s", json.dumps(
+                diagnose_symbols(store, datetime.now(ET).date().isoformat(), diagnose, engine.settings)))
+        except Exception as exc:
+            LOG.warning("Targeted session diagnostic unavailable (%s)", type(exc).__name__)
+    forensic_request = os.getenv("LOTTO_FORENSIC_EXPORT", "")
+    if forensic_request:
+        try:
+            case = json.loads(forensic_request)
+            # Only archived sessions, outside live market hours. Export is read-only
+            # against the trading database and contains market observations only.
+            now = datetime.now(ET)
+            session = client.session(now)
+            if date.fromisoformat(case["day"]) >= now.date() or (session and session[0] <= now < session[1]):
+                raise ValueError("Forensic exports require an archived day outside live market hours")
+            packed, parts = export_case(store, **case)
+            directory = data_dir / "forensics"
+            directory.mkdir(exist_ok=True)
+            (directory / f"{case['day']}-{case['symbol']}.json.gz").write_bytes(packed)
+            for part in parts:
+                LOG.info("Forensic export: %s", json.dumps(part, separators=(",", ":")))
+                time.sleep(.04)
+            LOG.info("Forensic export complete: %d parts", len(parts))
+        except Exception as exc:
+            LOG.warning("Forensic export unavailable (%s)", type(exc).__name__)
     while not stop:
         began = time.monotonic()
         try:

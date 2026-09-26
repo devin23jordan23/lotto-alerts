@@ -86,3 +86,51 @@ def audit_store(store, day, settings=None):
             "top_reasons":reasons.most_common(12),
             "top_candidates":sorted(candidates,key=lambda r:r["score"],reverse=True)[:12],
             "latest_chain_checks":chain,"alerts_by_delivery":{r[0]:r[1] for r in alert}}
+
+
+def diagnose_symbols(store, day, symbols, settings=None):
+    """Read-only, bounded evidence for a missed-name review."""
+    settings = settings or Settings()
+    result = {}
+    for symbol in symbols:
+        discovery = [json.loads(r["payload"]) for r in store.db.execute(
+            "SELECT payload FROM discovery WHERE day=? AND symbol=? ORDER BY at", (day,symbol))]
+        coverage = list(store.db.execute(
+            "SELECT at,promoted,contracts,spot,flow_side,flow_cluster FROM chain_coverage "
+            "WHERE day=? AND symbol=? ORDER BY at", (day,symbol)))
+        decisions = list(store.db.execute(
+            "SELECT at,state,reason,score,features FROM decisions WHERE symbol=? AND substr(at,1,10)=? ORDER BY at",
+            (symbol,day)))
+        scored = []
+        for row in decisions:
+            if row["score"] is None:
+                continue
+            feature = json.loads(row["features"])
+            metrics = feature.get("metrics", {})
+            scored.append({"at":row["at"],"score":row["score"],"side":feature.get("side"),
+                           "setup":(feature.get("setup") or {}).get("name"),
+                           "blockers":feature.get("blockers", []),
+                           "pace":metrics.get("pace_rvol"),"local_rvol":metrics.get("local_rvol_5m"),
+                           "option_volume_5m":metrics.get("option_volume_5m")})
+        snapshots = store.recent(symbol,day)
+        latest = snapshots[-1] if snapshots else None
+        flow = [dict(r) for r in coverage if r["flow_cluster"] >= 300]
+        result[symbol] = {
+            "stock_quote_observations":len(discovery),
+            "deep_promotions":sum(bool(r.get("promoted")) for r in discovery),
+            "first_deep_at":next((r["observed_at"] for r in discovery if r.get("promoted")),None),
+            "chain_observations":len(coverage),
+            "deep_chain_observations":sum(r["promoted"] for r in coverage),
+            "flow_events":flow[:8],"flow_event_count":len(flow),
+            "max_abs_five_minute_stock_return":max((abs(r.get("return_5m") or 0) for r in discovery),default=0),
+            "max_discovery_priority":max((r.get("priority",0) for r in discovery),default=0),
+            "decision_reasons":Counter(r["reason"] for r in decisions).most_common(8),
+            "scored_decisions":len(scored),
+            "top_scored":sorted(scored,key=lambda r:r["score"],reverse=True)[:5],
+            "last_scored":scored[-3:],
+            "latest_snapshot":({"at":latest.at.isoformat(),
+                                "problems":latest.problems(settings.max_quote_age_seconds),
+                                "chain":chain_reasons(latest,snapshots,settings)} if latest else None),
+            "alerts":store.db.execute("SELECT COUNT(*) FROM alerts WHERE day=? AND symbol=?",(day,symbol)).fetchone()[0],
+        }
+    return result
