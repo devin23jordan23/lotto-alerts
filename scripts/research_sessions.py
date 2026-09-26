@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--symbols", default="TSM,GOOGL,SKHY,META,MU,SMH,QQQ,SPY")
     parser.add_argument("--railway-project")
     parser.add_argument("--railway-service")
+    parser.add_argument("--extended", action="store_true", help="Also save target-session extended-hours bars and prior daily history")
     args = parser.parse_args()
     if args.railway_project:
         result = subprocess.run(["npx", "--yes", "@railway/cli", "variable", "list", "--project",
@@ -52,6 +53,17 @@ def main():
         try:
             response = client.candles(symbol, end-timedelta(days=45), end)
             (root / f"{symbol}.json").write_text(json.dumps(response))
+            if args.extended:
+                extended = client.get("/pricehistory", {"symbol":symbol,"periodType":"day",
+                    "frequencyType":"minute","frequency":1,
+                    "startDate":int(end.replace(hour=0).timestamp()*1000),
+                    "endDate":int(end.timestamp()*1000),"needExtendedHoursData":"true"})
+                (root / f"{symbol}-extended.json").write_text(json.dumps(extended))
+                daily = client.get("/pricehistory", {"symbol":symbol,"periodType":"year","period":1,
+                    "frequencyType":"daily","frequency":1,
+                    "endDate":int((end-timedelta(days=1)).replace(hour=23,minute=59).timestamp()*1000),
+                    "needExtendedHoursData":"false"})
+                (root / f"{symbol}-daily.json").write_text(json.dumps(daily))
             sessions = {}
             for candle in response.get("candles", []):
                 at = epoch(candle.get("datetime"))
