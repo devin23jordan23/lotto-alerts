@@ -18,7 +18,7 @@ from .schwab import Schwab
 from .store import Store
 from .nightly import maybe_nightly, run_nightly
 from .health import check
-from .audit import audit_store, diagnose_symbols
+from .audit import audit_store, diagnose_symbols, audit_coil_burst_hypothesis
 from .forensics import export_case, export_window_closed
 
 LOG = logging.getLogger(__name__)
@@ -130,6 +130,13 @@ def main():
                 diagnose_symbols(store, datetime.now(ET).date().isoformat(), diagnose, engine.settings)))
         except Exception as exc:
             LOG.warning("Targeted session diagnostic unavailable (%s)", type(exc).__name__)
+    hypothesis_day = os.getenv("LOTTO_RULE_AUDIT_DAY", "")
+    if hypothesis_day:
+        try:
+            LOG.info("Coil burst hypothesis audit: %s", json.dumps(
+                audit_coil_burst_hypothesis(store, hypothesis_day, data_dir)))
+        except Exception as exc:
+            LOG.warning("Coil burst hypothesis audit unavailable (%s)", type(exc).__name__)
     forensic_request = os.getenv("LOTTO_FORENSIC_EXPORT", "")
     if forensic_request:
         try:

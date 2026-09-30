@@ -89,6 +89,13 @@ class ScannerTests(unittest.TestCase):
         self.assertFalse(candidates(snap, history, Settings()))
         self.assertFalse(candidates(snap, [history[0], history[-1]], Settings()))
 
+    def test_lotto_contracts_are_zero_or_one_dte(self):
+        snap = self.frames[30][0]
+        option = snap.options[2]
+        self.assertTrue(contract_ok(option, snap, Settings()))
+        self.assertTrue(contract_ok(replace(option, expiry=option.expiry+timedelta(days=1)), snap, Settings()))
+        self.assertFalse(contract_ok(replace(option, expiry=option.expiry+timedelta(days=2)), snap, Settings()))
+
     def test_ranking_and_daily_cap_apply_across_symbols(self):
         engine = Engine(self.store, Settings(max_alerts_per_day=2))
         alerts = []

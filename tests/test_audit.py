@@ -3,15 +3,32 @@ import base64
 import gzip
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
-from lotto.audit import diagnose_symbols
+from lotto.audit import diagnose_symbols, audit_coil_burst_hypothesis
 from lotto.models import ET, Option, Snapshot
 from lotto.store import Store
 from lotto.forensics import export_case, export_window_closed
 
 
 class TargetedAuditTests(unittest.TestCase):
+    def test_coil_hypothesis_audit_uses_saved_blockers_and_short_expiry(self):
+        import tempfile
+        store = Store(":memory:")
+        self.addCleanup(store.db.close)
+        at = datetime(2026,9,29,13,50,tzinfo=ET).astimezone(timezone.utc)
+        features = {"setup":{"name":"COILED_CONTINUATION"},
+                    "blockers":["options activity not replenishing"],
+                    "contract":"AAPL  260930P00330000",
+                    "metrics":{"option_acceleration":2.74,"local_rvol_5m":2.44,
+                               "volume_acceleration":1.5,"option_volume_5m":2933}}
+        store.db.execute("INSERT INTO decisions VALUES (?,?,?,?,?,?)",
+                         ("AAPL",at.isoformat(),"DISCOVERY","options activity not replenishing",74.58,json.dumps(features)))
+        with tempfile.TemporaryDirectory() as directory:
+            result = audit_coil_burst_hypothesis(store,"2026-09-29",directory)
+        self.assertEqual(result["short_dte_strong_burst_observations"],1)
+        self.assertEqual(result["independent_symbol_contract_cases"][0]["dte"],1)
+
     def test_forensic_export_allows_same_day_after_close_only(self):
         from datetime import timedelta
         opening = datetime(2026,9,29,9,30,tzinfo=ET)

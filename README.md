@@ -63,6 +63,8 @@ missing observations and large time gaps invalidate that evidence. Chains do
 **not** establish ask-side buying, aggressor direction or opening-position intent.
 
 Contract selection checks spread, price, delta, gamma, moneyness and DTE.
+By default, lotto candidates are limited to options expiring today or tomorrow; all 102
+underlyings remain in the stock and option-chain discovery universe.
 Unavailable signed-flow and catalyst evidence receives no points: the research
 score's maximum is 87/100, with a default threshold of 72.
 

@@ -2,6 +2,8 @@
 import json
 from collections import Counter
 from datetime import datetime, timedelta
+from pathlib import Path
+import re
 
 from .config import Settings
 from .features import contract_ok, quote_ok
@@ -134,3 +136,45 @@ def diagnose_symbols(store, day, symbols, settings=None):
             "alerts":store.db.execute("SELECT COUNT(*) FROM alerts WHERE day=? AND symbol=?",(day,symbol)).fetchone()[0],
         }
     return result
+
+
+def audit_coil_burst_hypothesis(store, day, directory):
+    """Read-only cohort audit; it does not change or replay live alert decisions."""
+    report_path = Path(directory) / "nightly" / day / "report.json"
+    labels = {}
+    if report_path.exists():
+        report = json.loads(report_path.read_text())
+        labels = {(r["symbol"], r["at"]): r["future_labels"]
+                  for r in report.get("candidate_evaluations", [])}
+    samples = []
+    for row in store.db.execute(
+        "SELECT symbol,at,score,features FROM decisions WHERE substr(at,1,10)=? AND score>=72 ORDER BY at",
+        (day,),
+    ):
+        feature = json.loads(row["features"])
+        if ((feature.get("setup") or {}).get("name") != "COILED_CONTINUATION"
+                or feature.get("blockers") != ["options activity not replenishing"]):
+            continue
+        match = re.search(r"(\d{6})[CP]\d{8}$", feature.get("contract", ""))
+        if not match:
+            continue
+        expiry = datetime.strptime(match.group(1), "%y%m%d").date()
+        at = datetime.fromisoformat(row["at"])
+        dte = (expiry - at.astimezone(ET).date()).days
+        metrics = feature.get("metrics", {})
+        samples.append({"symbol":row["symbol"], "at":row["at"], "score":row["score"],
+                        "contract":feature["contract"], "dte":dte,
+                        "option_acceleration":round(metrics.get("option_acceleration", 0), 2),
+                        "local_rvol":round(metrics.get("local_rvol_5m", 0), 2),
+                        "stock_volume_acceleration":round(metrics.get("volume_acceleration", 0), 2),
+                        "option_volume_5m":metrics.get("option_volume_5m"),
+                        "future":labels.get((row["symbol"], row["at"]), {})})
+    short = [r for r in samples if r["dte"] in (0,1) and r["option_acceleration"]>=2
+             and r["local_rvol"]>=2]
+    first = {}
+    for row in short:
+        first.setdefault((row["symbol"], row["contract"]), row)
+    return {"day":day,"nightly_labels_available":bool(labels),
+            "all_single_blocker_observations":len(samples),
+            "short_dte_strong_burst_observations":len(short),
+            "independent_symbol_contract_cases":list(first.values())[:40]}

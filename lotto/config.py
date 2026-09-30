@@ -25,7 +25,7 @@ class Settings:
     max_spread_dollars: float = 0.15
     min_delta: float = 0.12
     max_delta: float = 0.55
-    max_dte: int = 7
+    max_dte: int = 1
     entry_cutoff_minutes: int = 30
 
     def __post_init__(self):
@@ -38,3 +38,5 @@ class Settings:
                 raise ValueError(f"{name} must be positive")
         if not 0 < self.min_ask <= self.max_ask or not 0 < self.min_delta <= self.max_delta <= 1:
             raise ValueError("Invalid contract limits")
+        if not 0 <= self.max_dte <= 7:
+            raise ValueError("Invalid maximum expiration")
