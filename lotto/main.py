@@ -20,6 +20,7 @@ from .nightly import maybe_nightly, run_nightly
 from .health import check
 from .audit import audit_store, diagnose_symbols, audit_coil_burst_hypothesis
 from .forensics import export_case, export_window_closed
+from .operations import HealthMonitor
 
 LOG = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ def main():
     if live_delivery and not webhook:
         raise SystemExit("DISCORD_LOTTO_WEBHOOK is required when LOTTO_SEND_ALERTS=true")
     engine = Engine(store, env_settings(), dry_run=not live_delivery)
+    health_monitor = HealthMonitor(store, webhook)
     if args.mode in {"demo", "replay"}:
         if args.mode == "replay" and not args.input:
             parser.error("replay requires --input")
@@ -184,6 +186,12 @@ def main():
             engine.history = {k: v for k, v in engine.history.items()
                               if k[0] == today and v and now-v[-1].at <= timedelta(minutes=30)}
             LOG.info("Cycle complete: %d symbols observed, %d potential alerts", len(frame), len(alerts))
+            if live_delivery:
+                try:
+                    if health_monitor.successful_cycle(now, len(frame)):
+                        LOG.info("Operational recovery notice delivered")
+                except Exception as exc:
+                    LOG.warning("Operational recovery notice unavailable (%s)",type(exc).__name__)
             # Useful reasons must be visible in deployment logs, including a zero-alert day.
             counts = store.db.execute("SELECT reason,COUNT(*) AS n FROM decisions WHERE at>=? GROUP BY reason ORDER BY n DESC LIMIT 5",
                                      ((now-timedelta(minutes=5)).isoformat(),)).fetchall()
@@ -194,6 +202,14 @@ def main():
         except Exception as exc:
             detail = str(exc) if type(exc) is RuntimeError else type(exc).__name__
             LOG.error("Cycle failed (%s); retaining state for retry", detail)
+            if live_delivery:
+                reason = ("Schwab token broker unavailable" if "Schwab token broker" in detail
+                          else "market-data cycle unavailable")
+                try:
+                    if health_monitor.failed_cycle(datetime.now(timezone.utc), reason):
+                        LOG.info("Operational outage notice delivered")
+                except Exception as notice_exc:
+                    LOG.warning("Operational outage notice unavailable (%s)",type(notice_exc).__name__)
         if args.once:
             break
         wait = max(1, poll_seconds - (time.monotonic() - began))

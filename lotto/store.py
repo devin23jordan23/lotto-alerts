@@ -48,6 +48,9 @@ class Store:
                 spot REAL, flow_side TEXT, flow_cluster INTEGER,
                 PRIMARY KEY(symbol, at));
             CREATE INDEX IF NOT EXISTS chain_coverage_day ON chain_coverage(day, symbol);
+            CREATE TABLE IF NOT EXISTS health_incidents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, opened_at TEXT NOT NULL, reason TEXT NOT NULL,
+                notified_at TEXT, recovered_at TEXT);
         """)
 
     def record(self, snap: Snapshot) -> None:

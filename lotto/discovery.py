@@ -12,6 +12,7 @@ class Discovery:
         self.history = defaultdict(list)
         self.promoted = {}
         self.explore_leases = {}
+        self.flow_leases = {}
         self.explored = set()
         self.day = None
         self.observations = []
@@ -22,6 +23,7 @@ class Discovery:
             self.history.clear()
             self.promoted.clear()
             self.explore_leases.clear()
+            self.flow_leases.clear()
             self.explored.clear()
             self.day = day
         ranks = {}
@@ -57,14 +59,29 @@ class Discovery:
         # reached today. They get the same 25-minute observation window.
         explore_capacity = max(1, self.capacity//4)
         core_capacity = self.capacity-explore_capacity
+        # A brief whole-universe three-strike flow spike is exactly when the
+        # deeper, continuous option history becomes valuable. The sweep signal
+        # can expire on its next sample; retain its deep slot for at least a
+        # full ten-minute baseline instead of immediately evicting it when the
+        # temporary rank bonus disappears.
+        for symbol, priority in (flow_priorities or {}).items():
+            if symbol in self.promoted and symbol in ranks and priority >= 15:
+                self.flow_leases[symbol] = now
+        self.flow_leases = {s:at for s,at in self.flow_leases.items()
+                            if s in ranks and now-at < timedelta(minutes=12)}
         held = {s:since for s,since in self.promoted.items() if s in ranks and now-since < timedelta(minutes=25)}
-        selected = sorted((s for s in held if s not in self.explore_leases), key=lambda s:-ranks[s])[:core_capacity]
+        protected = [s for s in held if s in self.flow_leases and s not in self.explore_leases]
+        selected = sorted(protected, key=lambda s:-ranks[s])[:core_capacity]
+        for symbol in sorted((s for s in held if s not in self.explore_leases and s not in selected),
+                             key=lambda s:-ranks[s]):
+            if len(selected) < core_capacity:
+                selected.append(symbol)
         for symbol in sorted(ranks, key=lambda s:(-ranks[s], s)):
             if symbol not in selected and len(selected) < core_capacity:
                 selected.append(symbol)
         # A genuinely stronger newcomer may displace at most one low-priority lease.
         newcomers = [s for s in ranks if s not in selected]
-        replaceable = [s for s in selected if s not in tracked]
+        replaceable = [s for s in selected if s not in tracked and s not in self.flow_leases]
         if newcomers and replaceable:
             best, worst = max(newcomers, key=ranks.get), min(replaceable, key=ranks.get)
             if ranks[best] > max(2, ranks[worst]*2):
@@ -86,6 +103,9 @@ class Discovery:
                     self.explored.add(symbol)
         selected += exploring
         self.explore_leases = {s:self.promoted.get(s,now) if s in held else now for s in exploring}
+        for symbol in selected:
+            if (flow_priorities or {}).get(symbol, 0) >= 15:
+                self.flow_leases[symbol] = now
         self.promoted = {s:self.promoted.get(s, now) if s in held else now for s in selected}
         # Previously alerted contracts always retain outcome tracking; bounded by daily alert cap.
         selected = sorted(set(selected) | set(tracked))

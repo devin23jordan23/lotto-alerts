@@ -107,6 +107,23 @@ class DevelopingTests(unittest.TestCase):
         self.assertIn('E',selected)
         self.assertEqual(len(set(initial)&set(selected)),3)
 
+    def test_flow_promoted_name_keeps_continuous_deep_history(self):
+        now=self.frames[20].at; d=Discovery(4)
+        symbols=['A','B','C','D','MSFT']
+        def quotes(at, msft=100, newcomer=100):
+            return {s:{'price':msft if s=='MSFT' else newcomer if s=='D' else 100,
+                       'open':100,'previous':100,'volume':1000,'at':at}
+                    for s in symbols}
+        first=d.update(quotes(now),now,set(symbols),flow_priorities={'MSFT':20})
+        self.assertIn('MSFT',first)
+        # The sweep bonus expires, while a different name gets a strong price
+        # rank. Dropping MSFT now would erase the ten-minute option baseline.
+        for minute in range(1,12):
+            at=now+timedelta(minutes=minute)
+            selected=d.update(quotes(at,newcomer=110),at,set(symbols))
+            self.assertIn('MSFT',selected)
+        self.assertEqual(len(selected),4)
+
     def test_exploration_reaches_unranked_names_after_lease_expires(self):
         now=self.frames[20].at
         symbols=[f"S{i:03d}" for i in range(40)]
