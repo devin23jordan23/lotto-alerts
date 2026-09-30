@@ -6,12 +6,23 @@ import json
 from datetime import datetime
 
 from lotto.audit import diagnose_symbols
-from lotto.models import ET
+from lotto.models import ET, Option, Snapshot
 from lotto.store import Store
-from lotto.forensics import export_case
+from lotto.forensics import export_case, export_window_closed
 
 
 class TargetedAuditTests(unittest.TestCase):
+    def test_forensic_export_allows_same_day_after_close_only(self):
+        from datetime import timedelta
+        opening = datetime(2026,9,29,9,30,tzinfo=ET)
+        closing = datetime(2026,9,29,16,0,tzinfo=ET)
+        session = (opening, closing)
+        self.assertFalse(export_window_closed("2026-09-29", opening-timedelta(minutes=1), session))
+        self.assertFalse(export_window_closed("2026-09-29", opening+timedelta(minutes=1), session))
+        self.assertTrue(export_window_closed("2026-09-29", closing, session))
+        self.assertFalse(export_window_closed("2026-09-30", closing, session))
+        self.assertTrue(export_window_closed("2026-09-28", opening+timedelta(minutes=1), None))
+
     def test_distinguishes_stock_discovery_from_chain_and_deep_checks(self):
         store = Store(":memory:")
         self.addCleanup(store.db.close)
@@ -39,3 +50,17 @@ class TargetedAuditTests(unittest.TestCase):
         self.assertEqual(chunks[0]["sha256"],hashlib.sha256(packed).hexdigest())
         case = json.loads(gzip.decompress(packed))
         self.assertEqual(case["record_counts"]["discovery"],2)
+
+    def test_case_export_filters_saved_option_quotes_without_changing_decisions(self):
+        store = Store(":memory:")
+        self.addCleanup(store.db.close)
+        from datetime import timezone
+        at = datetime(2026,9,29,14,0,tzinfo=ET).astimezone(timezone.utc)
+        options = (Option("SPY260929C00764000",at.date(),"CALL",764,.50,.51,200,100,.25,.02,at),
+                   Option("SPY260929C00765000",at.date(),"CALL",765,.20,.21,200,100,.15,.02,at))
+        store.record(Snapshot("SPY",at,765,at,764,(),options))
+        packed, _ = export_case(store,"2026-09-29","SPY","13:59","14:01",
+                                contract_expiry="2026-09-29",strike_low=764,strike_high=764)
+        case = json.loads(gzip.decompress(packed))
+        self.assertEqual([o["strike"] for o in case["records"]["snapshots"][0]["payload"]["options"]], [764])
+        self.assertEqual(case["option_filter"],{"expiry":"2026-09-29","strike_low":764,"strike_high":764})

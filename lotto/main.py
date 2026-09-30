@@ -6,7 +6,7 @@ import os
 import signal
 import time
 from dataclasses import fields, replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import Settings
@@ -19,7 +19,7 @@ from .store import Store
 from .nightly import maybe_nightly, run_nightly
 from .health import check
 from .audit import audit_store, diagnose_symbols
-from .forensics import export_case
+from .forensics import export_case, export_window_closed
 
 LOG = logging.getLogger(__name__)
 
@@ -138,8 +138,8 @@ def main():
             # against the trading database and contains market observations only.
             now = datetime.now(ET)
             session = client.session(now)
-            if date.fromisoformat(case["day"]) >= now.date() or (session and session[0] <= now < session[1]):
-                raise ValueError("Forensic exports require an archived day outside live market hours")
+            if not export_window_closed(case["day"], now, session):
+                raise ValueError("Forensic exports require a completed session outside live market hours")
             packed, parts = export_case(store, **case)
             directory = data_dir / "forensics"
             directory.mkdir(exist_ok=True)
