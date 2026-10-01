@@ -142,21 +142,25 @@ def main():
     forensic_request = os.getenv("LOTTO_FORENSIC_EXPORT", "")
     if forensic_request:
         try:
-            case = json.loads(forensic_request)
+            requested = json.loads(forensic_request)
+            cases = requested if isinstance(requested, list) else [requested]
+            if not 1 <= len(cases) <= 10 or not all(isinstance(case, dict) for case in cases):
+                raise ValueError("Forensic export accepts one to ten saved cases")
             # Only archived sessions, outside live market hours. Export is read-only
             # against the trading database and contains market observations only.
             now = datetime.now(ET)
             session = client.session(now)
-            if not export_window_closed(case["day"], now, session):
-                raise ValueError("Forensic exports require a completed session outside live market hours")
-            packed, parts = export_case(store, **case)
             directory = data_dir / "forensics"
             directory.mkdir(exist_ok=True)
-            (directory / f"{case['day']}-{case['symbol']}.json.gz").write_bytes(packed)
-            for part in parts:
-                LOG.info("Forensic export: %s", json.dumps(part, separators=(",", ":")))
-                time.sleep(.04)
-            LOG.info("Forensic export complete: %d parts", len(parts))
+            for case in cases:
+                if not export_window_closed(case["day"], now, session):
+                    raise ValueError("Forensic exports require a completed session outside live market hours")
+                packed, parts = export_case(store, **case)
+                (directory / f"{case['day']}-{case['symbol']}.json.gz").write_bytes(packed)
+                for part in parts:
+                    LOG.info("Forensic export: %s", json.dumps(part, separators=(",", ":")))
+                    time.sleep(.04)
+                LOG.info("Forensic export complete: %s %d parts", part["case"], len(parts))
         except Exception as exc:
             LOG.warning("Forensic export unavailable (%s)", type(exc).__name__)
     while not stop:
