@@ -1,0 +1,61 @@
+{
+  "schema": "lotto_research_case_v1",
+  "status": "intraday_observation_pending_session_close",
+  "case_type": "user_reported_missed_opportunity",
+  "symbol": "SPY",
+  "assumed_contract": "SPY   261002C00770000",
+  "assumed_expiration": "2026-10-02",
+  "strike": 770,
+  "side": "CALL",
+  "contract_confirmation_pending": true,
+  "user_feedback": {
+    "statement": "also take note of the SPY 770 calls that just went 100%+",
+    "reported_move": "100%+",
+    "entry_time_et": null,
+    "entry_fill": null,
+    "realized_exit": null
+  },
+  "lotto_scanner": {
+    "spy_770_call_alert_found_in_2026_10_02_logs": false,
+    "conclusion": "Missed example; not an alerted scanner win.",
+    "entry_cutoff_et": "15:45",
+    "exact_live_decision_blocker": null
+  },
+  "observed_through_et": "2026-10-02T15:46:11.993678-04:00",
+  "observed_path": {
+    "stock_open": 770.58,
+    "stock_at_15_25_close": 769.53,
+    "call_at_15_25_close_trade": 0.20,
+    "call_at_15_29_low_trade": 0.11,
+    "stock_at_15_33_close": 769.4188,
+    "call_at_15_33_close_trade": 0.15,
+    "stock_at_15_34_close": 769.73,
+    "call_at_15_34_close_trade": 0.26,
+    "stock_at_15_38_high": 770.05,
+    "stock_at_15_38_close": 769.91,
+    "call_at_15_38_high_trade": 0.42,
+    "trade_high_gain_from_15_25_close_trade_pct": 110.0,
+    "trade_high_gain_from_15_34_close_trade_pct": 61.5,
+    "stock_at_15_45_high": 770.0768,
+    "call_at_15_45_high_trade": 0.39,
+    "latest_stock_trade": 769.77,
+    "latest_call_bid": 0.27,
+    "latest_call_ask": 0.28,
+    "option_volume_in_five_minutes_ending_15_38": 35661
+  },
+  "research_features": {
+    "stock_volume_pace_at_15_34_multiple": 1.21,
+    "stock_local_5m_rvol_at_15_34_multiple": 1.47,
+    "stock_local_5m_rvol_at_15_38_multiple": 1.59,
+    "estimated_stock_vwap_at_15_34": 769.937,
+    "prior_atr14": 6.985,
+    "observation": "The first 15:25 push faded. A second acceleration began around 15:33-15:34; SPY briefly crossed the $770 round level at 15:38 as call volume accelerated. The stock closed that minute below the independently estimated session VWAP.",
+    "hypothesis_for_miss": "The bullish setup rules may have rejected a below-VWAP, below-open recovery as too small on an ATR basis. The exact live blocker cannot be confirmed from aggregate logs without the saved decision rows."
+  },
+  "provenance": {
+    "market_data_source": "Schwab read-only quotes and one-minute trade bars",
+    "alert_source": "Railway lotto-alerts deployment logs",
+    "raw_local_data": "data/research/2026-10-02/spy-770c-intraday.json",
+    "measurement_limit": "The $0.20 and $0.42 figures are separate minute trade prints, not a verified entry ask and executable exit bid. The 15:25-to-15:38 path included a fall to $0.11. A signal generated after the completed 15:34 bar would have had less than 100% of the later trade-print move remaining."
+  }
+}
