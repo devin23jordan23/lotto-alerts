@@ -1,0 +1,68 @@
+{
+  "schema": "lotto_research_case_v1",
+  "status": "intraday_observation_pending_session_close",
+  "alert": {
+    "id": "da988f6e14f9bad6",
+    "strategy": "phase1-uncapped-2026-10-02",
+    "logged_at_utc": "2026-10-02T18:54:14.526Z",
+    "symbol": "TSLA",
+    "contract": "TSLA  261002C00372500",
+    "strike": 372.5,
+    "side": "CALL",
+    "expiration": "2026-10-02",
+    "dte": 0,
+    "setup": "COILED_CONTINUATION",
+    "setup_state": "DEVELOPING",
+    "score": 85,
+    "stock_at_alert": 371.31,
+    "option_bid_at_alert": 0.38,
+    "option_ask_at_alert": 0.4,
+    "watch_level": 371.68,
+    "stock_invalidation": 370.92,
+    "nearby_round_level": 375,
+    "stock_return_from_open_pct": 3.12,
+    "stock_return_from_prior_close_pct": 4.86,
+    "stock_volume_pace_multiple": 1.5,
+    "stock_local_5m_rvol_multiple": 1.3,
+    "option_activity_multiple": 1.0,
+    "neighboring_strikes": 7,
+    "options_activity_sustained_minutes": 20,
+    "market_context": "QQQ supportive"
+  },
+  "observed_through_et": "2026-10-02T15:41:21.154697-04:00",
+  "observed_path": {
+    "first_stock_watch_level_crossed_minute_et": "2026-10-02T14:55:00-04:00",
+    "first_stock_watch_level_crossed_bar_high": 371.98,
+    "stock_invalidation_crossed_through_capture": false,
+    "first_option_trade_at_or_above_2x_alert_ask_minute_et": "2026-10-02T14:59:00-04:00",
+    "first_option_trade_at_or_above_3x_alert_ask_minute_et": "2026-10-02T15:34:00-04:00",
+    "highest_post_alert_minute_trade": 2.05,
+    "highest_post_alert_minute_et": "2026-10-02T15:40:00-04:00",
+    "highest_trade_gain_from_alert_ask_pct": 412.5,
+    "latest_stock_trade": 374.31,
+    "latest_option_bid": 1.85,
+    "latest_option_ask": 1.91,
+    "latest_bid_gain_from_alert_ask_pct": 362.5
+  },
+  "feedback": {
+    "user_label": "worked",
+    "user_statement": "Look at that tsla now awesome trade man record this data",
+    "realized_fill_or_exit": null,
+    "interpretation": "A strong prior move compressed near the upper edge of a range, while call activity persisted across seven neighboring strikes. The scanner highlighted a nearby 0DTE strike before the stock crossed the watch level; the option then responded quickly and continued higher without a sampled stock invalidation. Preserve the distinction between a developing watch and a confirmed trigger."
+  },
+  "related_same_day_alert": {
+    "id": "313f1ab4e0f6f6ba",
+    "contract": "TSLA  261002C00375000",
+    "alert_time_et": "10:05",
+    "alert_ask": 1.15,
+    "later_trade_high": 1.76,
+    "later_trade_high_gain_from_alert_ask_pct": 53.0,
+    "comparison": "Earlier farther-out strike offered a shorter favorable window; contract selection and timing differed from the afternoon 372.5 call."
+  },
+  "provenance": {
+    "alert_source": "Railway lotto-alerts deployment log",
+    "market_data_source": "Schwab read-only quotes and one-minute trade bars",
+    "raw_local_data": "data/research/2026-10-02/tsla-372p5c-intraday.json",
+    "measurement_limit": "Historical one-minute trade highs are not executable bids. The current bid is a single quote at capture time; no user fill, exit, or realized return was supplied. The session was still open."
+  }
+}
