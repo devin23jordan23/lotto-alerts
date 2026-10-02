@@ -6,11 +6,84 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .config import Settings
+from .features import quote_ok
 from .models import ET
 from .research import price_replay
 from .schwab import epoch
+from .store import read_snapshot
 
 LOG = logging.getLogger(__name__)
+
+
+def alert_feedback(store, day):
+    """Label delivered ideas from sampled quotes without treating peaks as fills."""
+    result = []
+    settings = Settings()
+    for alert in store.db.execute("SELECT * FROM alerts WHERE day=? ORDER BY at", (day,)).fetchall():
+        at = datetime.fromisoformat(alert["at"])
+        first = None
+        for decision in store.db.execute(
+            "SELECT at,features FROM decisions WHERE symbol=? AND at>=? AND at<=? "
+            "AND state='IGNITION' AND reason='confirming persistence' ORDER BY at",
+            (alert["symbol"], (at-timedelta(minutes=10)).isoformat(), alert["at"]),
+        ):
+            features = json.loads(decision["features"])
+            if features.get("contract") == alert["contract"] and not features.get("blockers"):
+                first = {"at": decision["at"], "ask": features.get("entry_ask")}
+                break
+        current = store.db.execute(
+            "SELECT score,features FROM decisions WHERE symbol=? AND at=? AND reason LIKE 'potential alert %'",
+            (alert["symbol"], alert["at"]),
+        ).fetchone()
+        features = json.loads(current["features"]) if current else {}
+        setup = features.get("setup") or {}
+        snapshot = json.loads(alert["snapshot"])
+        initial_option = next((o for o in snapshot["options"] if o["symbol"] == alert["contract"]), None)
+        initial_quote_at = datetime.fromisoformat(initial_option["quote_time"]) if initial_option else at
+        atr = snapshot.get("prior_atr")
+        trigger_gap_atr = (abs(features["spot"]-setup["trigger"])/atr
+                           if atr and setup.get("trigger") is not None and features.get("spot") else None)
+        quotes = []
+        for row in store.db.execute(
+            "SELECT payload FROM snapshots WHERE symbol=? AND at>=? AND at<? ORDER BY at",
+            (alert["symbol"], alert["at"], (at+timedelta(days=1)).date().isoformat()),
+        ):
+            snap = read_snapshot(row["payload"])
+            option = next((o for o in snap.options if o.symbol == alert["contract"]), None)
+            if option and quote_ok(option, snap, settings) and option.quote_time >= initial_quote_at:
+                quotes.append((option.quote_time, option.bid))
+        if quotes:
+            peak_at, peak_bid = max(quotes, key=lambda item: item[1])
+            low_at, low_bid = min(quotes, key=lambda item: item[1])
+            last_at, last_bid = quotes[-1]
+        else:
+            peak_at = peak_bid = low_at = low_bid = last_at = last_bid = None
+        entry = alert["entry_ask"]
+        horizons = {}
+        for minutes in (5, 15, 30, 60):
+            target = at+timedelta(minutes=minutes)
+            match = next((bid for timestamp,bid in quotes
+                          if target <= timestamp <= target+timedelta(seconds=90)), None)
+            horizons[f"bid_return_{minutes}m"] = match/entry-1 if match is not None else None
+        result.append({
+            "id":alert["id"], "symbol":alert["symbol"], "contract":alert["contract"],
+            "alert_at":alert["at"], "entry_ask":entry, "score":current["score"] if current else None,
+            "setup":setup.get("name"), "trigger_gap_atr":trigger_gap_atr,
+            "first_qualified_at":first["at"] if first else None,
+            "first_qualified_ask":first["ask"] if first else None,
+            "confirmation_premium_change":entry/first["ask"]-1 if first and first["ask"] else None,
+            "sampled_quote_count":len(quotes),
+            "peak_bid":peak_bid, "peak_at":peak_at.isoformat() if peak_at else None,
+            "peak_ask_to_bid_return":peak_bid/entry-1 if peak_bid is not None else None,
+            "minutes_to_peak":max(0, (peak_at-at).total_seconds()/60) if peak_at else None,
+            "low_bid":low_bid, "low_at":low_at.isoformat() if low_at else None,
+            "low_ask_to_bid_return":low_bid/entry-1 if low_bid is not None else None,
+            "last_bid":last_bid, "last_at":last_at.isoformat() if last_at else None,
+            "last_ask_to_bid_return":last_bid/entry-1 if last_bid is not None else None,
+            "horizon_returns":horizons,
+        })
+    return result
 
 
 def run_nightly(store, day, directory, symbols=(), client=None):
@@ -100,6 +173,7 @@ def run_nightly(store, day, directory, symbols=(), client=None):
         "universe":list(symbols),"universe_size":len(symbols),"full_universe_price_research":client is not None,
         "data_errors":errors,"discovery_coverage":coverage,"chain_coverage":chain_coverage,
         "universe_flow_events":flow_events,
+        "alert_feedback":alert_feedback(store, day),
         "research_notes":["Price setups are hypotheses, not confirmed option alerts.",
                           "Historical bars cannot reconstruct unrecorded intraday option quotes or aggressor side.",
                           "Future labels never enter the feature calculation. No automatic live threshold changes.",

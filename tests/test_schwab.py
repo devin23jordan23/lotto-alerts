@@ -17,6 +17,19 @@ class AdapterTests(unittest.TestCase):
         self.client.baselines = {}
         self.client.calendar_cache = {}
 
+    def test_chain_preserves_iv_and_greeks_for_future_feedback(self):
+        at = datetime(2026, 10, 1, 13, 27, tzinfo=ET)
+        raw = {"callExpDateMap": {"2026-10-01:0": {"280.0": [{
+            "symbol": "IWM   261001C00280000", "strikePrice": 280,
+            "bid": .44, "ask": .45, "totalVolume": 79946,
+            "openInterest": 1200, "delta": .468, "gamma": .14,
+            "volatility": 27.5, "theta": -.08, "vega": .02,
+            "quoteTimeInLong": int(at.timestamp() * 1000),
+        }]}}}
+        option = Schwab.parse_chain(raw)[0]
+        self.assertEqual((option.implied_volatility, option.theta, option.vega),
+                         (27.5, -.08, .02))
+
     def test_broker_mode_needs_no_local_refresh_credentials(self):
         response = Mock()
         response.__enter__ = Mock(return_value=io.BytesIO(json.dumps({

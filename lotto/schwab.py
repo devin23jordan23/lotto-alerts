@@ -249,7 +249,9 @@ class Schwab:
                             continue
                         result.append(Option(raw["symbol"], date.fromisoformat(expiry.split(":")[0]), side,
                                              *fields[:3], int(fields[3]), int(number(raw.get("openInterest")) or 0),
-                                             number(raw.get("delta")), number(raw.get("gamma")), quote_time))
+                                             number(raw.get("delta")), number(raw.get("gamma")), quote_time,
+                                             number(raw.get("volatility")), number(raw.get("theta")),
+                                             number(raw.get("vega"))))
         return tuple(result)
 
     def poll(self, symbols: list[str], tracked: dict, max_dte: int) -> list[Snapshot]:

@@ -46,6 +46,9 @@ class Option:
     delta: float | None
     gamma: float | None
     quote_time: datetime
+    implied_volatility: float | None = None  # Provider-reported chain volatility.
+    theta: float | None = None
+    vega: float | None = None
 
     def valid(self) -> bool:
         return (self.side in {"CALL", "PUT"} and positive(self.strike, self.ask)
