@@ -6,7 +6,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .config import Settings
+from .config import Settings, STRATEGY_VERSION
 from .features import quote_ok
 from .models import ET
 from .research import price_replay
@@ -44,12 +44,17 @@ def alert_feedback(store, day):
         atr = snapshot.get("prior_atr")
         trigger_gap_atr = (abs(features["spot"]-setup["trigger"])/atr
                            if atr and setup.get("trigger") is not None and features.get("spot") else None)
-        quotes = []
+        quotes, invalidated_at = [], None
+        direction = 1 if alert["side"]=="CALL" else -1
         for row in store.db.execute(
             "SELECT payload FROM snapshots WHERE symbol=? AND at>=? AND at<? ORDER BY at",
             (alert["symbol"], alert["at"], (at+timedelta(days=1)).date().isoformat()),
         ):
             snap = read_snapshot(row["payload"])
+            if (invalidated_at is None and setup.get("invalidation") is not None
+                    and 0 <= (snap.at-snap.spot_time).total_seconds() <= settings.max_quote_age_seconds
+                    and direction*(snap.spot-setup["invalidation"]) <= 0):
+                invalidated_at = snap.at
             option = next((o for o in snap.options if o.symbol == alert["contract"]), None)
             if option and quote_ok(option, snap, settings) and option.quote_time >= initial_quote_at:
                 quotes.append((option.quote_time, option.bid))
@@ -69,6 +74,7 @@ def alert_feedback(store, day):
         result.append({
             "id":alert["id"], "symbol":alert["symbol"], "contract":alert["contract"],
             "alert_at":alert["at"], "entry_ask":entry, "score":current["score"] if current else None,
+            "strategy":features.get("strategy","legacy"), "delivery":alert["delivery"],
             "setup":setup.get("name"), "trigger_gap_atr":trigger_gap_atr,
             "first_qualified_at":first["at"] if first else None,
             "first_qualified_ask":first["ask"] if first else None,
@@ -82,6 +88,12 @@ def alert_feedback(store, day):
             "last_bid":last_bid, "last_at":last_at.isoformat() if last_at else None,
             "last_ask_to_bid_return":last_bid/entry-1 if last_bid is not None else None,
             "horizon_returns":horizons,
+            "sampled_invalidation_at":invalidated_at.isoformat() if invalidated_at else None,
+            "first_100pct_at":next((t.isoformat() for t,b in quotes if b>=2*entry),None),
+            "peak_return_before_sampled_invalidation":max(
+                (b/entry-1 for t,b in quotes if invalidated_at is None or t<invalidated_at),default=None),
+            "user_feedback":dict(feedback) if (feedback:=store.db.execute(
+                "SELECT outcome,notes,recorded_at FROM user_feedback WHERE alert_id=?",(alert["id"],)).fetchone()) else None,
         })
     return result
 
@@ -168,8 +180,16 @@ def run_nightly(store, day, directory, symbols=(), client=None):
             labels[f"stock_return_{minutes}m_directional"] = (
                 direction*(min(matches)[1]/row["spot"]-1) if matches and row["spot"] else None)
         flow_events.append({**dict(row), "future_labels":labels})
+    candidate_rows = []
+    candidate_blocks = Counter()
+    for row in store.db.execute("SELECT * FROM candidate_evaluations WHERE day=? ORDER BY at",(day,)):
+        item = dict(row)
+        item["features"] = json.loads(item["features"])
+        candidate_blocks.update(item["features"].get("blockers",[]))
+        candidate_rows.append(item)
     result = {
         "day":day,"generated_at":datetime.now(timezone.utc).isoformat(),
+        "report_strategy":STRATEGY_VERSION,
         "universe":list(symbols),"universe_size":len(symbols),"full_universe_price_research":client is not None,
         "data_errors":errors,"discovery_coverage":coverage,"chain_coverage":chain_coverage,
         "universe_flow_events":flow_events,
@@ -180,6 +200,8 @@ def run_nightly(store, day, directory, symbols=(), client=None):
                           "Small, selected daily cohorts do not establish predictive accuracy."],
         "decision_reasons":dict(Counter(r["reason"] for r in rows)),
         "candidate_evaluations":evaluations,
+        "all_expiry_side_evaluations":candidate_rows,
+        "all_candidate_blocker_counts":dict(candidate_blocks),
         "setup_cohorts":{k:{"independent_symbol_side_setups":len(v),"positive_30m":sum(x>0 for x in v),
                             "mean_stock_30m_directional":sum(v)/len(v)} for k,v in grouped.items()},
         "universe_price_setups":research,"captured_option_returns":store.end_of_day_options(day),

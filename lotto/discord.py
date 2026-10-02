@@ -16,11 +16,16 @@ def alert_payload(candidate: Candidate) -> dict:
     dte = (option.expiry - snap.at.astimezone(ET).date()).days
     side = "C" if option.side == "CALL" else "P"
     setup = candidate.setup
-    structure = (f"**{setup.name.replace('_', ' ').title()} · {'BUILDING' if setup.building else 'TRIGGERED'}**\n"
+    structure = (f"**{setup.name.replace('_', ' ').title()} · {'DEVELOPING' if setup.building else 'TRIGGERED'}**\n"
                  f"Watch ${setup.trigger:.2f} · Invalidation ${setup.invalidation:.2f}\n") if setup else ""
+    if setup and setup.target and (1 if option.side=="CALL" else -1)*(setup.target-snap.spot)>0:
+        structure += f"Prior extreme to retest: ${setup.target:.2f}\n"
     metrics = candidate.metrics
+    level = metrics.get("next_round_level")
+    if level and abs(level-snap.spot)<= (snap.prior_atr or 0)*.5:
+        structure += f"Nearby round level: ${level:g}\n"
     return {"username": "Lotto Scanner", "allowed_mentions": {"parse": []}, "embeds": [{
-        "title": "🚨 POTENTIAL LOTTO" if candidate.state != "RUNNER" else "🚀 POTENTIAL RUNNER — NEW LEG",
+        "title": "🚨 POTENTIAL OPTION IDEA" if candidate.state != "RUNNER" else "🚀 POTENTIAL OPTION IDEA — NEW LEG",
         "description": f"**{snap.symbol} {option.strike:g}{side} · {option.expiry.isoformat()} · {dte}DTE**\n"
                        f"Ask **${option.ask:.2f}** · Bid ${option.bid:.2f}\n"
                        + structure + f"Stock ${snap.spot:.2f} · From open {metrics['return_from_open']:+.2%} · From prior close {metrics['return_from_close']:+.2%}\n"

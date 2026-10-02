@@ -11,11 +11,13 @@ the code default. No case-study ticker list replaces the configured universe.
 
 Every cycle requests stock quotes for the **whole universe** in one batch.
 The worker also rotates `/chains` requests across every configured symbol:
-up to `LOTTO_SWEEP_PER_CYCLE=24` non-promoted names per minute, due again after
-`LOTTO_SWEEP_MINUTES=4`. Up to `LOTTO_CHAIN_CAPACITY=18` developing names
+up to `LOTTO_SWEEP_PER_CYCLE=26` non-promoted names per minute, due again after
+`LOTTO_SWEEP_MINUTES=3`. Up to `LOTTO_CHAIN_CAPACITY=24` developing names
 receive minute bars and chains each cycle, plus previously alerted names for
 outcome tracking. At normal request speed, the 102-name chain sweep completes
-in roughly four cycles. The log reports the actual count covered within five
+in roughly three cycles. SPY, QQQ and IWM retain deep slots throughout the session
+through `LOTTO_CONTINUOUS_SYMBOLS`; the remaining slots rotate across the universe.
+The log reports actual coverage within the configured sweep window in
 minutes; request failures or slow responses can lengthen that interval.
 
 Promotion uses price movement, range, stock-volume acceleration, **and** new
@@ -38,47 +40,79 @@ The same symmetric call/put rules apply to every name:
 
 - Opening break: the first ten-minute range breaks in the direction of the open,
   prior close and VWAP.
+- Opening drive: five completed bars can establish early directional momentum,
+  VWAP acceptance and a recent pivot; the shorter options baseline requires
+  three active strikes, a triggered setup and a higher score.
+- Pullback resumption: a meaningful earlier impulse, measurable retracement,
+  local recovery and room to retest the earlier extreme relative to invalidation.
+- Level reclaim: acceptance through the completed opening range, premarket or
+  previous-session boundary. Round numbers are displayed as context.
 - Reversal: VWAP is reclaimed or lost with directional acceleration. A bullish
-  reversal need not already be above yesterday's close.
+  reversal need not already be above yesterday's close. A local pivot and EMA
+  turn can also identify an intraday recovery before reaching session VWAP.
 - Coiled continuation: a prior impulse followed by a 30-, 60- or 120-minute
   tight range, VWAP acceptance and sustained options activity.
 - Continuation: directional efficiency, VWAP acceptance and proximity to the
-  current session extreme.
+  current session extreme; a recovery can use its recent pivot before reaching
+  the old high/low.
 
-Alerts distinguish **BUILDING** from **TRIGGERED**, with a trigger, invalidation,
+Alerts distinguish **DEVELOPING** from **TRIGGERED**, with a trigger, invalidation,
 stock price, returns from open/prior close, stock volume, options activity and
 independent market/sector context. TSM maps to SMH; QQQ uses SPY rather than itself.
 Peer confirmation excludes the target. Relative ETF leadership can qualify
 against a flat benchmark.
 
 Stock volume can qualify through either high cumulative same-time pace or a
-local five-minute volume burst accompanied by ATR expansion. Baselines use prior
+local five-minute volume burst accompanied by ATR expansion. A quieter-day
+recovery may instead qualify through improving local stock volume, directional
+progress and stronger multi-strike option acceleration. Baselines use prior
 sessions only. ATR uses 14 prior true ranges. Thresholds remain uncalibrated
 research defaults; the historical case study is not proof of an edge.
 
 Options evidence requires synchronized fresh quotes, multiple neighboring active
 strikes, ten minutes of comparable counters and either acceleration or sustained
-twenty-minute activity. Coils require the sustained path. Volume-counter resets,
+twenty-minute activity. A four-minute baseline is available only with a triggered,
+three-strike setup and a higher score; two-strike candidates need stronger
+acceleration. Coils may use a fresh burst or sustained activity. Volume-counter resets,
 missing observations and large time gaps invalidate that evidence. Chains do
 **not** establish ask-side buying, aggressor direction or opening-position intent.
 
 Contract selection checks spread, price, delta, gamma, moneyness and DTE.
 By default, lotto candidates are limited to options expiring today or tomorrow; all 102
 underlyings remain in the stock and option-chain discovery universe.
-Unavailable signed-flow and catalyst evidence receives no points: the research
-score's maximum is 87/100, with a default threshold of 72.
+Phase-one scoring uses price structure, stock/option activity, breadth, entry
+location, independent context, liquidity and a capped delta/gamma response
+comparison. The default threshold is 70/100. Strike migration is recorded but
+does not demand trading farther-out strikes. Scores are not comparable to the
+old 87-point-maximum formula and are not calibrated probabilities.
+
+The normal ask ceiling remains $2.50; sufficiently large prior ATR can expand
+it to `min($7.50, 0.25 × ATR)`. The minimum ask is $0.10 and minimum absolute
+delta is 0.10. A chosen out-of-the-money strike must be within one prior ATR.
+Spreads still must satisfy **both** 15% of ask and $0.15 absolute limits. The
+delta/gamma ranking proxy holds IV and time fixed; it is not a return forecast.
 
 ## Alert restraint and observability
 
-Defaults: five ideas per day, one per cycle, two per ticker, two minutes of
-confirmation across three distinct completed bars, 45-minute ticker cooldown and a fresh
-reset/new contract for re-alerting. The earliest possible opening signal is
-approximately 9:44 ET if observations begin at the open and all gates qualify.
-New ideas stop 30 minutes before the actual session close.
+Defaults: at most eight ideas per day, two per cycle and two per ticker. These
+are ceilings, not quotas. One minute of confirmation requires two distinct
+completed bars; poll jitter no longer adds another minute. A 30-minute ticker
+cooldown and a fresh reset or direction change govern a new leg, including a
+new attempt in the same contract. The earliest possible opening signal is
+approximately 9:36 ET with complete, timely observations; collection delays can
+make it later. New ideas stop 15 minutes before the actual close. In the final
+30 minutes, only triggered setups with delta at least 0.20, spread at most 10%,
+limited extension and a higher score can qualify.
+
+A developing setup must be within 0.06 ATR of its trigger. A triggered idea
+cannot be more than 0.25 ATR beyond it. Pullback ideas need at least as much
+stock-price room to the previous extreme as to their invalidation. These are
+first-phase hypotheses, not statistically proven cutoffs.
 
 Logs show the whole-universe quote count, promoted chain count, missing-data
 conditions, and recent rejection reasons. Decisions persist the setup, features,
-score, contract and blockers. Ranking rewards rising scores; materially falling
+score, contract and blockers. All evaluated expiry/side candidates also retain
+the strategy version and full settings. Ranking rewards rising scores; materially falling
 scores cannot alert. An empty alert day is investigated through those records,
 not solved by manufacturing signals.
 
@@ -105,6 +139,14 @@ open-to-close coverage. The latter is unavailable without quotes in the first
 and last session minutes. Zero bids remain valid -100% observations. No final
 chain snapshot can reconstruct unrecorded intraday option quotes or peak returns.
 Returns are sampled quotes, not actual executions.
+
+Alert feedback additionally records the first sampled doubling, first sampled
+stock invalidation, and best sampled bid before that invalidation. Trader
+feedback remains separate from measured outcomes and can be recorded by ID:
+
+```bash
+python3 -m lotto.main feedback --alert-id ID --outcome mixed --notes "First partial worked; remainder faded"
+```
 
 Offline report from captured observations:
 
@@ -162,3 +204,4 @@ experiments. Replay JSONL contains arrays of `Snapshot.to_dict()` observations,
 one array per cycle. All timestamps need offsets.
 
 Case-study research: [September 21–22 review](docs/session-research-2026-09-22.md).
+Phase-one release: [October 2 validation and rollout](docs/phase-one-release-2026-10-02.md).

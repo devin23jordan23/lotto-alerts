@@ -25,4 +25,4 @@ def demo_frames():
                                   bid, ask, volumes[index], 1000, .30, .06, at))
         yield [Snapshot("DEMO", at, close, at, 94, tuple(bars), tuple(options),
                         .004, at, "SYNTHETIC SECTOR", "synthetic",
-                        at.replace(hour=16, minute=0))]
+                        at.replace(hour=16, minute=0),prior_atr=5)]

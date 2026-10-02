@@ -72,6 +72,19 @@ class AdapterTests(unittest.TestCase):
         self.client.candles = Mock(return_value={"candles": candles})
         bars = self.client.bars("TEST", now, with_baseline=False)
         self.assertEqual([b.end.minute for b in bars], [31, 32])
+        self.assertEqual(self.client.levels[("TEST",now.date())]["premarket_high"],102)
+        self.assertEqual(self.client.candles.call_args.args[-1],True)
+
+    def test_premarket_levels_cannot_include_regular_or_future_extremes(self):
+        now=datetime(2026,9,21,9,32,30,tzinfo=ET)
+        candles=[]
+        for minute,high in ((29,101),(30,110),(31,111),(32,120),(33,130)):
+            candles.append({"datetime":now.replace(minute=minute,second=0).timestamp()*1000,
+                            "open":100,"high":high,"low":99,"close":100,"volume":100})
+        self.client.candles=Mock(return_value={"candles":candles})
+        bars=self.client.bars("TEST",now,with_baseline=False)
+        self.assertEqual(self.client.levels[("TEST",now.date())]["premarket_high"],101)
+        self.assertEqual(max(b.high for b in bars),111)
 
     def test_calendar_closed_and_early_close(self):
         now = datetime(2026, 11, 27, 12, 0, tzinfo=ET)
@@ -102,7 +115,7 @@ class AdapterTests(unittest.TestCase):
         frame=client.poll(symbols,{},7)
         self.assertEqual(len(frame),18)
         self.assertEqual(sum(path=='/quotes' for path,_ in calls),1)
-        self.assertEqual(sum(path=='/chains' for path,_ in calls),42)
+        self.assertEqual(sum(path=='/chains' for path,_ in calls),44)
         for _ in range(3):
             client.poll(symbols,{},7)
         self.assertEqual({params['symbol'] for path,params in calls if path=='/chains'},set(symbols))

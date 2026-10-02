@@ -1,6 +1,6 @@
 """Price paths measurable before the next leg. No eventual HOD/LOD features."""
 from dataclasses import dataclass
-from math import isfinite
+from math import ceil, floor, isfinite
 
 from .models import Snapshot
 
@@ -11,10 +11,13 @@ class Setup:
     trigger: float
     invalidation: float
     building: bool = False
+    target: float | None = None
 
 
 def path_features(snap: Snapshot, direction: int) -> dict:
     bars = snap.bars
+    if len(bars) < 5:
+        raise ValueError("Price research needs five completed bars")
     closes = [b.close for b in bars]
     volume = sum(b.volume for b in bars)
     cumul_volume, cumul_value, vwaps = 0, 0.0, []
@@ -33,34 +36,47 @@ def path_features(snap: Snapshot, direction: int) -> dict:
     high, low = max(b.high for b in bars), min(b.low for b in bars)
     previous_high = max(b.high for b in bars[:-1])
     previous_low = min(b.low for b in bars[:-1])
-    opening_high, opening_low = max(b.high for b in bars[:10]), min(b.low for b in bars[:10])
-    old = bars[:-5]
+    opening = bars[:min(10, len(bars)-1)]
+    opening_high, opening_low = max(b.high for b in opening), min(b.low for b in opening)
+    lookback = min(5, len(bars)//2)
+    old = bars[:-lookback]
     old_volume = sum(b.volume for b in old)
     baseline = bars[-1].expected_cumulative_volume
     old_baseline = old[-1].expected_cumulative_volume
     pace = volume / baseline if baseline and baseline > 0 else 0
     old_pace = old_volume / old_baseline if old_baseline and old_baseline > 0 else 0
-    last5 = sum(b.volume for b in bars[-5:])
-    prev5 = sum(b.volume for b in bars[-10:-5])
+    last5 = sum(b.volume for b in bars[-lookback:])
+    prev5 = sum(b.volume for b in bars[-2*lookback:-lookback])
     expected5 = baseline-old_baseline if baseline and old_baseline else 0
-    opposing = sum(b.volume for b in bars[-5:] if direction * (b.close-b.open) < 0)
-    path = sum(abs(closes[i]-closes[i-1]) for i in range(len(bars)-10, len(bars)))
+    opposing = sum(b.volume for b in bars[-lookback:] if direction * (b.close-b.open) < 0)
+    efficiency_window = min(10, len(bars)-1)
+    path = sum(abs(closes[i]-closes[i-1]) for i in range(len(bars)-efficiency_window, len(bars)))
     atr = snap.prior_atr if snap.prior_atr and isfinite(snap.prior_atr) and snap.prior_atr > 0 else None
-    ret5 = direction * (closes[-1]/closes[-6]-1)
-    ret_previous = direction * (closes[-6]/closes[-11]-1)
+    # Match the independent benchmark's five-minute horizon even while the
+    # opening stock-volume comparison uses shorter, equally sized windows.
+    reference5 = closes[-6] if len(bars)>=6 else bars[0].open
+    ret5 = direction * (closes[-1]/reference5-1)
+    ret_previous = direction * (closes[-6]/closes[-11]-1) if len(bars)>=11 else 0
     extreme = high if direction == 1 else low
     adverse = low if direction == 1 else high
     # Each historical bar is compared with VWAP known at that bar, not today's final VWAP.
     acceptance = sum(direction*(b.close-v) > 0 for b, v in zip(bars[-5:], vwaps[-5:]))/5
-    near = sum(direction*(extreme-b.close)/extreme <= .01 for b in bars[-10:])/10
+    near = sum(direction*(extreme-b.close)/extreme <= .01 for b in bars[-10:])/len(bars[-10:])
+    extreme_index = max(range(len(bars)), key=lambda i: direction*(bars[i].high if direction == 1 else bars[i].low))
+    after_extreme = bars[extreme_index:]
+    pullback = min(b.low for b in after_extreme) if direction == 1 else max(b.high for b in after_extreme)
+    pivot = max(b.high for b in bars[-6:-1]) if direction == 1 else min(b.low for b in bars[-6:-1])
+    # Broad price-dependent increments supply context, never a standalone signal.
+    step = 50 if snap.spot>=1000 else 10 if snap.spot>=500 else 5 if snap.spot>=100 else 1 if snap.spot>=20 else .5
+    round_level = (ceil(snap.spot/step) if direction==1 else floor(snap.spot/step))*step
     return {
         "pace_rvol": pace, "pace_persistence": pace/old_pace if old_pace else 0,
         "volume_acceleration": last5/max(1, prev5), "return_5m_directional": ret5,
         "local_rvol_5m": last5/expected5 if expected5 > 0 else 0,
         "return_3m_directional": direction*(closes[-1]/closes[-4]-1),
         "price_acceleration": ret5-ret_previous, "extreme_distance": direction*(extreme-snap.spot)/extreme,
-        "vwap": vwaps[-1], "vwap_slope_directional": direction*(vwaps[-1]-vwaps[-6]),
-        "above_vwap_share": acceptance, "efficiency": abs(closes[-1]-closes[-11])/path if path else 0,
+        "vwap": vwaps[-1], "vwap_slope_directional": direction*(vwaps[-1]-vwaps[-1-lookback]),
+        "above_vwap_share": acceptance, "efficiency": abs(closes[-1]-closes[-1-efficiency_window])/path if path else 0,
         "opposing_volume_share": opposing/max(1, last5), "near_extreme_share": near,
         "return_from_close": snap.spot/snap.prior_close-1,
         "opening_gap": bars[0].open/snap.prior_close-1,
@@ -73,6 +89,14 @@ def path_features(snap: Snapshot, direction: int) -> dict:
         "ema_slope_directional": direction*(ema9[-1]-ema9[-4]),
         "atr_available": int(atr is not None), "session_range_atr": (high-low)/atr if atr else 0,
         "move_from_open_atr": direction*(snap.spot-bars[0].open)/atr if atr else 0,
+        "volume_window_minutes": lookback,
+        "impulse_atr": direction*(extreme-bars[0].open)/atr if atr else 0,
+        "pullback_atr": direction*(extreme-pullback)/atr if atr else 0,
+        "minutes_since_extreme": len(bars)-1-extreme_index,
+        "pullback_extreme": pullback, "local_pivot": pivot,
+        "distance_from_vwap_atr": direction*(snap.spot-vwaps[-1])/atr if atr else 0,
+        "recent_move_atr": direction*(closes[-1]-closes[-1-lookback])/atr if atr else 0,
+        "next_round_level": round_level,
         "vwap_reclaimed": int(direction*(bars[-1].close-vwaps[-1]) > 0 and
                               any(direction*(b.close-v) <= 0 for b,v in zip(bars[-10:-1], vwaps[-10:-1]))),
     }
@@ -81,21 +105,63 @@ def path_features(snap: Snapshot, direction: int) -> dict:
 def detect_setup(snap: Snapshot, direction: int, metrics: dict) -> Setup | None:
     bars, spot = snap.bars, snap.spot
     vwap = metrics["vwap"]
+    atr = snap.prior_atr if metrics["atr_available"] else None
+    pivot = metrics["local_pivot"]
+    # A recovery can begin below session VWAP. Require a real local pivot break,
+    # a turned short trend and measurable recovery; its first target is VWAP.
     if direction*(spot-vwap) <= 0:
+        recovered = (direction*(spot-(min(b.low for b in bars[-20:]) if direction==1 else max(b.high for b in bars[-20:])))/atr
+                     if atr else 0)
+        if (len(bars)>=20 and atr and recovered>=.15 and metrics["recent_move_atr"]>=.06
+                and metrics["efficiency"]>=.45 and direction*(spot-pivot)>0
+                and direction*(metrics["ema9"]-metrics["ema20"])>0
+                and metrics["ema_slope_directional"]>0):
+            invalidation = min(b.low for b in bars[-3:]) if direction==1 else max(b.high for b in bars[-3:])
+            return Setup("INTRADAY_REVERSAL",pivot,invalidation,target=vwap)
         return None
+    session_extreme = max(b.high for b in bars) if direction == 1 else min(b.low for b in bars)
+    # Opening momentum has its own short warmup and a recent price trigger. A
+    # five-minute opening drive cannot wait for a ten-minute options comparison.
+    if (len(bars) <= 20 and atr and metrics["impulse_atr"] >= .20
+            and metrics["above_vwap_share"] >= .8 and metrics["return_3m_directional"] > 0
+            and metrics["ema_slope_directional"] > 0 and metrics["efficiency"] >= .5
+            and 0 < metrics["distance_from_vwap_atr"] <= .65
+            and direction*(spot-bars[0].open) > 0):
+        return Setup("OPENING_DRIVE", pivot, vwap, building=direction*(spot-pivot) <= 0)
+    # Retain the original impulse while the stock rests or briefly loses VWAP.
+    # The alert candidate appears only when a local recovery is actually visible.
+    if (atr and metrics["impulse_atr"] >= .35 and metrics["minutes_since_extreme"] >= 5
+            and metrics["pullback_atr"] >= .10 and metrics["above_vwap_share"] >= .6
+            and metrics["return_3m_directional"] > 0 and metrics["ema_slope_directional"] > 0
+            and direction*(spot-metrics["ema9"]) > 0 and metrics["recent_move_atr"] >= .04):
+        local_risk = min(b.low for b in bars[-3:]) if direction==1 else max(b.high for b in bars[-3:])
+        invalidation = max(metrics["pullback_extreme"], vwap, local_risk) if direction == 1 else min(metrics["pullback_extreme"], vwap, local_risk)
+        return Setup("PULLBACK_RESUMPTION", pivot, invalidation,
+                     building=direction*(spot-pivot) <= 0, target=session_extreme)
+    # Levels are frozen pre-session or from already completed opening bars.
+    # A touch alone is insufficient: require recent acceptance and direction.
+    levels = ((snap.premarket_high, snap.prior_high, metrics["opening_high"])
+              if direction == 1 else (snap.premarket_low, snap.prior_low, metrics["opening_low"]))
+    if (atr and metrics["above_vwap_share"] >= .8 and metrics["recent_move_atr"] >= .04
+            and metrics["ema_slope_directional"] > 0 and metrics["session_range_atr"] >= .25):
+        for level in levels:
+            if (level is not None and isfinite(level) and level > 0
+                    and 0 <= direction*(spot-level) <= .25*atr
+                    and any(direction*(b.close-level) <= 0 for b in bars[-6:-1])):
+                return Setup("LEVEL_RECLAIM", level, vwap)
     boundary = metrics["opening_high"] if direction == 1 else metrics["opening_low"]
     both_levels = (direction*(spot-bars[0].open) > 0 and direction*(spot-snap.prior_close) > 0)
-    if len(bars) <= 45 and both_levels and direction*(spot-boundary) > 0 and metrics["return_3m_directional"] > 0:
+    if 11 <= len(bars) <= 45 and both_levels and direction*(spot-boundary) > 0 and metrics["return_3m_directional"] > 0:
         return Setup("OPENING_BREAK", boundary, vwap)
     # Established strength + 30/60/120-minute compression near the directional box edge.
     for size in (120, 60, 30):
         if len(bars) < size+10:
             continue
-        box = bars[-size:]
+        box = bars[-size-1:-1]  # Current bar may break the already-established box.
         upper, lower = max(b.high for b in box), min(b.low for b in box)
         width = upper-lower
         limit = max(spot*.006, (snap.prior_atr or 0)*.35)
-        earlier = bars[:-size]
+        earlier = bars[:-size-1]
         origin = min(b.low for b in earlier) if direction == 1 else max(b.high for b in earlier)
         impulse = direction*(box[0].open/origin-1)
         position = (spot-lower)/width if direction == 1 and width else (upper-spot)/width if width else .5
@@ -105,9 +171,10 @@ def detect_setup(snap: Snapshot, direction: int, metrics: dict) -> Setup | None:
             metrics["box_high"], metrics["box_low"] = upper, lower
             trigger = upper if direction == 1 else lower
             invalidation = max(lower, vwap) if direction == 1 else min(upper, vwap)
-            return Setup("COILED_CONTINUATION", trigger, invalidation, building=True)
+            return Setup("COILED_CONTINUATION", trigger, invalidation, building=direction*(spot-trigger) <= 0)
     # An early reclaim may still be far from the opposite session extreme.
-    if (metrics["vwap_reclaimed"] and metrics["return_from_adverse_extreme"] >= .004
+    if (metrics["vwap_reclaimed"] and (metrics["return_from_adverse_extreme"] >= .004 or
+                                     (atr and metrics["return_from_adverse_extreme"]*spot/atr>=.15))
             and metrics["return_3m_directional"] > 0 and metrics["ema_slope_directional"] > 0):
         level = max(b.high for b in bars[-6:-1]) if direction == 1 else min(b.low for b in bars[-6:-1])
         return Setup("REVERSAL", level, vwap, building=direction*(spot-level) <= 0)
@@ -115,5 +182,10 @@ def detect_setup(snap: Snapshot, direction: int, metrics: dict) -> Setup | None:
             and metrics["efficiency"] >= .55 and metrics["above_vwap_share"] >= .8
             and metrics["vwap_slope_directional"] > 0):
         level = metrics["previous_high"] if direction == 1 else metrics["previous_low"]
+        if (atr and direction*(level-spot)>.06*atr and metrics["recent_move_atr"]>=.06
+                and direction*(metrics["ema9"]-metrics["ema20"])>0):
+            invalidation = min(b.low for b in bars[-3:]) if direction==1 else max(b.high for b in bars[-3:])
+            return Setup("RECOVERY_CONTINUATION",pivot,invalidation,
+                         building=direction*(spot-pivot)<=0,target=level)
         return Setup("CONTINUATION", level, vwap, building=direction*(spot-level) <= 0)
     return None

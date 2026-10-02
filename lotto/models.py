@@ -78,6 +78,10 @@ class Snapshot:
     peer_return_5m: float | None = None
     peer_time: datetime | None = None
     peer_leaders: tuple[str, ...] = ()
+    prior_high: float | None = None
+    prior_low: float | None = None
+    premarket_high: float | None = None
+    premarket_low: float | None = None
 
     @property
     def day(self) -> str:
@@ -119,7 +123,7 @@ class Snapshot:
         if not 0 <= (self.at - self.spot_time).total_seconds() <= max_age:
             return ["stale or future underlying quote"]
         if len(self.bars) < min_bars:
-            return ["warming up: opening range plus one completed bar required"]
+            return [f"warming up: {min_bars} completed opening bars required"]
         if not 0 <= (self.at - self.bars[-1].end).total_seconds() <= max_age:
             return ["stale or future underlying bars"]
         if len({o.symbol for o in self.options}) != len(self.options):

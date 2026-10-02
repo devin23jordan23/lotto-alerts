@@ -35,7 +35,7 @@ class Engine:
                 continue
             self.store.record(snap)
             self.store.track(snap, cfg)
-            problems = snap.problems(cfg.max_quote_age_seconds)
+            problems = snap.problems(cfg.max_quote_age_seconds, min_bars=cfg.min_opening_bars)
             if problems:
                 if not snap.problems(cfg.max_quote_age_seconds, min_bars=1):
                     history.append(snap)  # Capture opening options history before price setup warmup.
@@ -48,6 +48,7 @@ class Engine:
                 continue
             self.last_bar[key] = snap.bars[-1].end
             evaluated = candidates(snap, history, cfg)
+            self.store.record_candidates(snap, evaluated, cfg)
             history.append(snap)
             self.history[key] = [s for s in history if snap.at - s.at <= timedelta(minutes=25)]
             valid = [c for c in evaluated if c.qualifying]
@@ -68,7 +69,9 @@ class Engine:
                 continue
             self.cool_since.pop(key, None)
             best = max(valid, key=lambda c: c.score)
-            score_key = (*key, best.option.side, best.option.expiry.isoformat(), best.setup.name)
+            # A reclaim becoming a continuation is still the same directional
+            # thesis. Require distinct completed bars, not a perfect poll timer.
+            score_key = (*key, best.option.side, best.option.expiry.isoformat())
             for other in list(self.qualified_since):
                 if other[:2] == key and other != score_key:
                     self.qualified_since.pop(other, None)
@@ -80,12 +83,12 @@ class Engine:
             best.score_change = best.score - old[-1][1] if old else 0
             prior_scores.append((snap.at, best.score))
             self.scores[score_key] = [s for s in prior_scores if snap.at - s[0] <= timedelta(minutes=10)]
-            self.qualified_since.setdefault(score_key, snap.at)
-            if snap.at - self.qualified_since[score_key] < timedelta(minutes=cfg.confirmation_minutes):
+            self.qualified_since.setdefault(score_key, snap.bars[-1].end)
+            if snap.bars[-1].end - self.qualified_since[score_key] < timedelta(minutes=cfg.confirmation_minutes):
                 self.store.decision(snap, "IGNITION", "confirming persistence", best)
                 continue
             # Flat strong scores can persist; materially deteriorating scores cannot alert.
-            if best.score_change < -2:
+            if best.score_change < -5:
                 self.store.decision(snap, "COOLING", "score deteriorating", best)
                 continue
             close = snap.session_end or snap.at.astimezone(ET).replace(hour=16, minute=0, second=0, microsecond=0)
@@ -96,14 +99,13 @@ class Engine:
             if last:
                 best.state = "RUNNER"
                 if (snap.at - datetime.fromisoformat(last["at"]) < timedelta(minutes=cfg.ticker_cooldown_minutes)
-                        or key not in self.rearmed):
+                        or (key not in self.rearmed and last["side"] == best.option.side)):
                     self.store.decision(snap, "RUNNER", "cooldown or fresh reset required", best)
                     continue
             else:
                 best.state = "IGNITION"
-            if self.store.already_alerted(snap.day, best.option.symbol):
-                self.store.decision(snap, "RUNNER", "contract already alerted today", best)
-                continue
+            # A previously alerted contract may form a genuinely new leg after
+            # cooldown and a recorded reset. The ticker/day cap still applies.
             ready.append(best)
         alerts = []
         # Rank the whole scan cycle before spending the daily budget.

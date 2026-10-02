@@ -5,10 +5,13 @@ from math import isfinite
 
 
 class Discovery:
-    def __init__(self, capacity=12):
+    def __init__(self, capacity=12, always_deep=()):
         if not 4 <= capacity <= 24:
             raise ValueError("LOTTO_CHAIN_CAPACITY must be between 4 and 24")
         self.capacity = capacity
+        self.always_deep = set(always_deep)
+        if len(self.always_deep)>capacity-max(1,capacity//4):
+            raise ValueError("Continuous names must leave room for universe exploration")
         self.history = defaultdict(list)
         self.promoted = {}
         self.explore_leases = {}
@@ -71,7 +74,10 @@ class Discovery:
                             if s in ranks and now-at < timedelta(minutes=12)}
         held = {s:since for s,since in self.promoted.items() if s in ranks and now-since < timedelta(minutes=25)}
         protected = [s for s in held if s in self.flow_leases and s not in self.explore_leases]
-        selected = sorted(protected, key=lambda s:-ranks[s])[:core_capacity]
+        selected = sorted(self.always_deep & ranks.keys())
+        for symbol in sorted(protected, key=lambda s:-ranks[s]):
+            if symbol not in selected and len(selected)<core_capacity:
+                selected.append(symbol)
         for symbol in sorted((s for s in held if s not in self.explore_leases and s not in selected),
                              key=lambda s:-ranks[s]):
             if len(selected) < core_capacity:
@@ -81,7 +87,7 @@ class Discovery:
                 selected.append(symbol)
         # A genuinely stronger newcomer may displace at most one low-priority lease.
         newcomers = [s for s in ranks if s not in selected]
-        replaceable = [s for s in selected if s not in tracked and s not in self.flow_leases]
+        replaceable = [s for s in selected if s not in tracked and s not in self.flow_leases and s not in self.always_deep]
         if newcomers and replaceable:
             best, worst = max(newcomers, key=ranks.get), min(replaceable, key=ranks.get)
             if ranks[best] > max(2, ranks[worst]*2):

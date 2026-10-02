@@ -31,10 +31,10 @@ class DevelopingTests(unittest.TestCase):
         return replace(self.frames[-1],at=bars[-1].end,spot_time=bars[-1].end,spot=prices[-1],
                        bars=bars,prior_close=prior,prior_atr=3)
 
-    def test_opening_break_after_ten_minutes(self):
+    def test_opening_drive_is_distinct_from_later_range_break(self):
         snap = self.path([100+i*.15 for i in range(12)])
         setup = detect_setup(snap,1,path_features(snap,1))
-        self.assertEqual(setup.name,"OPENING_BREAK")
+        self.assertEqual(setup.name,"OPENING_DRIVE")
         self.assertLess(setup.trigger,snap.spot)
 
     def test_reversal_does_not_require_green_day(self):
@@ -162,7 +162,7 @@ class DevelopingTests(unittest.TestCase):
 
     def test_three_distinct_minute_observations_confirm(self):
         store=Store(':memory:');self.addCleanup(store.db.close)
-        engine=Engine(store)
+        engine=Engine(store,Settings(confirmation_minutes=2,min_opening_bars=11))
         for snap in self.frames[:12]:
             self.assertFalse(engine.process([snap]))
         self.assertEqual(len(engine.process([self.frames[12]])),1)

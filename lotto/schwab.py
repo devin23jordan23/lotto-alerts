@@ -65,8 +65,10 @@ class Schwab:
         self.baselines = {}
         self.calendar_cache = {}
         self.atrs = {}
-        self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "18")))
-        self.coverage = ChainCoverage(int(os.getenv("LOTTO_SWEEP_MINUTES", "4")))
+        self.levels = {}
+        self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "24")),
+            always_deep={s.strip().upper() for s in os.getenv("LOTTO_CONTINUOUS_SYMBOLS","SPY,QQQ,IWM").split(",") if s.strip()})
+        self.coverage = ChainCoverage(int(os.getenv("LOTTO_SWEEP_MINUTES", "3")))
 
     def token(self, force=False):
         if self.broker_url:
@@ -147,10 +149,10 @@ class Schwab:
                                              for s in sessions if "start" in s and "end" in s), None)
         return self.calendar_cache[day]
 
-    def candles(self, symbol: str, start: datetime, end: datetime) -> dict:
+    def candles(self, symbol: str, start: datetime, end: datetime, extended=False) -> dict:
         return self.get("/pricehistory", {"symbol": symbol, "periodType": "day", "frequencyType": "minute", "frequency": 1,
                                         "startDate": int(start.timestamp() * 1000), "endDate": int(end.timestamp() * 1000),
-                                        "needExtendedHoursData": "false", "needPreviousClose": "true"})
+                                        "needExtendedHoursData": "true" if extended else "false", "needPreviousClose": "true"})
 
     def baseline(self, symbol: str, now: datetime):
         day = now.astimezone(ET).date()
@@ -174,6 +176,12 @@ class Schwab:
         if not hasattr(self, "atrs"):
             self.atrs = {}
         self.atrs[key] = sum(ranges[-14:])/14 if len(ranges) >= 14 else None
+        if not hasattr(self,"levels"):
+            self.levels = {}
+        if daily:
+            prior = daily[max(daily)]
+            self.levels.setdefault(key,{}).update(prior_high=max(r["high"] for r in prior),
+                                                  prior_low=min(r["low"] for r in prior))
         profiles = defaultdict(dict)
         for raw in data.get("candles", []):
             at = epoch(raw.get("datetime"))
@@ -200,8 +208,16 @@ class Schwab:
 
     def bars(self, symbol: str, now: datetime, with_baseline=True) -> tuple[Bar, ...]:
         opening = now.astimezone(ET).replace(hour=9, minute=30, second=0, microsecond=0)
-        raw = self.candles(symbol, opening, now)
+        raw = self.candles(symbol, opening.replace(hour=4), now, True)
         baseline = self.baseline(symbol, now) if with_baseline else {}
+        if not hasattr(self,"levels"):
+            self.levels = {}
+        premarket = [c for c in raw.get("candles",[]) if (at:=epoch(c.get("datetime")))
+                     and opening.replace(hour=4)<=at<opening and at+timedelta(minutes=1)<=now
+                     and number(c.get("high")) is not None and number(c.get("low")) is not None]
+        if premarket:
+            self.levels.setdefault((symbol,opening.date()),{}).update(
+                premarket_high=max(c["high"] for c in premarket),premarket_low=min(c["low"] for c in premarket))
         bars = {}
         for candle in raw.get("candles", []):
             start = epoch(candle.get("datetime"))
@@ -281,7 +297,7 @@ class Schwab:
                                          self.coverage.priorities(now))
         result = []
         began = time.monotonic()
-        sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "24")))
+        sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "26")))
         sweep_targets = self.coverage.due(symbols, now, selected, sweep_limit)
         for symbol in sweep_targets:
             if time.monotonic()-began >= 27:
@@ -300,7 +316,8 @@ class Schwab:
             except Exception as exc:
                 LOG.warning("Universe chain sweep %s unavailable (%s)", symbol, type(exc).__name__)
         # Continue unfinished cold-start work first; a slow baseline must not starve later names.
-        selected.sort(key=lambda s: (s not in tracked, getattr(self, "last_polled", {}).get(s, 0)))
+        selected.sort(key=lambda s: (s not in tracked, s not in self.discovery.always_deep,
+                                     getattr(self, "last_polled", {}).get(s, 0)))
         for symbol in selected:
             if time.monotonic()-began >= 54:
                 LOG.warning("Deep chain time budget reached; remaining candidates resume next cycle")
@@ -353,7 +370,8 @@ class Schwab:
                                        prior_atr=self.atrs.get((symbol, now.astimezone(ET).date())),
                                        market_return_5m=market_return, market_time=market_time, market_label=market,
                                        peer_return_5m=peer_return, peer_time=min((p[2] for p in peers), default=None),
-                                       peer_leaders=leaders))
+                                       peer_leaders=leaders,
+                                       **getattr(self,"levels",{}).get((symbol,now.astimezone(ET).date()),{})))
             except Exception as exc:
                 LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)
         LOG.info("Discovery: %d/%d fresh quotes, %d promoted, %d deep chains; universe chains %d/%d fresh within %d min (%d this cycle)",

@@ -6,23 +6,16 @@ from pathlib import Path
 import re
 
 from .config import Settings
-from .features import contract_ok, quote_ok
+from .features import contract_ok, quote_ok, observation_window
 from .models import ET
 
 
 def chain_reasons(snap, history, settings):
     """Explain why the option stage had no evaluable candidate."""
-    endpoints = []
-    for minutes in (5, 10):
-        target = snap.at - timedelta(minutes=minutes)
-        matches = [s for s in history if s.at <= target and (target-s.at).total_seconds() <= 90]
-        if not matches:
-            return {"reason": "missing 5/10-minute option observation", "options": len(snap.options)}
-        endpoints.append(matches[-1])
-    five, ten = endpoints
-    window = [s for s in history if s.at >= ten.at]
-    if any((b.at-a.at).total_seconds() > 150 for a,b in zip(window,window[1:])):
-        return {"reason": "option observation gap over 150 seconds", "options":len(snap.options)}
+    observed = observation_window(snap,history)
+    if observed is None:
+        return {"reason":"missing contiguous 2/4 or 5/10-minute option history","options":len(snap.options)}
+    five, ten, window, width = observed
     old = {o.symbol:o for o in five.options}
     oldest = {o.symbol:o for o in ten.options}
     current = {o.symbol:o for o in snap.options}
@@ -37,12 +30,12 @@ def chain_reasons(snap, history, settings):
             continue
         fresh += 1
         o = current[ident]
-        if o.volume-old[ident].volume >= settings.min_strike_volume_5m:
+        if (o.volume-old[ident].volume)*300/(snap.at-five.at).total_seconds() >= settings.min_strike_volume_5m:
             active += 1
             groups[(o.expiry.isoformat(),o.side)] += 1
             if contract_ok(o,snap,settings):
                 liquid += 1
-    return {"options":len(snap.options),"common_contracts":len(ids),"fresh_continuous":fresh,
+    return {"options":len(snap.options),"window_minutes":width,"common_contracts":len(ids),"fresh_continuous":fresh,
             "active_5m_contracts":active,"liquid_active_contracts":liquid,
             "max_expiry_side_active":max(groups.values(),default=0)}
 
@@ -74,7 +67,7 @@ def audit_store(store, day, settings=None):
         if not observations:
             continue
         snap=observations[-1]
-        item={"symbol":symbol,"at":snap.at.isoformat(),"problems":snap.problems(settings.max_quote_age_seconds),
+        item={"symbol":symbol,"at":snap.at.isoformat(),"problems":snap.problems(settings.max_quote_age_seconds,min_bars=settings.min_opening_bars),
               "bars":len(snap.bars),"baseline":snap.bars[-1].expected_cumulative_volume if snap.bars else None,
               "context":snap.context_label,"context_return":snap.context_return_5m,
               "chain":chain_reasons(snap,observations,settings)}
@@ -131,7 +124,7 @@ def diagnose_symbols(store, day, symbols, settings=None):
             "top_scored":sorted(scored,key=lambda r:r["score"],reverse=True)[:5],
             "last_scored":scored[-3:],
             "latest_snapshot":({"at":latest.at.isoformat(),
-                                "problems":latest.problems(settings.max_quote_age_seconds),
+                                "problems":latest.problems(settings.max_quote_age_seconds,min_bars=settings.min_opening_bars),
                                 "chain":chain_reasons(latest,snapshots,settings)} if latest else None),
             "alerts":store.db.execute("SELECT COUNT(*) FROM alerts WHERE day=? AND symbol=?",(day,symbol)).fetchone()[0],
         }

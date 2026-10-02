@@ -7,7 +7,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from .features import Candidate, quote_ok
-from .config import Settings
+from .config import Settings, STRATEGY_VERSION
 from .models import ET, Snapshot
 
 
@@ -51,6 +51,14 @@ class Store:
             CREATE TABLE IF NOT EXISTS health_incidents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, opened_at TEXT NOT NULL, reason TEXT NOT NULL,
                 notified_at TEXT, recovered_at TEXT);
+            CREATE TABLE IF NOT EXISTS candidate_evaluations (
+                day TEXT, symbol TEXT, at TEXT, contract TEXT, strategy TEXT,
+                qualifying INTEGER, score REAL, features TEXT,
+                PRIMARY KEY(symbol,at,contract,strategy));
+            CREATE INDEX IF NOT EXISTS candidate_evaluations_day ON candidate_evaluations(day);
+            CREATE TABLE IF NOT EXISTS user_feedback (
+                alert_id TEXT PRIMARY KEY, outcome TEXT NOT NULL, notes TEXT NOT NULL,
+                recorded_at TEXT NOT NULL);
         """)
 
     def record(self, snap: Snapshot) -> None:
@@ -80,12 +88,35 @@ class Store:
             self.db.execute("INSERT INTO decisions VALUES (?, ?, ?, ?, ?, ?)",
                             (snap.symbol, snap.at.isoformat(), state, reason,
                              candidate.score if candidate else None,
-                             json.dumps({"parts": candidate.parts, "metrics": candidate.metrics,
+                             json.dumps({"strategy": STRATEGY_VERSION, "parts": candidate.parts, "metrics": candidate.metrics,
                                          "score_change": candidate.score_change,
                                          "setup": asdict(candidate.setup) if candidate.setup else None,
                                          "side": candidate.option.side, "contract": candidate.option.symbol,
                                          "spot": snap.spot, "entry_ask": candidate.option.ask,
                                          "blockers": candidate.blockers} if candidate else {})))
+
+    def record_candidates(self, snap, candidates, settings):
+        """Preserve both directions/expiries, including groups that lose ranking."""
+        with self.db:
+            for candidate in candidates:
+                features = {"parts":candidate.parts, "metrics":candidate.metrics,
+                            "setup":asdict(candidate.setup) if candidate.setup else None,
+                            "side":candidate.option.side, "expiry":candidate.option.expiry.isoformat(),
+                            "entry_ask":candidate.option.ask, "entry_bid":candidate.option.bid,
+                            "spot":snap.spot, "blockers":candidate.blockers,
+                            "settings":asdict(settings)}
+                self.db.execute("INSERT OR IGNORE INTO candidate_evaluations VALUES (?,?,?,?,?,?,?,?)",
+                    (snap.day,snap.symbol,snap.at.isoformat(),candidate.option.symbol,STRATEGY_VERSION,
+                     int(candidate.qualifying),candidate.score,json.dumps(features)))
+
+    def add_feedback(self, alert_id, outcome, notes=""):
+        if outcome not in {"worked","failed","mixed"}:
+            raise ValueError("Feedback outcome must be worked, failed, or mixed")
+        if not self.db.execute("SELECT 1 FROM alerts WHERE id=?",(alert_id,)).fetchone():
+            raise ValueError("Unknown alert ID")
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO user_feedback VALUES (?,?,?,?)",
+                            (alert_id,outcome,notes,datetime.now(timezone.utc).isoformat()))
 
     def recent(self, symbol: str, day: str) -> list[Snapshot]:
         rows = self.db.execute("SELECT payload FROM snapshots WHERE symbol=? ORDER BY at DESC LIMIT 30", (symbol,))
@@ -165,7 +196,7 @@ class Store:
     def queue(self, candidate: Candidate, payload: dict, dry_run: bool) -> str:
         snap, option = candidate.snapshot, candidate.option
         ident = sha256(f"{snap.day}:{snap.symbol}:{option.symbol}:{snap.at.isoformat()}".encode()).hexdigest()[:16]
-        payload["embeds"][0]["footer"] = {"text": f"Potential setup • Research score, not probability • {ident}"}
+        payload["embeds"][0]["footer"] = {"text": f"Phase 1 • Research score, not probability • {ident}"}
         with self.db:
             self.db.execute("""INSERT INTO alerts
                 (id, day, symbol, side, contract, at, entry_ask, payload, snapshot, delivery,

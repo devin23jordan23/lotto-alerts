@@ -22,12 +22,12 @@ def price_replay(symbol, day, response):
         return {"symbol":symbol, "day":day, "error":"prior/session bars unavailable"}
     prior_close = max(previous, key=lambda p:p[0])[1]["close"]
     findings, last = [], {}
-    for index in range(10, len(bars)-1):
+    for index in range(4, len(bars)-1):
         prefix = bars[:index+1]
         current = prefix[-1]
         snap = Snapshot(symbol, current.end, current.close, current.end, prior_close, prefix, (),
                         prior_atr=client.atrs.get((symbol,end.date())))
-        problems = snap.problems()
+        problems = snap.problems(min_bars=5)
         if problems:
             continue
         for side, direction in (("CALL",1),("PUT",-1)):

@@ -5,11 +5,11 @@ import logging
 import os
 import signal
 import time
-from dataclasses import fields, replace
+from dataclasses import asdict, fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .config import Settings
+from .config import Settings, STRATEGY_VERSION
 from .demo import demo_frames
 from .discord import deliver_pending
 from .engine import Engine
@@ -53,11 +53,14 @@ def replay_frames(path):
 
 def main():
     parser = argparse.ArgumentParser(description="Selective potential options runner alerts")
-    parser.add_argument("mode", choices=("demo", "replay", "live", "report", "nightly", "check"), nargs="?", default="demo")
+    parser.add_argument("mode", choices=("demo", "replay", "live", "report", "nightly", "check", "feedback"), nargs="?", default="demo")
     parser.add_argument("--input", help="Replay JSONL: one snapshot array per scan cycle")
     parser.add_argument("--db", help="SQLite state path")
     parser.add_argument("--day", help="Session date for nightly EOD analysis (YYYY-MM-DD)")
     parser.add_argument("--once", action="store_true", help="Poll one live cycle, retaining warmup requirements")
+    parser.add_argument("--alert-id", help="Alert ID from the Discord footer for feedback")
+    parser.add_argument("--outcome", choices=("worked","failed","mixed"))
+    parser.add_argument("--notes", default="", help="Trader feedback; separate from quote-derived outcomes")
     args = parser.parse_args()
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
     data_dir = Path(os.getenv("DATA_DIR", "data"))
@@ -67,7 +70,14 @@ def main():
         result=check(Schwab(str(data_dir)),symbols,data_dir)
         print(json.dumps(result,indent=2))
         raise SystemExit(0 if result['ready'] else 1)
-    database = args.db or str(data_dir / ("live.sqlite3" if args.mode in {"live", "report", "nightly"} else f"{args.mode}.sqlite3"))
+    database = args.db or str(data_dir / ("live.sqlite3" if args.mode in {"live", "report", "nightly", "feedback"} else f"{args.mode}.sqlite3"))
+    if args.mode == "feedback":
+        if not args.alert_id or not args.outcome:
+            parser.error("feedback requires --alert-id and --outcome")
+        store = Store(database)
+        store.add_feedback(args.alert_id,args.outcome,args.notes)
+        print(json.dumps({"alert_id":args.alert_id,"outcome":args.outcome,"recorded":True}))
+        return
     if args.mode == "report":
         print(json.dumps(Store(database).summary(), indent=2))
         return
@@ -115,6 +125,9 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
     LOG.info("Lotto worker started: %d symbols, delivery=%s, daily cap=%d", len(symbols), live_delivery, engine.settings.max_alerts_per_day)
+    LOG.info("Strategy %s settings: %s",STRATEGY_VERSION,json.dumps(asdict(engine.settings),sort_keys=True))
+    LOG.info("Coverage plan: %d deep slots; continuous=%s; full-universe sweep target=%d minutes",
+             client.discovery.capacity,",".join(sorted(client.discovery.always_deep)),client.coverage.interval.seconds//60)
     previous_day=store.db.execute("SELECT day FROM discovery ORDER BY day DESC LIMIT 1").fetchone()
     if previous_day and previous_day["day"] < datetime.now(ET).date().isoformat():
         try:

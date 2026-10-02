@@ -97,7 +97,7 @@ class ScannerTests(unittest.TestCase):
         self.assertFalse(contract_ok(replace(option, expiry=option.expiry+timedelta(days=2)), snap, Settings()))
 
     def test_ranking_and_daily_cap_apply_across_symbols(self):
-        engine = Engine(self.store, Settings(max_alerts_per_day=2))
+        engine = Engine(self.store, Settings(max_alerts_per_day=2,max_alerts_per_cycle=1))
         alerts = []
         for frame in self.frames:
             snap = frame[0]
@@ -123,14 +123,14 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(len(restarted_store.summary()), 1)
 
     def test_one_bar_repeated_cannot_confirm(self):
-        self.run_frames(frames=self.frames[:12])
-        snap = self.frames[11][0]
+        self.run_frames(frames=self.frames[:5])
+        snap = self.frames[4][0]
         for second in (10, 20, 30, 40, 50):
             self.assertFalse(self.engine.process([replace(snap, at=snap.at+timedelta(seconds=second))]))
         self.assertFalse(self.store.summary())
 
     def test_early_close_stops_new_alerts_before_close(self):
-        self.assertFalse(self.run_frames(lambda s: replace(s, session_end=s.at.replace(hour=10, minute=0))))
+        self.assertFalse(self.run_frames(lambda s: replace(s, session_end=s.at.replace(hour=9, minute=45))))
 
     def test_snapshot_round_trip(self):
         snap = self.frames[20][0]
