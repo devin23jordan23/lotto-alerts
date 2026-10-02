@@ -113,7 +113,7 @@ class Discovery:
             if (flow_priorities or {}).get(symbol, 0) >= 15:
                 self.flow_leases[symbol] = now
         self.promoted = {s:self.promoted.get(s, now) if s in held else now for s in selected}
-        # Previously alerted contracts always retain outcome tracking; bounded by daily alert cap.
+        # Previously alerted contracts always retain outcome tracking.
         selected = sorted(set(selected) | set(tracked))
         for row in self.observations:
             row["promoted"] = row["symbol"] in selected

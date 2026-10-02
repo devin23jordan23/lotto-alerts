@@ -94,8 +94,9 @@ delta/gamma ranking proxy holds IV and time fixed; it is not a return forecast.
 
 ## Alert restraint and observability
 
-Defaults: at most eight ideas per day, two per cycle and two per ticker. These
-are ceilings, not quotas. One minute of confirmation requires two distinct
+There are no daily, per-cycle, or per-ticker alert-count ceilings by default;
+`LOTTO_MAX_ALERTS_PER_DAY`, `LOTTO_MAX_ALERTS_PER_CYCLE`, and
+`LOTTO_MAX_ALERTS_PER_TICKER` are `0` (unlimited). One minute of confirmation requires two distinct
 completed bars; poll jitter no longer adds another minute. A 30-minute ticker
 cooldown and a fresh reset or direction change govern a new leg, including a
 new attempt in the same contract. The earliest possible opening signal is

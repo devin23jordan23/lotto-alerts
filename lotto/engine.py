@@ -105,15 +105,15 @@ class Engine:
             else:
                 best.state = "IGNITION"
             # A previously alerted contract may form a genuinely new leg after
-            # cooldown and a recorded reset. The ticker/day cap still applies.
+            # cooldown and a recorded reset.
             ready.append(best)
         alerts = []
-        # Rank the whole scan cycle before spending the daily budget.
+        # Rank the whole scan cycle. Zero-valued count settings impose no budget.
         for candidate in sorted(ready, key=lambda c: (-(c.score + 2*min(8, max(-8, c.score_change))), -c.score, c.snapshot.symbol)):
             snap = candidate.snapshot
-            if (len(alerts) >= cfg.max_alerts_per_cycle
-                    or self.store.count(snap.day) >= cfg.max_alerts_per_day
-                    or self.store.count(snap.day, snap.symbol) >= cfg.max_alerts_per_ticker):
+            if ((cfg.max_alerts_per_cycle and len(alerts) >= cfg.max_alerts_per_cycle)
+                    or (cfg.max_alerts_per_day and self.store.count(snap.day) >= cfg.max_alerts_per_day)
+                    or (cfg.max_alerts_per_ticker and self.store.count(snap.day, snap.symbol) >= cfg.max_alerts_per_ticker)):
                 self.store.decision(snap, candidate.state, "alert budget/ranking suppressed", candidate)
                 continue
             payload = alert_payload(candidate)

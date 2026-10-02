@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from math import isfinite
 
-STRATEGY_VERSION = "phase1-2026-10-02"
+STRATEGY_VERSION = "phase1-uncapped-2026-10-02"
 
 
 @dataclass(frozen=True)
@@ -16,9 +16,10 @@ class Settings:
     min_cluster: int = 2
     min_strike_volume_5m: int = 75
     confirmation_minutes: int = 1  # Two distinct completed one-minute observations.
-    max_alerts_per_day: int = 8
-    max_alerts_per_ticker: int = 2
-    max_alerts_per_cycle: int = 2
+    # Zero disables count limits. Distinct-setup, cooldown, and quality gates remain.
+    max_alerts_per_day: int = 0
+    max_alerts_per_ticker: int = 0
+    max_alerts_per_cycle: int = 0
     ticker_cooldown_minutes: int = 30
     rearm_minutes: int = 3
     max_quote_age_seconds: int = 90
@@ -42,11 +43,13 @@ class Settings:
             raise ValueError("Settings must be finite")
         if not 0 < self.min_score <= 100 or min(self.min_pace_rvol,self.min_local_rvol,self.min_local_acceleration,self.min_range_atr,self.min_option_acceleration) <= 0:
             raise ValueError("Invalid score or RVOL threshold")
-        for name in ("confirmation_minutes", "max_alerts_per_day", "max_alerts_per_ticker",
-                     "max_alerts_per_cycle", "ticker_cooldown_minutes", "rearm_minutes",
+        for name in ("confirmation_minutes", "ticker_cooldown_minutes", "rearm_minutes",
                      "max_quote_age_seconds", "min_cluster", "min_strike_volume_5m"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
+        for name in ("max_alerts_per_day", "max_alerts_per_ticker", "max_alerts_per_cycle"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} cannot be negative")
         if not 0 < self.min_ask <= self.max_ask or not 0 < self.min_delta <= self.max_delta <= 1:
             raise ValueError("Invalid contract limits")
         if not 0 <= self.max_dte <= 1:

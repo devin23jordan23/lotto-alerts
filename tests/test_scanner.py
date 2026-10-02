@@ -110,6 +110,19 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(len(alerts), 2)
         self.assertEqual([r["symbol"] for r in self.store.summary()], ["AAA", "BBB"])
 
+    def test_default_count_limits_do_not_suppress_qualifying_ideas(self):
+        self.assertEqual((Settings().max_alerts_per_day, Settings().max_alerts_per_ticker,
+                          Settings().max_alerts_per_cycle), (0, 0, 0))
+        alerts = []
+        for frame in self.frames[:6]:
+            snap = frame[0]
+            expanded = [replace(snap, symbol=f"S{i}",
+                                options=tuple(replace(o, symbol=f"S{i}{o.symbol}") for o in snap.options))
+                        for i in range(9)]
+            alerts.extend(self.engine.process(expanded))
+        self.assertEqual(len(alerts), 9)
+        self.assertEqual(self.store.count(self.frames[0][0].day), 9)
+
     def test_restart_preserves_budget_and_duplicate_suppression(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "state.db")

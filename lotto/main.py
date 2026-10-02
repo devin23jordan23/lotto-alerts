@@ -124,7 +124,9 @@ def main():
         stop = True
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
-    LOG.info("Lotto worker started: %d symbols, delivery=%s, daily cap=%d", len(symbols), live_delivery, engine.settings.max_alerts_per_day)
+    LOG.info("Lotto worker started: %d symbols, delivery=%s, alert count limits=%s", len(symbols), live_delivery,
+             "disabled" if not any((engine.settings.max_alerts_per_day, engine.settings.max_alerts_per_ticker,
+                                     engine.settings.max_alerts_per_cycle)) else "configured")
     LOG.info("Strategy %s settings: %s",STRATEGY_VERSION,json.dumps(asdict(engine.settings),sort_keys=True))
     LOG.info("Coverage plan: %d deep slots; continuous=%s; full-universe sweep target=%d minutes",
              client.discovery.capacity,",".join(sorted(client.discovery.always_deep)),client.coverage.interval.seconds//60)
