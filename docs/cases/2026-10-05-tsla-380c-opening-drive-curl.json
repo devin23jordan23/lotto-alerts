@@ -1,0 +1,93 @@
+{
+  "schema": "lotto_research_case_v1",
+  "status": "intraday_observation_pending_session_close",
+  "case_type": "user_identified_missed_opening_drive_curl",
+  "symbol": "TSLA",
+  "contract": "TSLA  261005C00380000",
+  "expiration": "2026-10-05",
+  "dte": 0,
+  "strike": 380,
+  "side": "CALL",
+  "user_feedback": "Check the 380 call on TSLA from 10:52 to 11:07 ET as an opening-drive and curl example.",
+  "observed_through_et": "2026-10-05T11:16:00.153231-04:00",
+  "opening_drive": {
+    "stock_open": 369.0,
+    "stock_early_low": 364.91,
+    "stock_morning_high_by_10_10": 379.28,
+    "previous_close": 370.59,
+    "call_morning_high_trade": 1.85
+  },
+  "pullback_and_curl": {
+    "stock_pullback_low_near_10_48": 375.15,
+    "option_low_trade_at_10_52": 0.34,
+    "stock_10_52_close": 375.888,
+    "option_10_52_close_trade": 0.43,
+    "stock_10_57_close": 376.75,
+    "option_10_57_close_trade": 0.57,
+    "stock_11_07_close": 378.71,
+    "option_11_07_high_trade": 1.2,
+    "option_11_11_high_trade": 1.46,
+    "option_11_16_bid": 0.67,
+    "option_11_16_ask": 0.68,
+    "return_10_52_close_trade_to_11_07_high_trade_pct": 179.1,
+    "return_10_57_close_trade_to_11_07_high_trade_pct": 110.5,
+    "return_10_52_close_trade_to_11_11_high_trade_pct": 239.5,
+    "return_caveat": "These are last-trade-to-high comparisons, not executable returns; historical bid/ask and any user fill are unknown. The rapid fade by 11:16 makes exit timing material."
+  },
+  "scanner_stock_replay": {
+    "method": "Historical one-minute bars through each timestamp with the scanner's path_features and detect_setup logic, evaluated against the repository's default volume thresholds; this does not replay the full live option-chain decision or prove the live service used the same settings.",
+    "atr_14_prior_sessions": 11.45815,
+    "at_10_52": {
+      "setup": "PULLBACK_RESUMPTION",
+      "state": "TRIGGERED",
+      "stock_close": 375.888,
+      "vwap": 373.909,
+      "ema_9": 375.615,
+      "ema_20": 375.786,
+      "stock_trigger": 375.71,
+      "stock_invalidation": 375.21,
+      "prior_high_retest_target": 379.28,
+      "session_volume_pace_multiple": 1.2,
+      "local_5m_rvol_multiple": 0.51,
+      "volume_acceleration_multiple": 0.78,
+      "volume_gate_from_reconstructed_stock_path_using_repo_defaults": "FAIL"
+    },
+    "at_10_53": {
+      "setup": "PULLBACK_RESUMPTION",
+      "state": "TRIGGERED",
+      "stock_close": 376.545,
+      "local_5m_rvol_multiple": 0.75,
+      "volume_acceleration_multiple": 1.02,
+      "volume_gate_from_reconstructed_stock_path_using_repo_defaults": "FAIL"
+    },
+    "at_10_57": {
+      "setup": "PULLBACK_RESUMPTION",
+      "state": "TRIGGERED",
+      "stock_close": 376.75,
+      "vwap": 373.991,
+      "ema_9": 376.143,
+      "ema_20": 376.021,
+      "stock_trigger": 376.64,
+      "stock_invalidation": 375.67,
+      "prior_high_retest_target": 379.28,
+      "local_5m_rvol_multiple": 1.32,
+      "volume_acceleration_multiple": 2.14,
+      "volume_gate_from_reconstructed_stock_path_using_repo_defaults": "PASS via local burst, subject to live option and context gates"
+    }
+  },
+  "cross_scanner_evidence": {
+    "unusual_options_tsla_ticker_alert_at_10_51_et": true,
+    "unusual_options_tsla_ticker_alert_at_11_06_et": true,
+    "unusual_options_exact_contract_unknown": true,
+    "unusual_volume_tsla_opening_drive_alert_times_et": ["09:38", "09:48", "09:54", "10:07"],
+    "lotto_tsla_380c_alert_found_through_11_13_et": false,
+    "lotto_exact_live_candidate_decision_unavailable": true
+  },
+  "research_interpretation": "The opening drive established an in-play stock and 379.28 retest target. A quieter pullback compressed the call's trade premium; a replay of the price logic recognized the curl as PULLBACK_RESUMPTION at 10:52, while the stock volume gate under repository defaults rejected that early pivot. By 10:57 the local volume burst passed in the reconstructed stock path, while the full live option/market decision remains unknown. A candidate improvement is to treat the low-volume pullback as constructive setup context and use renewed option activity and reclaim confirmation for the entry, then evaluate against failed curls without widening all alerts indiscriminately.",
+  "provenance": {
+    "stock_and_option_one_minute_bars": "Schwab price history captured 2026-10-05 11:16 ET",
+    "stock_and_option_quotes": "Schwab quote API captured 2026-10-05 11:16 ET",
+    "local_raw_data": "data/research/2026-10-05/tsla-380c-1052-1107.json",
+    "cross_scanner_evidence": "Railway service logs viewed intraday 2026-10-05"
+  }
+}
