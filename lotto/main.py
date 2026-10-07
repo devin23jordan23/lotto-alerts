@@ -27,10 +27,17 @@ LOG = logging.getLogger(__name__)
 DEFAULT_UNIVERSE = (
     "SPY,QQQ,IWM,DIA,SMH,SOXX,XLK,XLF,XLE,GLD,USO,SLV,MTUM,AAPL,MSFT,NVDA,TSLA,META,AMZN,GOOGL,NFLX,"
     "AVGO,AMD,PLTR,COIN,HOOD,MSTR,MU,TSM,ARM,QCOM,MRVL,INTC,AMAT,LRCX,KLAC,ASML,SNDK,SMCI,DELL,VRT,"
-    "ANET,NBIS,AAOI,NOW,ORCL,CRM,ADBE,SNOW,DDOG,NET,CRWD,PANW,ZS,OKTA,TEAM,MDB,SHOP,BE,VST,CEG,NRG,"
+    "ANET,NBIS,AAOI,CSCO,HPE,NOW,ORCL,CRM,ADBE,SNOW,DDOG,NET,CRWD,PANW,ZS,OKTA,TEAM,MDB,SHOP,BE,VST,CEG,NRG,"
     "OKLO,FSLR,ENPH,PYPL,SOFI,AFRM,UPST,RBLX,UBER,ABNB,JPM,BAC,MS,GS,C,SCHW,V,MA,AXP,WMT,TGT,COST,"
     "MCD,CMG,LULU,NKE,SBUX,HD,LOW,LLY,UNH,MRNA,REGN,ISRG,BA,LMT,CAT,DE,XOM,CVX"
 )
+
+REQUIRED_UNIVERSE = {"CSCO", "HPE"}
+
+
+def universe_symbols(raw: str) -> list[str]:
+    symbols = {s.strip().upper() for s in raw.split(",") if s.strip()}
+    return sorted(symbols | REQUIRED_UNIVERSE) if symbols else []
 
 
 def env_settings() -> Settings:
@@ -66,7 +73,7 @@ def main():
     data_dir = Path(os.getenv("DATA_DIR", "data"))
     data_dir.mkdir(parents=True, exist_ok=True)
     if args.mode == "check":
-        symbols=sorted({s.strip().upper() for s in os.getenv("LOTTO_UNIVERSE",DEFAULT_UNIVERSE).split(',') if s.strip()})
+        symbols=universe_symbols(os.getenv("LOTTO_UNIVERSE") or DEFAULT_UNIVERSE)
         result=check(Schwab(str(data_dir)),symbols,data_dir)
         print(json.dumps(result,indent=2))
         raise SystemExit(0 if result['ready'] else 1)
@@ -114,7 +121,7 @@ def main():
         # Keep a compatible fallback for deployments that already carry the
         # unusual-options scanner's universe variables.
         configured_universe = ",".join(filter(None, (os.getenv("UOA_CORE_UNIVERSE", ""), os.getenv("UOA_IN_PLAY", "")))) or DEFAULT_UNIVERSE
-    symbols = sorted({s.strip().upper() for s in configured_universe.split(",") if s.strip()})
+    symbols = universe_symbols(configured_universe)
     if not symbols:
         raise SystemExit("LOTTO_UNIVERSE must contain at least one symbol")
     poll_seconds = max(30, int(os.getenv("LOTTO_POLL_SECONDS", "60")))

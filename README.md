@@ -5,16 +5,17 @@ No orders are placed. Scores are research rules, not probabilities or promised r
 
 ## Universe and collection
 
-The default universe is the same 102 names as the unusual-options scanner.
-Set `LOTTO_UNIVERSE` explicitly in Railway; an old environment value overrides
-the code default. No case-study ticker list replaces the configured universe.
+The default universe is the same 104 names as the unusual-options scanner.
+Set `LOTTO_UNIVERSE` explicitly in Railway; CSCO and HPE are included even when
+an older environment value overrides the code default. No case-study ticker list
+replaces the configured universe.
 
 Every cycle requests stock quotes for the **whole universe** in one batch.
 The worker also rotates `/chains` requests across every configured symbol:
 up to `LOTTO_SWEEP_PER_CYCLE=26` non-promoted names per minute, due again after
 `LOTTO_SWEEP_MINUTES=3`. Up to `LOTTO_CHAIN_CAPACITY=24` developing names
 receive minute bars and chains each cycle, plus previously alerted names for
-outcome tracking. At normal request speed, the 102-name chain sweep completes
+outcome tracking. At normal request speed, the 104-name chain sweep completes
 in roughly three cycles. SPY, QQQ and IWM retain deep slots throughout the session
 through `LOTTO_CONTINUOUS_SYMBOLS`; the remaining slots rotate across the universe.
 The log reports actual coverage within the configured sweep window in
