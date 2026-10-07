@@ -32,7 +32,8 @@ class Store:
                 id TEXT PRIMARY KEY, day TEXT, symbol TEXT, side TEXT, contract TEXT,
                 at TEXT, entry_ask REAL, payload TEXT, snapshot TEXT, delivery TEXT,
                 max_return REAL, min_return REAL, latest_return REAL, last_quote TEXT,
-                closed INTEGER DEFAULT 0);
+                closed INTEGER DEFAULT 0, phase TEXT NOT NULL DEFAULT 'LEGACY',
+                parent_id TEXT, thesis_id TEXT);
             CREATE TABLE IF NOT EXISTS milestones (
                 alert_id TEXT, percent INTEGER, at TEXT, PRIMARY KEY(alert_id, percent));
             CREATE INDEX IF NOT EXISTS alerts_day ON alerts(day, symbol);
@@ -60,6 +61,16 @@ class Store:
                 alert_id TEXT PRIMARY KEY, outcome TEXT NOT NULL, notes TEXT NOT NULL,
                 recorded_at TEXT NOT NULL);
         """)
+        # Railway volumes retain older databases. Do not recast historical alerts
+        # as active trades when the phase distinction did not exist yet.
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(alerts)")}
+        with self.db:
+            if "phase" not in columns:
+                self.db.execute("ALTER TABLE alerts ADD COLUMN phase TEXT NOT NULL DEFAULT 'LEGACY'")
+            if "parent_id" not in columns:
+                self.db.execute("ALTER TABLE alerts ADD COLUMN parent_id TEXT")
+            if "thesis_id" not in columns:
+                self.db.execute("ALTER TABLE alerts ADD COLUMN thesis_id TEXT")
 
     def record(self, snap: Snapshot) -> None:
         with self.db:
@@ -193,19 +204,24 @@ class Store:
     def already_alerted(self, day: str, contract: str) -> bool:
         return self.db.execute("SELECT 1 FROM alerts WHERE day=? AND contract=?", (day, contract)).fetchone() is not None
 
-    def queue(self, candidate: Candidate, payload: dict, dry_run: bool) -> str:
+    def queue(self, candidate: Candidate, payload: dict, dry_run: bool,
+              phase: str, parent_id: str | None = None) -> str:
+        if phase not in {"POTENTIAL", "ACTIVE"}:
+            raise ValueError("Alert phase must be POTENTIAL or ACTIVE")
         snap, option = candidate.snapshot, candidate.option
         ident = sha256(f"{snap.day}:{snap.symbol}:{option.symbol}:{snap.at.isoformat()}".encode()).hexdigest()[:16]
-        payload["embeds"][0]["footer"] = {"text": f"Phase 1 • Research score, not probability • {ident}"}
+        thesis_id = parent_id or ident
+        payload["embeds"][0]["footer"] = {"text": f"{phase.title()} idea • Research score, not probability • {ident}"}
         with self.db:
             self.db.execute("""INSERT INTO alerts
                 (id, day, symbol, side, contract, at, entry_ask, payload, snapshot, delivery,
-                 max_return, min_return, latest_return, last_quote)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 max_return, min_return, latest_return, last_quote, phase, parent_id, thesis_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ident, snap.day, snap.symbol, option.side, option.symbol, snap.at.isoformat(),
                  option.ask, json.dumps(payload), json.dumps(snap.to_dict()), "dry_run" if dry_run else "pending",
                  option.bid / option.ask - 1, option.bid / option.ask - 1,
-                 option.bid / option.ask - 1, option.quote_time.isoformat()))
+                 option.bid / option.ask - 1, option.quote_time.isoformat(),
+                 phase, parent_id, thesis_id))
         return ident
 
     def track(self, snap: Snapshot, settings) -> list[dict]:
@@ -245,4 +261,5 @@ class Store:
 
     def summary(self) -> list[dict]:
         return [dict(r) for r in self.db.execute("""SELECT id, day, symbol, contract, at, entry_ask,
+            phase, parent_id, thesis_id,
             delivery, latest_return, max_return, min_return, last_quote, closed FROM alerts ORDER BY at""")]

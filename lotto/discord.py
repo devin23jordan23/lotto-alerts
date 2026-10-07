@@ -11,13 +11,15 @@ from .models import ET
 LOG = logging.getLogger(__name__)
 
 
-def alert_payload(candidate: Candidate) -> dict:
+def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None) -> dict:
     snap, option = candidate.snapshot, candidate.option
     dte = (option.expiry - snap.at.astimezone(ET).date()).days
     side = "C" if option.side == "CALL" else "P"
     setup = candidate.setup
-    structure = (f"**{setup.name.replace('_', ' ').title()} · {'DEVELOPING' if setup.building else 'TRIGGERED'}**\n"
-                 f"Watch ${setup.trigger:.2f} · Invalidation ${setup.invalidation:.2f}\n") if setup else ""
+    structure = (f"**{setup.name.replace('_', ' ').title()} · {'DEVELOPING WATCH' if phase == 'POTENTIAL' else 'ACTIVE SETUP'}**\n"
+                 f"{'Watch' if phase == 'POTENTIAL' else 'Trigger'} ${setup.trigger:.2f} · Invalidation ${setup.invalidation:.2f}\n") if setup else ""
+    if parent_id:
+        structure += f"Activated from potential watch `{parent_id}` · fresh active quote below\n"
     if setup and setup.target and (1 if option.side=="CALL" else -1)*(setup.target-snap.spot)>0:
         structure += f"Prior extreme to retest: ${setup.target:.2f}\n"
     metrics = candidate.metrics
@@ -25,7 +27,8 @@ def alert_payload(candidate: Candidate) -> dict:
     if level and abs(level-snap.spot)<= (snap.prior_atr or 0)*.5:
         structure += f"Nearby round level: ${level:g}\n"
     return {"username": "Lotto Scanner", "allowed_mentions": {"parse": []}, "embeds": [{
-        "title": "🚨 POTENTIAL OPTION IDEA" if candidate.state != "RUNNER" else "🚀 POTENTIAL OPTION IDEA — NEW LEG",
+        "title": ("👀 POTENTIAL TRADE WATCH" if phase == "POTENTIAL"
+                  else "🚨 ACTIVE TRADE IDEA"),
         "description": f"**{snap.symbol} {option.strike:g}{side} · {option.expiry.isoformat()} · {dte}DTE**\n"
                        f"Ask **${option.ask:.2f}** · Bid ${option.bid:.2f}\n"
                        + structure + f"Stock ${snap.spot:.2f} · From open {metrics['return_from_open']:+.2%} · From prior close {metrics['return_from_close']:+.2%}\n"

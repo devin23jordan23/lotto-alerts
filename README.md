@@ -1,6 +1,6 @@
 # Lotto Alerts
 
-Selective intraday **potential** options ideas using Schwab, Railway and Discord.
+Selective intraday potential watches and active options ideas using Schwab, Railway and Discord.
 No orders are placed. Scores are research rules, not probabilities or promised returns.
 
 ## Universe and collection
@@ -56,8 +56,17 @@ The same symmetric call/put rules apply to every name:
   current session extreme; a recovery can use its recent pivot before reaching
   the old high/low.
 
-Alerts distinguish **DEVELOPING** from **TRIGGERED**, with a trigger, invalidation,
-stock price, returns from open/prior close, stock volume, options activity and
+Alerts distinguish **POTENTIAL TRADE WATCH** from **ACTIVE TRADE IDEA**. A developing
+setup produces a potential watch. When the same directional thesis later qualifies
+as a triggered setup, a separate active alert is sent with its own time and fresh
+option ask, linked to the watch ID. A setup already triggered when first found
+sends an active alert directly. The watch-to-active transition bypasses the usual
+ticker cooldown; repeated ideas within one phase still require the existing
+cooldown/reset. Grouping of additional contracts or messages is not required for
+this phase distinction.
+
+Both alerts show a trigger, invalidation, stock price, returns from open/prior
+close, stock volume, options activity and
 independent market/sector context. TSM maps to SMH; QQQ uses SPY rather than itself.
 Peer confirmation excludes the target. Relative ETF leadership can qualify
 against a flat benchmark.
@@ -132,7 +141,13 @@ It saves failed and successful price hypotheses, captured candidate features,
 subsequent 5/15/30/60-minute stock returns, rejection reasons and discovery
 coverage. Reports are written to `DATA_DIR/nightly/YYYY-MM-DD/report.json`.
 This establishes a research feedback loop; it does not automatically rewrite
-live thresholds or claim to be a trained predictive model.
+live thresholds or claim to be a trained predictive model. Nightly feedback keeps
+potential and active alerts separate, and measures each active idea from its own
+alert time. It retrieves later one-minute option trade highs for both phases so
+the research can measure price potential without treating a watch as an active
+trade. Missing option trade bars remain unavailable rather than counted as a
+failure. Existing pre-upgrade alerts are labeled `LEGACY` and never backfilled as
+active ideas.
 
 Captured option returns use entry ask to subsequent bid, fresh deduplicated
 quotes and actual quote timestamps. Reports distinguish observed intervals from
@@ -187,8 +202,8 @@ restart.
 
 Discord messages are queued before delivery. Uncertain sends are not
 automatically repeated; expired, failed and uncertain states remain visible.
-Only potential ideas are posted; milestones and nightly research remain in
-the database/reports.
+Potential watches and active ideas are posted separately; milestones and
+nightly research remain in the database/reports.
 
 ## Verification
 

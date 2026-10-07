@@ -3,7 +3,9 @@ import json
 import gzip
 import logging
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from hashlib import sha256
+from math import isfinite
 from pathlib import Path
 
 from .config import Settings, STRATEGY_VERSION
@@ -33,13 +35,15 @@ def alert_feedback(store, day):
                 first = {"at": decision["at"], "ask": features.get("entry_ask")}
                 break
         current = store.db.execute(
-            "SELECT score,features FROM decisions WHERE symbol=? AND at=? AND reason LIKE 'potential alert %'",
+            "SELECT score,features FROM decisions WHERE symbol=? AND at=? "
+            "AND (reason LIKE 'potential alert %' OR reason LIKE 'active alert %')",
             (alert["symbol"], alert["at"]),
         ).fetchone()
         features = json.loads(current["features"]) if current else {}
         setup = features.get("setup") or {}
         snapshot = json.loads(alert["snapshot"])
         initial_option = next((o for o in snapshot["options"] if o["symbol"] == alert["contract"]), None)
+        expiry = date.fromisoformat(initial_option["expiry"]) if initial_option else None
         initial_quote_at = datetime.fromisoformat(initial_option["quote_time"]) if initial_option else at
         atr = snapshot.get("prior_atr")
         trigger_gap_atr = (abs(features["spot"]-setup["trigger"])/atr
@@ -73,6 +77,11 @@ def alert_feedback(store, day):
             horizons[f"bid_return_{minutes}m"] = match/entry-1 if match is not None else None
         result.append({
             "id":alert["id"], "symbol":alert["symbol"], "contract":alert["contract"],
+            "side":alert["side"],
+            "expiry":expiry.isoformat() if expiry else None,
+            "dte":(expiry-at.astimezone(ET).date()).days if expiry else None,
+            "phase":alert["phase"], "parent_id":alert["parent_id"], "thesis_id":alert["thesis_id"],
+            "delivery":alert["delivery"],
             "alert_at":alert["at"], "entry_ask":entry, "score":current["score"] if current else None,
             "strategy":features.get("strategy","legacy"), "delivery":alert["delivery"],
             "setup":setup.get("name"), "trigger_gap_atr":trigger_gap_atr,
@@ -96,6 +105,105 @@ def alert_feedback(store, day):
                 "SELECT outcome,notes,recorded_at FROM user_feedback WHERE alert_id=?",(alert["id"],)).fetchone()) else None,
         })
     return result
+
+
+def trade_high_path(alert, candles):
+    """Research opportunity from later option trades, never an assumed fill."""
+    at = datetime.fromisoformat(alert["at"])
+    alert_minute = at.replace(second=0, microsecond=0)
+    ask = alert["entry_ask"]
+    bars = []
+    for raw in candles:
+        minute = epoch(raw.get("datetime"))
+        high, low = raw.get("high"), raw.get("low")
+        if (minute is None or minute <= alert_minute or minute.astimezone(ET).date() != at.astimezone(ET).date()
+                or not 9*60+30 <= minute.astimezone(ET).hour*60+minute.astimezone(ET).minute < 16*60
+                or not isinstance(high, (int, float)) or not isinstance(low, (int, float))
+                or not isfinite(high) or not isfinite(low) or high < 0 or low < 0 or high < low):
+            continue
+        bars.append((minute, float(high), float(low)))
+    bars.sort(key=lambda row: row[0])
+    within30 = [b for b in bars if b[0] <= alert_minute + timedelta(minutes=30)]
+    peak = max(bars, key=lambda b: b[1], default=None)
+    peak30 = max(within30, key=lambda b: b[1], default=None)
+    before_peak = [b[2] for b in bars if peak and b[0] < peak[0]]
+    gain = peak[1]/ask-1 if peak and ask > 0 else None
+    gain30 = peak30[1]/ask-1 if peak30 and ask > 0 else None
+    if gain is None:
+        label = "Unavailable"
+    elif gain30 is not None and gain30 >= 1:
+        label = "Strong"
+    elif gain30 is not None and gain30 >= .3 and peak30[1]-ask >= .10:
+        label = "Worked"
+    elif gain >= .5:
+        label = "Late pop"
+    elif gain >= .1:
+        label = "Marginal"
+    else:
+        label = "Flat/failed"
+    first_targets = {}
+    for percent in (30, 50, 100, 200, 300, 500):
+        first = next((b for b in bars if b[1] >= ask*(1+percent/100)), None)
+        first_targets[str(percent)] = first[0].isoformat() if first else None
+    return {
+        "id":alert["id"], "symbol":alert["symbol"], "contract":alert["contract"],
+        "phase":alert["phase"], "parent_id":alert["parent_id"], "thesis_id":alert["thesis_id"],
+        "delivery":alert["delivery"],
+        "alert_at":alert["at"], "alert_ask":ask, "later_trade_bar_count":len(bars),
+        "peak_30m_trade_high":peak30[1] if peak30 else None,
+        "peak_30m_gain":gain30,
+        "peak_day_trade_high":peak[1] if peak else None,
+        "peak_day_at":peak[0].isoformat() if peak else None,
+        "peak_day_gain":gain,
+        "lowest_trade_before_peak":min(before_peak) if before_peak else None,
+        "adverse_before_peak":min(before_peak)/ask-1 if before_peak and ask > 0 else None,
+        "first_target_at":first_targets, "opportunity_label":label,
+    }
+
+
+def option_trade_high_feedback(store, day, root, client):
+    """Fetch each alerted contract once and label watches/active ideas separately."""
+    alerts = [dict(row) for row in store.db.execute(
+        "SELECT id,symbol,contract,at,entry_ask,phase,parent_id,thesis_id,delivery FROM alerts WHERE day=? ORDER BY at", (day,))]
+    option_dir = root/"option-trades"
+    option_dir.mkdir(parents=True, exist_ok=True)
+    bars_by_contract, errors = {}, []
+    start = datetime.fromisoformat(day).replace(hour=9, minute=30, tzinfo=ET)
+    end = start.replace(hour=16)
+    for contract in sorted({a["contract"] for a in alerts}):
+        file = option_dir/f"{sha256(contract.encode()).hexdigest()[:20]}.json.gz"
+        try:
+            if file.exists():
+                with gzip.open(file, "rt") as stream:
+                    response = json.load(stream)
+            elif client is not None:
+                response = client.candles(contract, start, end)
+                if not response.get("candles"):
+                    raise ValueError("empty option trade bars")
+                with gzip.open(file, "wt") as stream:
+                    json.dump(response, stream)
+            else:
+                raise FileNotFoundError("option trade bars unavailable offline")
+            bars_by_contract[contract] = response["candles"]
+        except Exception as exc:
+            errors.append({"contract":contract, "error":type(exc).__name__})
+    return [trade_high_path(alert, bars_by_contract[alert["contract"]])
+            for alert in alerts if alert["contract"] in bars_by_contract], errors
+
+
+def phase_opportunity_summary(alerts, rows, phase):
+    subset = [r for r in rows if r["phase"] == phase]
+    setups = {}
+    for row in subset:
+        setups.setdefault(row.get("setup") or "Unknown", Counter()).update([row["opportunity_label"]])
+    return {"alert_count":sum(a["phase"] == phase for a in alerts),
+            "delivered_count":sum(a["phase"] == phase and a["delivery"] == "sent" for a in alerts),
+            "observed_count":sum(r["opportunity_label"] != "Unavailable" for r in subset),
+            "unobserved_count":sum(a["phase"] == phase for a in alerts)-sum(r["opportunity_label"] != "Unavailable" for r in subset),
+            "opportunity_labels":dict(Counter(r["opportunity_label"] for r in subset)),
+            "delivered_opportunity_labels":dict(Counter(r["opportunity_label"] for r in subset
+                                                       if r["delivery"] == "sent")),
+            "by_setup":{setup:dict(counts) for setup,counts in setups.items()}}
 
 
 def run_nightly(store, day, directory, symbols=(), client=None):
@@ -187,15 +295,36 @@ def run_nightly(store, day, directory, symbols=(), client=None):
         item["features"] = json.loads(item["features"])
         candidate_blocks.update(item["features"].get("blockers",[]))
         candidate_rows.append(item)
+    alert_rows = [dict(r) for r in store.db.execute(
+        "SELECT id,phase,parent_id,thesis_id,delivery FROM alerts WHERE day=?", (day,))]
+    feedback_rows = alert_feedback(store, day)
+    feedback_by_id = {row["id"]:row for row in feedback_rows}
+    trade_high_rows, trade_high_errors = option_trade_high_feedback(store, day, root, client)
+    for row in trade_high_rows:
+        feedback = feedback_by_id.get(row["id"], {})
+        row.update({"setup":feedback.get("setup"), "score":feedback.get("score"),
+                    "side":feedback.get("side"), "expiry":feedback.get("expiry"),
+                    "dte":feedback.get("dte")})
+    activated_ids = {r["parent_id"] for r in alert_rows if r["phase"] == "ACTIVE" and r["parent_id"]}
     result = {
         "day":day,"generated_at":datetime.now(timezone.utc).isoformat(),
         "report_strategy":STRATEGY_VERSION,
         "universe":list(symbols),"universe_size":len(symbols),"full_universe_price_research":client is not None,
         "data_errors":errors,"discovery_coverage":coverage,"chain_coverage":chain_coverage,
         "universe_flow_events":flow_events,
-        "alert_feedback":alert_feedback(store, day),
+        "alert_feedback":feedback_rows,
+        "alert_phase_counts":dict(Counter(r["phase"] for r in alert_rows)),
+        "activated_watches":len(activated_ids),
+        "unactivated_watches":sum(r["phase"] == "POTENTIAL" and r["id"] not in activated_ids for r in alert_rows),
+        "direct_active_ideas":sum(r["phase"] == "ACTIVE" and r["parent_id"] is None for r in alert_rows),
+        "option_trade_high_feedback":trade_high_rows,
+        "option_trade_high_errors":trade_high_errors,
+        "active_opportunity_summary":phase_opportunity_summary(alert_rows, trade_high_rows, "ACTIVE"),
+        "potential_opportunity_summary":phase_opportunity_summary(alert_rows, trade_high_rows, "POTENTIAL"),
         "research_notes":["Price setups are hypotheses, not confirmed option alerts.",
                           "Historical bars cannot reconstruct unrecorded intraday option quotes or aggressor side.",
+                          "Trade highs are price-potential labels, not realized returns or assumed fills.",
+                          "Potential watches never count as active ideas; linked active alerts start a new measurement window.",
                           "Future labels never enter the feature calculation. No automatic live threshold changes.",
                           "Small, selected daily cohorts do not establish predictive accuracy."],
         "decision_reasons":dict(Counter(r["reason"] for r in rows)),

@@ -75,12 +75,14 @@ def audit_store(store, day, settings=None):
     counts=store.db.execute("SELECT COUNT(*),COUNT(DISTINCT symbol) FROM snapshots WHERE at>=? AND at<?",(day,tomorrow)).fetchone()
     discovery=store.db.execute("SELECT COUNT(*),COUNT(DISTINCT symbol),SUM(promoted) FROM discovery WHERE day=?",(day,)).fetchone()
     alert=store.db.execute("SELECT delivery,COUNT(*) FROM alerts WHERE day=? GROUP BY delivery",(day,)).fetchall()
+    phases=store.db.execute("SELECT phase,COUNT(*) FROM alerts WHERE day=? GROUP BY phase",(day,)).fetchall()
     return {"day":day,"snapshots":counts[0],"symbols_with_chains":counts[1],
             "discovery_observations":discovery[0],"discovery_symbols":discovery[1],
             "promoted_observations":discovery[2] or 0,"decisions":len(rows),
             "top_reasons":reasons.most_common(12),
             "top_candidates":sorted(candidates,key=lambda r:r["score"],reverse=True)[:12],
-            "latest_chain_checks":chain,"alerts_by_delivery":{r[0]:r[1] for r in alert}}
+            "latest_chain_checks":chain,"alerts_by_delivery":{r[0]:r[1] for r in alert},
+            "alerts_by_phase":{r[0]:r[1] for r in phases}}
 
 
 def diagnose_symbols(store, day, symbols, settings=None):
@@ -127,6 +129,8 @@ def diagnose_symbols(store, day, symbols, settings=None):
                                 "problems":latest.problems(settings.max_quote_age_seconds,min_bars=settings.min_opening_bars),
                                 "chain":chain_reasons(latest,snapshots,settings)} if latest else None),
             "alerts":store.db.execute("SELECT COUNT(*) FROM alerts WHERE day=? AND symbol=?",(day,symbol)).fetchone()[0],
+            "alerts_by_phase":{r[0]:r[1] for r in store.db.execute(
+                "SELECT phase,COUNT(*) FROM alerts WHERE day=? AND symbol=? GROUP BY phase",(day,symbol))},
         }
     return result
 

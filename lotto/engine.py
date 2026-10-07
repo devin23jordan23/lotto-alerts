@@ -95,13 +95,19 @@ class Engine:
             if close - snap.at <= timedelta(minutes=cfg.entry_cutoff_minutes):
                 self.store.decision(snap, "RUNNER", "entry cutoff; tracking only", best)
                 continue
+            phase = "POTENTIAL" if best.setup.building else "ACTIVE"
             last = self.store.last_alert(*key)
+            # A watch becoming a confirmed setup is a new, separately measured
+            # alert, not a duplicate blocked by the ticker cooldown.
+            promotion = bool(last and phase == "ACTIVE" and last["phase"] == "POTENTIAL"
+                             and last["side"] == best.option.side and key not in self.rearmed)
             if last:
-                best.state = "RUNNER"
-                if (snap.at - datetime.fromisoformat(last["at"]) < timedelta(minutes=cfg.ticker_cooldown_minutes)
-                        or (key not in self.rearmed and last["side"] == best.option.side)):
-                    self.store.decision(snap, "RUNNER", "cooldown or fresh reset required", best)
-                    continue
+                best.state = "ACTIVATION" if promotion else "RUNNER"
+                if not promotion:
+                    if (snap.at - datetime.fromisoformat(last["at"]) < timedelta(minutes=cfg.ticker_cooldown_minutes)
+                            or (key not in self.rearmed and last["side"] == best.option.side)):
+                        self.store.decision(snap, "RUNNER", "cooldown or fresh reset required", best)
+                        continue
             else:
                 best.state = "IGNITION"
             # A previously alerted contract may form a genuinely new leg after
@@ -116,11 +122,14 @@ class Engine:
                     or (cfg.max_alerts_per_ticker and self.store.count(snap.day, snap.symbol) >= cfg.max_alerts_per_ticker)):
                 self.store.decision(snap, candidate.state, "alert budget/ranking suppressed", candidate)
                 continue
-            payload = alert_payload(candidate)
-            ident = self.store.queue(candidate, payload, self.dry_run)
+            phase = "POTENTIAL" if candidate.setup.building else "ACTIVE"
+            last = self.store.last_alert(snap.day, snap.symbol)
+            parent_id = (last["id"] if candidate.state == "ACTIVATION" and last else None)
+            payload = alert_payload(candidate, phase, parent_id)
+            ident = self.store.queue(candidate, payload, self.dry_run, phase, parent_id)
             self.rearmed.discard((snap.day, snap.symbol))
-            self.store.decision(snap, candidate.state, f"potential alert {ident}", candidate)
-            alerts.append({"id": ident, "payload": payload})
+            self.store.decision(snap, candidate.state, f"{phase.lower()} alert {ident}", candidate)
+            alerts.append({"id": ident, "phase": phase, "parent_id": parent_id, "payload": payload})
         return alerts
 
     def _clear_confirmation(self, key):

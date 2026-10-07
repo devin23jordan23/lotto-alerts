@@ -52,7 +52,7 @@ def replay_frames(path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Selective potential options runner alerts")
+    parser = argparse.ArgumentParser(description="Potential watches and active options ideas")
     parser.add_argument("mode", choices=("demo", "replay", "live", "report", "nightly", "check", "feedback"), nargs="?", default="demo")
     parser.add_argument("--input", help="Replay JSONL: one snapshot array per scan cycle")
     parser.add_argument("--db", help="SQLite state path")
@@ -191,7 +191,7 @@ def main():
             frame = [s for s in frame if 0 <= (now - s.at).total_seconds() <= 90]
             alerts = engine.process(frame)
             for alert in alerts:
-                LOG.info("Potential setup %s: %s", alert["id"], alert["payload"]["embeds"][0]["description"])
+                LOG.info("%s setup %s: %s", alert["phase"], alert["id"], alert["payload"]["embeds"][0]["description"])
             if live_delivery:
                 deliver_pending(store, webhook)
             with store.db:
@@ -204,7 +204,9 @@ def main():
             # in RAM all day can exhaust a small Railway worker.
             engine.history = {k: v for k, v in engine.history.items()
                               if k[0] == today and v and now-v[-1].at <= timedelta(minutes=30)}
-            LOG.info("Cycle complete: %d symbols observed, %d potential alerts", len(frame), len(alerts))
+            LOG.info("Cycle complete: %d symbols observed, %d alerts (%d active, %d potential)",
+                     len(frame), len(alerts), sum(a["phase"] == "ACTIVE" for a in alerts),
+                     sum(a["phase"] == "POTENTIAL" for a in alerts))
             if live_delivery:
                 try:
                     if health_monitor.successful_cycle(now, len(frame)):

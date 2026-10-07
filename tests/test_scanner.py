@@ -40,7 +40,8 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(row["delivery"], "dry_run")
         self.assertAlmostEqual(row["max_return"], 4.95 / .8 - 1)
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM milestones WHERE percent=500").fetchone()[0], 1)
-        self.assertIn("POTENTIAL", alerts[0]["payload"]["embeds"][0]["title"])
+        self.assertEqual(alerts[0]["phase"], "ACTIVE")
+        self.assertIn("ACTIVE TRADE IDEA", alerts[0]["payload"]["embeds"][0]["title"])
 
     def test_extended_stock_is_still_eligible(self):
         self.assertTrue(self.run_frames(lambda s: replace(s, prior_close=80)))
