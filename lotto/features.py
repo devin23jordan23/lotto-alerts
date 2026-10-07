@@ -132,6 +132,32 @@ def observation_window(snap, history):
     return five, ten, window, window_minutes
 
 
+def early_broad_flow(snap: Snapshot, setup: Setup | None, metrics: dict,
+                     score: float, option: Option, settings: Settings) -> bool:
+    """Recognize a triggered opening move with broad, sustained absolute flow.
+
+    Relative option acceleration alone can miss a strong flow that began early
+    and remains steady. This path is restricted to the first 45 bars;
+    the usual score, context, price-risk, and confirmation checks still apply.
+    """
+    local_at = snap.at.astimezone(ET)
+    open_at = local_at.replace(hour=9, minute=30, second=0, microsecond=0)
+    if (not open_at <= local_at < open_at + timedelta(minutes=45)
+            or setup is None or setup.building or len(snap.bars) > 45 or score < 75
+            or setup.name not in {"OPENING_DRIVE", "OPENING_BREAK", "LEVEL_RECLAIM", "CONTINUATION"}):
+        return False
+    return (metrics["impulse_atr"] >= .20
+            and metrics["move_from_open_atr"] >= .15
+            and metrics["above_vwap_share"] >= .8
+            and metrics["return_5m_directional"] >= .003
+            and metrics["local_rvol_5m"] >= .8
+            and metrics["volume_acceleration"] >= 1.2
+            and metrics["cluster_size"] >= 4
+            and metrics["option_volume_5m"] >= max(1500, 2*settings.min_strike_volume_5m*metrics["cluster_size"])
+            and metrics["contract_volume_rate_5m"] >= 200
+            and (option.ask-option.bid)/option.ask <= .10)
+
+
 def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> list[Candidate]:
     observed = observation_window(snap, history)
     if observed is None:
@@ -234,6 +260,8 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
                         "response_proxy": response, "contract_volume_rate_5m": now_vol[option.symbol]*300/duration_now,
                         "selected_spread_fraction": (option.ask-option.bid)/option.ask})
         score = round(sum(parts.values()), 2)
+        early_flow = early_broad_flow(snap, setup, metrics, score, option, settings)
+        metrics["early_broad_flow"] = int(early_flow)
         coil = setup is not None and setup.name == "COILED_CONTINUATION"
         local_burst = (metrics["local_rvol_5m"] >= settings.min_local_rvol
                        and metrics["volume_acceleration"] >= settings.min_local_acceleration
@@ -256,11 +284,11 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         short = window_minutes == 2
         checks = {
             "score below threshold": score >= settings.min_score+(5 if short else 0)+(3 if late else 0),
-            "stock volume pace/burst below threshold": metrics["pace_rvol"] >= settings.min_pace_rvol or local_burst or improving or sustained_coil,
+            "stock volume pace/burst below threshold": metrics["pace_rvol"] >= settings.min_pace_rvol or local_burst or improving or sustained_coil or early_flow,
             "stock volume pace fading": metrics["pace_persistence"] >= .80,
             "no developing price setup": setup is not None,
             "opposing volume dominates": metrics["opposing_volume_share"] <= (.60 if coil else .50),
-            "options activity not replenishing": acceleration >= max(settings.min_option_acceleration,1.5 if len(best)==2 else 0) or persistent,
+            "options activity not replenishing": acceleration >= max(settings.min_option_acceleration,1.5 if len(best)==2 else 0) or persistent or early_flow,
             "independent sector/peer confirmation missing": context_confirms,
             "too far from price trigger": gap is None or -settings.max_building_distance_atr <= gap <= settings.max_entry_extension_atr,
             "price invalidation already crossed": setup is not None and direction*(snap.spot-setup.invalidation) > 0,
@@ -279,6 +307,8 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
                    f"{len(best)} neighboring strikes", context_reason]
         if improving:
             reasons.append("Local volume improving with price")
+        if early_flow:
+            reasons.append("Broad early options flow with rising local stock volume")
         if short:
             reasons.append("Early signal · shorter options history")
         if persistent:

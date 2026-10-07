@@ -82,11 +82,22 @@ progress and stronger multi-strike option acceleration. Baselines use prior
 sessions only. ATR uses 14 prior true ranges. Thresholds remain uncalibrated
 research defaults; the historical case study is not proof of an edge.
 
+During the first 45 completed bars, a triggered opening drive, opening break,
+level reclaim or continuation can also qualify through broad **absolute**
+options volume when the opening impulse reached 0.2 ATR, the stock remains at
+least 0.15 ATR from the open and strong against VWAP, and local stock volume is
+accelerating. This narrowly handles steady strong flow that fails a relative
+options-acceleration test.
+The usual score, independent context, spread, trigger/invalidation, short-history
+and two-bar confirmation checks still apply. No ticker-specific exception is used.
+
 Options evidence requires synchronized fresh quotes, multiple neighboring active
 strikes, ten minutes of comparable counters and either acceleration or sustained
 twenty-minute activity. A four-minute baseline is available only with a triggered,
 three-strike setup and a higher score; two-strike candidates need stronger
-acceleration. Coils may use a fresh burst or sustained activity. Volume-counter resets,
+acceleration. The early broad-flow path can use high absolute call/put volume
+across at least four neighboring strikes instead of relative acceleration.
+Coils may use a fresh burst or sustained activity. Volume-counter resets,
 missing observations and large time gaps invalidate that evidence. Chains do
 **not** establish ask-side buying, aggressor direction or opening-position intent.
 

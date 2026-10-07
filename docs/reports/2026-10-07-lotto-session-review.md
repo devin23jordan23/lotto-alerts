@@ -128,3 +128,18 @@ The active failures were TSLA 370P at 10:07 a.m., MU 1095C at 2:06 p.m., AMZN 26
 2. Review activation delay and contract substitution. AMZN shows an active alert can arrive after the useful premium window; the MU strike switch changes the trade being measured. Preserve both timestamps and both contract asks.
 3. Keep the 30-minute sampled bid and invalidation next to trade highs. Among the 24 watches without a direct promotion, 13 sampled bids were down at least 30% at 30 minutes despite 12 showing a +50% trade high sometime in that window. This is why peak-only hit rates are insufficient.
 4. Revisit the label wording for cheap premiums during later research: the current “Worked” rule requires a $0.10 absolute move as well as a percentage move. For example, INTC 112P at 2:38 p.m. showed a +57% high within 30 minutes but is labeled Late pop because the dollar gain was under $0.10. No scanner logic was changed in this review.
+
+## MU opening-drive audit (subsequent research)
+
+The worker was running at the open: its logs show 104/104 fresh universe quotes on repeated cycles from 9:31 a.m. ET. MU had 390 quote observations, 380 deeper promotions, and 379 deeper chain observations for the session. Full-chain quote capture began around 9:40 a.m.; its first saved option-side candidate was at 9:44 a.m., once enough comparable chain history was available. The earlier universe sweep saw MU **put-side** flow at 9:35 and 9:39 while the stock fell toward its $1,011.42 session low; the first saved **call-side** sweep flow was around 9:42. Thus a bullish call alert at 9:35 would have been premature. No daily alert-count cap or before-10:00 throttle held MU back.
+
+| ET | MU stock | Candidate | Why it did not alert |
+|---|---:|---|---|
+| 9:44 | $1,027.54 | 78/100 level reclaim, 15 active neighboring call strikes, 6,961 five-minute call contracts | Cumulative stock-volume pace was 1.01× versus the 2× gate; option activity was steady at 1.04× rather than accelerating enough. |
+| 9:46 | $1,028.59 | 82/100 triggered opening drive, 15 call strikes, 7,221 five-minute call contracts | Stock pace was 1.02× and option acceleration 0.62×, so both relative gates rejected it. |
+| 9:47 | $1,024.81 | 77/100 level reclaim, 12 call strikes | Stock-volume burst passed, but relative option replenishment still failed. |
+| 10:06 | $1,036.79 | 90/100 continuation | Cumulative pace remained 0.96× and local stock-volume burst was below its separate threshold. |
+| 10:14 and 10:17 | $1,042.34 and $1,043.32 | Both qualified independently | Each lacked a qualifying next completed bar, so the confirmation timer reset. |
+| 10:21–10:23 | $1,049.11 to $1,053.80 | Consecutive qualifying continuation; $1,070 call active idea | First active alert, about $36 above the $1,017.37 session open. |
+
+The failure mode was **relative-acceleration vetoes during an already broad, steady opening flow**, followed by intermittent confirmation. A narrow alternative now treats strong absolute early options volume across multiple strikes, rising local stock volume, and a triggered directional price setup as an additional way to satisfy the stock-volume and option-replenishment gates. It keeps the other quality checks and does not require a potential watch first. Applied counterfactually to all saved October 7 expiry-side evaluations before 10:15 a.m., it newly qualifies only three MU-call candidate minutes (9:44, 9:46, 9:47); 9:46 and 9:47 are consecutive and would have permitted an earlier active idea around 9:47. That is a single-session replay of saved features, not evidence of a repeatable edge or of executable option returns. Track alert timing, failed alternatives, and post-alert drawdown on later days before tightening the rule.

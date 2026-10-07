@@ -8,7 +8,7 @@ from lotto.config import Settings, STRATEGY_VERSION
 from lotto.demo import demo_frames
 from lotto.discovery import Discovery
 from lotto.engine import Engine
-from lotto.features import candidates, contract_ok
+from lotto.features import candidates, contract_ok, early_broad_flow
 from lotto.models import Bar, ET
 from lotto.nightly import alert_feedback
 from lotto.patterns import Setup, detect_setup, path_features
@@ -46,6 +46,22 @@ class PhaseOneTests(unittest.TestCase):
         for snap in self.frames[:5]:
             engine.process([replace(snap,at=snap.at+timedelta(seconds=40))])
         self.assertEqual(len(engine.process([replace(self.frames[5],at=self.frames[5].at+timedelta(seconds=5))])),1)
+
+    def test_broad_early_flow_accepts_steady_options_volume_without_weakening_later_scans(self):
+        snap = self.frames[15]
+        setup = Setup("OPENING_DRIVE", snap.spot-.1, snap.spot-1)
+        metrics = {"impulse_atr":.26, "move_from_open_atr":.26,
+                   "above_vwap_share":1.0, "return_5m_directional":.008,
+                   "local_rvol_5m":1.18, "volume_acceleration":1.31,
+                   "cluster_size":15, "option_volume_5m":7221,
+                   "contract_volume_rate_5m":1314}
+        option = snap.options[0]
+        self.assertTrue(early_broad_flow(snap, setup, metrics, 81.8, option, Settings()))
+        self.assertFalse(early_broad_flow(snap, replace(setup, building=True), metrics, 81.8, option, Settings()))
+        self.assertFalse(early_broad_flow(snap, setup, {**metrics,"option_volume_5m":500}, 81.8, option, Settings()))
+        self.assertFalse(early_broad_flow(snap, setup, {**metrics,"volume_acceleration":1.0}, 81.8, option, Settings()))
+        self.assertFalse(early_broad_flow(replace(snap,bars=snap.bars*4), setup, metrics, 81.8, option, Settings()))
+        self.assertFalse(early_broad_flow(replace(snap,at=snap.at+timedelta(hours=2)), setup, metrics, 81.8, option, Settings()))
 
     def test_contract_cap_scales_with_volatility_but_remains_bounded(self):
         snap=replace(self.frames[20],spot=1000,prior_atr=30)
