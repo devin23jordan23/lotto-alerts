@@ -57,18 +57,21 @@ The same symmetric call/put rules apply to every name:
   current session extreme; a recovery can use its recent pivot before reaching
   the old high/low.
 
-Alerts distinguish **POTENTIAL TRADE WATCH** from **ACTIVE TRADE IDEA**. A developing
-setup produces a potential watch. When the same directional thesis later qualifies
-as a triggered setup, a separate active alert is sent with its own time and fresh
-option ask, linked to the watch ID. A setup already triggered when first found
-sends an active alert directly. The watch-to-active transition bypasses the usual
-ticker cooldown; repeated ideas within one phase still require the existing
-cooldown/reset. Grouping of additional contracts or messages is not required for
-this phase distinction.
+The scanner records **POTENTIAL TRADE WATCH** internally for developing setups,
+but only **ACTIVE TRADE IDEA** posts to the main Discord webhook. When a watch
+later qualifies as a triggered setup, the active idea gets its own time and
+fresh option ask and can link to the watch ID. A setup already triggered when
+first found sends an active idea directly. The watch-to-active transition bypasses
+the usual ticker cooldown; later distinct legs still require the existing
+cooldown/reset. Internal watches remain in nightly research and do not count as
+Discord deliveries.
 
-Both alerts show a trigger, invalidation, stock price, returns from open/prior
-close, stock volume, options activity and
-independent market/sector context. TSM maps to SMH; QQQ uses SPY rather than itself.
+The active Discord embed shows the contract, ask/bid, stock price, trigger,
+invalidation, research score, and supportive sector/market or peer context.
+Scores of 90–91 get a trophy title; scores of 92+ get trophy and fire. These
+scores are research rules, not calibrated probabilities. Stock and options
+activity metrics remain recorded for research but are omitted from the embed.
+TSM maps to SMH; QQQ uses SPY rather than itself.
 Peer confirmation excludes the target. Relative ETF leadership can qualify
 against a flat benchmark.
 
@@ -203,8 +206,8 @@ restart.
 
 Discord messages are queued before delivery. Uncertain sends are not
 automatically repeated; expired, failed and uncertain states remain visible.
-Potential watches and active ideas are posted separately; milestones and
-nightly research remain in the database/reports.
+Potential watches stay internal; only active ideas are posted to Discord.
+Milestones and nightly research remain in the database/reports.
 
 ## Verification
 

@@ -16,23 +16,24 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
     dte = (option.expiry - snap.at.astimezone(ET).date()).days
     side = "C" if option.side == "CALL" else "P"
     setup = candidate.setup
-    structure = (f"**{setup.name.replace('_', ' ').title()} · {'DEVELOPING WATCH' if phase == 'POTENTIAL' else 'ACTIVE SETUP'}**\n"
-                 f"{'Watch' if phase == 'POTENTIAL' else 'Trigger'} ${setup.trigger:.2f} · Invalidation ${setup.invalidation:.2f}\n") if setup else ""
-    if parent_id:
-        structure += f"Activated from potential watch `{parent_id}` · fresh active quote below\n"
-    if setup and setup.target and (1 if option.side=="CALL" else -1)*(setup.target-snap.spot)>0:
-        structure += f"Prior extreme to retest: ${setup.target:.2f}\n"
-    metrics = candidate.metrics
-    level = metrics.get("next_round_level")
-    if level and abs(level-snap.spot)<= (snap.prior_atr or 0)*.5:
-        structure += f"Nearby round level: ${level:g}\n"
+    context = next((reason for reason in candidate.reasons
+                    if reason.startswith("Outperforming ") or reason.endswith(" supportive")), None)
+    peers = next((reason for reason in candidate.reasons if reason.startswith("Peers: ")), None)
+    score_context = " · ".join(part for part in (context, peers) if part)
+    displayed_score = round(candidate.score)
+    title = ("👀 POTENTIAL TRADE WATCH" if phase == "POTENTIAL"
+             else "🏆🔥 ACTIVE TRADE IDEA 🔥🏆" if displayed_score >= 92
+             else "🏆 ACTIVE TRADE IDEA 🏆" if displayed_score >= 90
+             else "🚨 ACTIVE TRADE IDEA")
+    levels = (f"{'Watch' if phase == 'POTENTIAL' else 'Trigger'} ${setup.trigger:.2f}"
+              f" · Invalidation ${setup.invalidation:.2f}") if setup else ""
     return {"username": "Lotto Scanner", "allowed_mentions": {"parse": []}, "embeds": [{
-        "title": ("👀 POTENTIAL TRADE WATCH" if phase == "POTENTIAL"
-                  else "🚨 ACTIVE TRADE IDEA"),
+        "title": title,
         "description": f"**{snap.symbol} {option.strike:g}{side} · {option.expiry.isoformat()} · {dte}DTE**\n"
-                       f"Ask **${option.ask:.2f}** · Bid ${option.bid:.2f}\n"
-                       + structure + f"Stock ${snap.spot:.2f} · From open {metrics['return_from_open']:+.2%} · From prior close {metrics['return_from_close']:+.2%}\n"
-                       f"Setup score: **{candidate.score:.0f}/100** ({candidate.score_change:+.1f} over 3m)\n" + " · ".join(candidate.reasons),
+                       f"Ask **${option.ask:.2f}** · Bid ${option.bid:.2f} · Stock ${snap.spot:.2f}\n"
+                       f"{levels}\n"
+                       f"Setup score **{displayed_score}/100**"
+                       + (f" · {score_context}" if score_context else ""),
         "color": 0x2ECC71 if option.side == "CALL" else 0xE74C3C,
         "timestamp": snap.at.isoformat(),
     }]}
@@ -43,7 +44,10 @@ def deliver_pending(store, webhook: str) -> None:
     if (parsed.scheme != "https" or parsed.hostname not in {"discord.com", "discordapp.com"}
             or not parsed.path.startswith("/api/webhooks/")):
         raise ValueError("A Discord HTTPS webhook URL is required for live delivery")
-    for row in store.db.execute("SELECT id, at, payload FROM alerts WHERE delivery='pending' ORDER BY at").fetchall():
+    # Older queued watches must also stay internal after a deployment/restart.
+    with store.db:
+        store.db.execute("UPDATE alerts SET delivery='internal' WHERE phase='POTENTIAL' AND delivery='pending'")
+    for row in store.db.execute("SELECT id, at, payload FROM alerts WHERE phase='ACTIVE' AND delivery='pending' ORDER BY at").fetchall():
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(row["at"])).total_seconds()
         if not 0 <= age <= 120:
             with store.db:

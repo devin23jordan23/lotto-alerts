@@ -2,11 +2,12 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from lotto.demo import demo_frames
+from lotto.discord import alert_payload, deliver_pending
 from lotto.engine import Engine
 from lotto.features import Candidate
 from lotto.nightly import run_nightly, trade_high_path
@@ -27,8 +28,8 @@ class AlertPhaseTests(unittest.TestCase):
                          setup=Setup("COILED_CONTINUATION", snap.spot+.1,
                                      snap.spot-1, building=building))
 
-    def phased_alerts(self):
-        engine = Engine(self.store)
+    def phased_alerts(self, dry_run=True):
+        engine = Engine(self.store, dry_run=dry_run)
         active_at = self.frames[6].at
         with patch("lotto.engine.candidates", side_effect=lambda snap, history, settings:
                    [self.candidate(snap, snap.at < active_at)]):
@@ -59,6 +60,43 @@ class AlertPhaseTests(unittest.TestCase):
         self.assertEqual([a["phase"] for a in watches], ["POTENTIAL"])
         self.assertEqual([a["phase"] for a in active], ["ACTIVE"])
         self.assertEqual(active[0]["parent_id"], watches[0]["id"])
+
+    def test_live_watch_stays_internal_and_active_idea_reaches_discord(self):
+        alerts = self.phased_alerts(dry_run=False)
+        self.assertEqual([row["delivery"] for row in self.store.summary()], ["internal", "pending"])
+        # Simulate a watch queued by the previous version before deployment.
+        with self.store.db:
+            self.store.db.execute("UPDATE alerts SET delivery='pending' WHERE phase='POTENTIAL'")
+        with patch("lotto.discord.datetime") as clock, patch("lotto.discord.urlopen") as send:
+            clock.now.return_value = self.frames[6].at
+            clock.fromisoformat.side_effect = datetime.fromisoformat
+            deliver_pending(self.store, "https://discord.com/api/webhooks/test/test")
+        send.assert_called_once()
+        self.assertEqual([row["delivery"] for row in self.store.summary()], ["internal", "sent"])
+        self.assertEqual(alerts[1]["parent_id"], alerts[0]["id"])
+
+    def test_active_embed_is_compact_and_score_titles_have_clear_tiers(self):
+        snap = self.frames[6]
+        candidate = self.candidate(snap, building=False)
+        candidate.reasons = ["Stock pace 2.1× · 5m local RVOL 1.4×", "Options activity 2.0×",
+                             "3 neighboring strikes", "Outperforming QQQ", "Peers: XLK, SMH",
+                             "Local volume improving with price", "Options activity sustained 20m"]
+        for score, title in ((89.4, "🚨 ACTIVE TRADE IDEA"),
+                             (90, "🏆 ACTIVE TRADE IDEA 🏆"),
+                             (91.6, "🏆🔥 ACTIVE TRADE IDEA 🔥🏆"),
+                             (92, "🏆🔥 ACTIVE TRADE IDEA 🔥🏆")):
+            candidate.score = score
+            embed = alert_payload(candidate, "ACTIVE")["embeds"][0]
+            self.assertEqual(embed["title"], title)
+            description = embed["description"]
+            self.assertEqual(len(description.splitlines()), 4)
+            for included in ("Ask", "Bid", "Stock", "Trigger", "Invalidation",
+                             "Setup score", "Outperforming QQQ", "Peers: XLK, SMH"):
+                self.assertIn(included, description)
+            for excluded in ("From open", "From prior close", "Stock pace",
+                             "local RVOL", "Options activity", "neighboring strikes",
+                             "Local volume improving", "sustained 20m"):
+                self.assertNotIn(excluded, description)
 
     def test_nightly_counts_active_only_and_keeps_trade_high_windows_separate(self):
         self.phased_alerts()

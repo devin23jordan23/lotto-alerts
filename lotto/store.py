@@ -218,7 +218,8 @@ class Store:
                  max_return, min_return, latest_return, last_quote, phase, parent_id, thesis_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ident, snap.day, snap.symbol, option.side, option.symbol, snap.at.isoformat(),
-                 option.ask, json.dumps(payload), json.dumps(snap.to_dict()), "dry_run" if dry_run else "pending",
+                 option.ask, json.dumps(payload), json.dumps(snap.to_dict()),
+                 "dry_run" if dry_run else "internal" if phase == "POTENTIAL" else "pending",
                  option.bid / option.ask - 1, option.bid / option.ask - 1,
                  option.bid / option.ask - 1, option.quote_time.isoformat(),
                  phase, parent_id, thesis_id))

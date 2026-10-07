@@ -35,7 +35,9 @@ class PhaseOneTests(unittest.TestCase):
             self.assertFalse(engine.process([snap]))
         alerts=engine.process([self.frames[5]])
         self.assertEqual(len(alerts),1)
-        self.assertIn("Opening Drive",alerts[0]["payload"]["embeds"][0]["description"])
+        setup = detect_setup(self.frames[5], 1, path_features(self.frames[5], 1))
+        self.assertEqual(setup.name, "OPENING_DRIVE")
+        self.assertIn("Trigger", alerts[0]["payload"]["embeds"][0]["description"])
         invalid=replace(self.frames[5],at=self.frames[4].at,spot_time=self.frames[4].at)
         self.assertTrue(invalid.problems(min_bars=5))
 
