@@ -25,7 +25,11 @@ SECTORS = {**dict.fromkeys(("TSM", "NVDA", "AMD", "ARM", "INTC", "MU", "AVGO", "
 
 
 def benchmark_for(symbol):
-    return "SPY" if symbol in {"QQQ", "SMH", "SOXX", "XLK"} else SECTORS.get(symbol, "QQQ")
+    return "SPY" if symbol in {"SPX", "QQQ", "SMH", "SOXX", "XLK"} else SECTORS.get(symbol, "QQQ")
+
+
+def api_symbol(symbol):
+    return "$SPX" if symbol == "SPX" else symbol
 
 
 def number(value):
@@ -67,7 +71,7 @@ class Schwab:
         self.atrs = {}
         self.levels = {}
         self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "24")),
-            always_deep={s.strip().upper() for s in os.getenv("LOTTO_CONTINUOUS_SYMBOLS","SPY,QQQ,IWM").split(",") if s.strip()})
+            always_deep={s.strip().upper() for s in os.getenv("LOTTO_CONTINUOUS_SYMBOLS","SPY,QQQ,IWM").split(",") if s.strip()} | {"SPX"})
         self.coverage = ChainCoverage(int(os.getenv("LOTTO_SWEEP_MINUTES", "3")))
 
     def token(self, force=False):
@@ -150,7 +154,7 @@ class Schwab:
         return self.calendar_cache[day]
 
     def candles(self, symbol: str, start: datetime, end: datetime, extended=False) -> dict:
-        return self.get("/pricehistory", {"symbol": symbol, "periodType": "day", "frequencyType": "minute", "frequency": 1,
+        return self.get("/pricehistory", {"symbol": api_symbol(symbol), "periodType": "day", "frequencyType": "minute", "frequency": 1,
                                         "startDate": int(start.timestamp() * 1000), "endDate": int(end.timestamp() * 1000),
                                         "needExtendedHoursData": "true" if extended else "false", "needPreviousClose": "true"})
 
@@ -201,6 +205,10 @@ class Schwab:
                 total += profiles[historic_day][minute]
                 observations[minute + 1].append(total)
         baseline = {minute: median(values) for minute, values in observations.items() if len(values) >= 10}
+        if symbol == "SPX":
+            # Schwab index candles have zero volume; use traded SPY volume only
+            # for volume-based signals while retaining SPX prices and ATR.
+            baseline = self.baseline("SPY", now)
         if not baseline:
             LOG.warning("%s has fewer than ten usable historical sessions; no alerts until baseline is available", symbol)
         self.baselines[key] = baseline
@@ -210,6 +218,11 @@ class Schwab:
         opening = now.astimezone(ET).replace(hour=9, minute=30, second=0, microsecond=0)
         raw = self.candles(symbol, opening.replace(hour=4), now, True)
         baseline = self.baseline(symbol, now) if with_baseline else {}
+        proxy_volumes = None
+        if symbol == "SPX":
+            proxy = self.candles("SPY", opening.replace(hour=4), now, True)
+            proxy_volumes = {start + timedelta(minutes=1): number(c.get("volume"))
+                             for c in proxy.get("candles", []) if (start := epoch(c.get("datetime")))}
         if not hasattr(self,"levels"):
             self.levels = {}
         premarket = [c for c in raw.get("candles",[]) if (at:=epoch(c.get("datetime")))
@@ -225,6 +238,8 @@ class Schwab:
                 continue
             end = start + timedelta(minutes=1)
             values = [number(candle.get(k)) for k in ("open", "high", "low", "close", "volume")]
+            if proxy_volumes is not None:
+                values[4] = proxy_volumes.get(end)
             if any(v is None for v in values):
                 continue
             offset = int((end - opening).total_seconds() / 60)
@@ -248,7 +263,7 @@ class Schwab:
             LOG.info("Pre-open baselines loaded: %d/%d",sum((s,day) in self.baselines for s in symbols),len(symbols))
 
     @staticmethod
-    def parse_chain(data: dict) -> tuple[Option, ...]:
+    def parse_chain(data: dict, allow_spx: bool = False) -> tuple[Option, ...]:
         if data.get("isDelayed") is True:
             return ()
         result = []
@@ -258,8 +273,12 @@ class Schwab:
                     for raw in contracts:
                         quote_time = epoch(raw.get("quoteTimeInLong"))
                         fields = [number(raw.get(k)) for k in ("strikePrice", "bid", "ask", "totalVolume")]
-                        if (not quote_time or not raw.get("symbol") or raw.get("nonStandard")
-                                or raw.get("isIndexOption") or any(v is None for v in fields)):
+                        contract_symbol = raw.get("symbol", "")
+                        root = contract_symbol.split()[0] if contract_symbol else ""
+                        if (not quote_time or not contract_symbol or raw.get("nonStandard")
+                                or (allow_spx and root not in {"SPX", "SPXW"})
+                                or (raw.get("isIndexOption") and not allow_spx)
+                                or any(v is None for v in fields)):
                             continue
                         if number(raw.get("multiplier", 100)) != 100:
                             continue
@@ -281,9 +300,10 @@ class Schwab:
             return []
         benchmarks = {benchmark_for(s) for s in symbols} | {"SPY", "QQQ", "SMH"}
         requested = sorted(set(symbols) | benchmarks)
-        quotes = self.get("/quotes", {"symbols": ",".join(requested)})
+        quotes = self.get("/quotes", {"symbols": ",".join(api_symbol(s) for s in requested)})
         parsed = {}
-        for symbol, item in quotes.items():
+        for symbol in requested:
+            item = quotes.get(api_symbol(symbol), quotes.get(symbol, {}))
             if item.get("realtime") is False:
                 continue
             q = item.get("quote", {})
@@ -291,8 +311,10 @@ class Schwab:
                 "price":number(q.get("lastPrice")), "previous":number(q.get("closePrice")),
                 "open":number(q.get("openPrice")), "volume":number(q.get("totalVolume")),
                 "high":number(q.get("highPrice")), "low":number(q.get("lowPrice")),
-                "at":epoch(q.get("tradeTime")),
+                "at":epoch(q.get("tradeTime") or q.get("quoteTime")),
             }
+        if "SPX" in parsed:
+            parsed["SPX"]["volume"] = parsed.get("SPY", {}).get("volume")
         selected = self.discovery.update(parsed, datetime.now(timezone.utc), set(symbols), tracked,
                                          self.coverage.priorities(now))
         result = []
@@ -305,13 +327,13 @@ class Schwab:
                 break
             self.coverage.attempt(symbol, datetime.now(timezone.utc))
             try:
-                data = self.get("/chains", {"symbol":symbol, "contractType":"ALL", "strategy":"SINGLE",
+                data = self.get("/chains", {"symbol":api_symbol(symbol), "contractType":"ALL", "strategy":"SINGLE",
                                             "includeUnderlyingQuote":"true", "strikeCount":80,
                                             "fromDate":now.astimezone(ET).date().isoformat(),
                                             "toDate":(now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()})
                 if data.get("isDelayed") is True:
                     raise ValueError("delayed option chain")
-                self.coverage.observe(symbol, datetime.now(timezone.utc), self.parse_chain(data),
+                self.coverage.observe(symbol, datetime.now(timezone.utc), self.parse_chain(data, allow_spx=symbol == "SPX"),
                                       parsed.get(symbol, {}).get("price"))
             except Exception as exc:
                 LOG.warning("Universe chain sweep %s unavailable (%s)", symbol, type(exc).__name__)
@@ -327,11 +349,11 @@ class Schwab:
             self.last_polled[symbol] = time.monotonic()
             try:
                 bars = self.bars(symbol, datetime.now(timezone.utc))
-                data = self.get("/chains", {"symbol": symbol, "contractType": "ALL", "strategy": "SINGLE",
+                data = self.get("/chains", {"symbol": api_symbol(symbol), "contractType": "ALL", "strategy": "SINGLE",
                                             "includeUnderlyingQuote": "true", "strikeCount": 80,
                                             "fromDate": now.astimezone(ET).date().isoformat(),
                                             "toDate": (now.astimezone(ET).date() + timedelta(days=max_dte)).isoformat()})
-                options = list(self.parse_chain(data))
+                options = list(self.parse_chain(data, allow_spx=symbol == "SPX"))
                 if data.get("isDelayed") is not True:
                     self.coverage.observe(symbol, datetime.now(timezone.utc), options,
                                           parsed.get(symbol, {}).get("price"), promoted=True)
@@ -367,6 +389,7 @@ class Schwab:
                                 if peer_return is not None and p[1]*peer_return > 0)
                 result.append(Snapshot(symbol, at, spot, spot_time, previous, bars, tuple(options),
                                        context, context_time, benchmark, "schwab", session[1],
+                                       volume_source="SPY" if symbol == "SPX" else symbol,
                                        prior_atr=self.atrs.get((symbol, now.astimezone(ET).date())),
                                        market_return_5m=market_return, market_time=market_time, market_label=market,
                                        peer_return_5m=peer_return, peer_time=min((p[2] for p in peers), default=None),

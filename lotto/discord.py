@@ -13,6 +13,8 @@ LOG = logging.getLogger(__name__)
 
 def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None) -> dict:
     snap, option = candidate.snapshot, candidate.option
+    contract_root = option.symbol.split()[0] if snap.symbol == "SPX" else snap.symbol
+    underlying_label = "Index" if snap.symbol == "SPX" else "Stock"
     dte = (option.expiry - snap.at.astimezone(ET).date()).days
     side = "C" if option.side == "CALL" else "P"
     setup = candidate.setup
@@ -29,8 +31,8 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
               f" · Invalidation ${setup.invalidation:.2f}") if setup else ""
     return {"username": "Lotto Scanner", "allowed_mentions": {"parse": []}, "embeds": [{
         "title": title,
-        "description": f"**{snap.symbol} {option.strike:g}{side} · {option.expiry.isoformat()} · {dte}DTE**\n"
-                       f"Ask **${option.ask:.2f}** · Bid ${option.bid:.2f} · Stock ${snap.spot:.2f}\n"
+        "description": f"**{contract_root} {option.strike:g}{side} · {option.expiry.isoformat()} · {dte}DTE**\n"
+                       f"Ask **${option.ask:.2f}** · Bid ${option.bid:.2f} · {underlying_label} ${snap.spot:.2f}\n"
                        f"{levels}\n"
                        f"Setup score **{displayed_score}/100**"
                        + (f" · {score_context}" if score_context else ""),

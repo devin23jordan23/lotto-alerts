@@ -5,8 +5,10 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
-from lotto.models import ET
-from lotto.schwab import Schwab
+from lotto.models import ET, Snapshot
+from lotto.features import Candidate
+from lotto.discord import alert_payload
+from lotto.schwab import Schwab, api_symbol, benchmark_for
 from lotto.discovery import Discovery
 from lotto.main import DEFAULT_UNIVERSE
 
@@ -29,6 +31,72 @@ class AdapterTests(unittest.TestCase):
         option = Schwab.parse_chain(raw)[0]
         self.assertEqual((option.implied_volatility, option.theta, option.vega),
                          (27.5, -.08, .02))
+
+    def test_spx_weekly_chain_is_opted_in_without_admitting_other_indexes(self):
+        at = datetime(2026, 10, 8, 12, 30, tzinfo=ET)
+        def contract(symbol):
+            return {"symbol": symbol, "strikePrice": 7800, "bid": .85, "ask": .95,
+                    "totalVolume": 500, "openInterest": 50, "isIndexOption": True,
+                    "quoteTimeInLong": int(at.timestamp() * 1000)}
+        chain = {"putExpDateMap": {"2026-10-08:0": {"7800.0": [
+            contract("SPXW  261008P07800000"), contract("OTHER 261008P07800000")
+        ]}}}
+        self.assertEqual(Schwab.parse_chain(chain), ())
+        self.assertEqual([o.symbol for o in Schwab.parse_chain(chain, allow_spx=True)],
+                         ["SPXW  261008P07800000"])
+        option = Schwab.parse_chain(chain, allow_spx=True)[0]
+        snapshot = Snapshot("SPX", at, 7800, at, 7795, (), (option,))
+        message = alert_payload(Candidate(snapshot, option, 92, {}, {}, [], True), "ACTIVE")
+        self.assertIn("SPXW 7800P", message["embeds"][0]["description"])
+        self.assertIn("Index $7800.00", message["embeds"][0]["description"])
+        self.assertEqual(api_symbol("SPX"), "$SPX")
+        self.assertEqual(benchmark_for("SPX"), "SPY")
+
+    def test_spx_bars_use_aligned_spy_volume_without_changing_index_prices(self):
+        now = datetime(2026, 10, 8, 9, 33, 30, tzinfo=ET)
+        start = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        def candle(minute, price, volume):
+            return {"datetime": int((start+timedelta(minutes=minute)).timestamp()*1000),
+                    "open": price, "high": price+1, "low": price-1, "close": price+.5,
+                    "volume": volume}
+        def get_candles(symbol, *_args):
+            if symbol == "SPX":
+                return {"candles": [candle(i, 7800+i, 0) for i in range(3)]}
+            if symbol == "SPY":
+                return {"candles": [candle(i, 780+i, 100+i*10) for i in range(3)]}
+            raise AssertionError(symbol)
+        self.client.candles = Mock(side_effect=get_candles)
+        bars = self.client.bars("SPX", now, with_baseline=False)
+        self.assertEqual([b.close for b in bars], [7800.5, 7801.5, 7802.5])
+        self.assertEqual([b.volume for b in bars], [100, 110, 120])
+
+    def test_spx_quote_maps_from_provider_symbol_and_uses_spy_volume(self):
+        now = datetime.now(timezone.utc)
+        client = self.client
+        client.discovery = Discovery(4, always_deep={"SPX"})
+        client.atrs = {}
+        client.session = Mock(return_value=(now-timedelta(hours=1), now+timedelta(hours=1)))
+        client.bars = Mock(return_value=())
+        calls = []
+        def get(path, params):
+            calls.append((path, params))
+            if path == "/quotes":
+                return {symbol: {"realtime": True, "quote": {
+                    "lastPrice": 7800 if symbol == "$SPX" else 780,
+                    "openPrice": 7790 if symbol == "$SPX" else 779,
+                    "closePrice": 7795 if symbol == "$SPX" else 780,
+                    "totalVolume": 0 if symbol == "$SPX" else 1_000_000,
+                    "tradeTime": int(now.timestamp()*1000)}}
+                    for symbol in params["symbols"].split(",")}
+            return {"isDelayed": False}
+        client.get = get
+        frames = client.poll(["SPX", "SPY"], {}, 1)
+        self.assertIn("$SPX", calls[0][1]["symbols"].split(","))
+        self.assertTrue(any(path == "/chains" and params["symbol"] == "$SPX"
+                            for path, params in calls))
+        self.assertEqual(client.discovery.history["SPX"][-1]["volume"], 1_000_000)
+        spx = next(frame for frame in frames if frame.symbol == "SPX")
+        self.assertEqual((spx.spot, spx.volume_source), (7800, "SPY"))
 
     def test_broker_mode_needs_no_local_refresh_credentials(self):
         response = Mock()
@@ -118,6 +186,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(sum(path=='/chains' for path,_ in calls),44)
         for _ in range(3):
             client.poll(symbols,{},7)
-        self.assertEqual({params['symbol'] for path,params in calls if path=='/chains'},set(symbols))
-        self.assertEqual(client.coverage.count_fresh(symbols,datetime.now(timezone.utc)),104)
-        self.assertEqual(len(client.discovery.observations),104)
+        self.assertEqual({params['symbol'] for path,params in calls if path=='/chains'},
+                         {api_symbol(symbol) for symbol in symbols})
+        self.assertEqual(client.coverage.count_fresh(symbols,datetime.now(timezone.utc)),105)
+        self.assertEqual(len(client.discovery.observations),105)

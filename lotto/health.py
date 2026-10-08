@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .models import ET
+from .schwab import api_symbol
 
 
 def check(client, symbols, directory):
@@ -24,9 +25,9 @@ def check(client, symbols, directory):
                 'SELECT reason,COUNT(*) FROM decisions GROUP BY reason ORDER BY COUNT(*) DESC LIMIT 8')]
     session=client.session(now)
     result["session"]=[t.isoformat() for t in session] if session else None
-    quote_response=client.get('/quotes',{'symbols':','.join(symbols)})
-    missing=[s for s in symbols if s not in quote_response or not quote_response[s].get('quote',{}).get('lastPrice')]
-    delayed=[s for s in symbols if quote_response.get(s,{}).get('realtime') is False]
+    quote_response=client.get('/quotes',{'symbols':','.join(api_symbol(s) for s in symbols)})
+    missing=[s for s in symbols if not quote_response.get(api_symbol(s),{}).get('quote',{}).get('lastPrice')]
+    delayed=[s for s in symbols if quote_response.get(api_symbol(s),{}).get('realtime') is False]
     result.update({"quotes_received":len(symbols)-len(missing),"missing_quotes":missing,"delayed_quotes":delayed})
     chain=client.get('/chains',{'symbol':'QQQ','contractType':'ALL','strategy':'SINGLE','strikeCount':20,
                                 'fromDate':now.astimezone(ET).date().isoformat(),

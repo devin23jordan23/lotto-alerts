@@ -82,6 +82,7 @@ class Snapshot:
     prior_low: float | None = None
     premarket_high: float | None = None
     premarket_low: float | None = None
+    volume_source: str | None = None  # SPX uses SPY share volume; never index volume.
 
     @property
     def day(self) -> str:

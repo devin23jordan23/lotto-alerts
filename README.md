@@ -102,8 +102,14 @@ missing observations and large time gaps invalidate that evidence. Chains do
 **not** establish ask-side buying, aggressor direction or opening-position intent.
 
 Contract selection checks spread, price, delta, gamma, moneyness and DTE.
-By default, lotto candidates are limited to options expiring today or tomorrow; all 102
-underlyings remain in the stock and option-chain discovery universe.
+By default, lotto candidates are limited to options expiring today or tomorrow;
+the full configured universe remains in price and option-chain discovery.
+SPX is included even when `LOTTO_UNIVERSE` overrides the defaults. Schwab's
+`$SPX` index prices and `SPX`/`SPXW` option chains are scanned under the same
+contract and alert rules. Because the index has no traded share volume in its
+minute candles, SPX volume-based features use time-aligned SPY share volume;
+saved SPX snapshots identify `SPY` as the volume source. Alerts display the
+actual option root and label the underlying as an index.
 Phase-one scoring uses price structure, stock/option activity, breadth, entry
 location, independent context, liquidity and a capped delta/gamma response
 comparison. The default threshold is 70/100. Strike migration is recorded but
