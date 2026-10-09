@@ -276,7 +276,7 @@ class Schwab:
                         contract_symbol = raw.get("symbol", "")
                         root = contract_symbol.split()[0] if contract_symbol else ""
                         if (not quote_time or not contract_symbol or raw.get("nonStandard")
-                                or (allow_spx and root not in {"SPX", "SPXW"})
+                                or (allow_spx and root != "SPXW")
                                 or (raw.get("isIndexOption") and not allow_spx)
                                 or any(v is None for v in fields)):
                             continue

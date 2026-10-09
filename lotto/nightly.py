@@ -18,6 +18,10 @@ from .store import read_snapshot
 LOG = logging.getLogger(__name__)
 
 
+def instrument_group(contract):
+    return "SPXW" if contract and contract.split()[0] == "SPXW" else "OTHER"
+
+
 def alert_feedback(store, day):
     """Label delivered ideas from sampled quotes without treating peaks as fills."""
     result = []
@@ -77,6 +81,7 @@ def alert_feedback(store, day):
             horizons[f"bid_return_{minutes}m"] = match/entry-1 if match is not None else None
         result.append({
             "id":alert["id"], "symbol":alert["symbol"], "contract":alert["contract"],
+            "instrument_group":instrument_group(alert["contract"]),
             "side":alert["side"],
             "expiry":expiry.isoformat() if expiry else None,
             "dte":(expiry-at.astimezone(ET).date()).days if expiry else None,
@@ -147,6 +152,7 @@ def trade_high_path(alert, candles):
         first_targets[str(percent)] = first[0].isoformat() if first else None
     return {
         "id":alert["id"], "symbol":alert["symbol"], "contract":alert["contract"],
+        "instrument_group":instrument_group(alert["contract"]),
         "phase":alert["phase"], "parent_id":alert["parent_id"], "thesis_id":alert["thesis_id"],
         "delivery":alert["delivery"],
         "alert_at":alert["at"], "alert_ask":ask, "later_trade_bar_count":len(bars),
@@ -191,15 +197,18 @@ def option_trade_high_feedback(store, day, root, client):
             for alert in alerts if alert["contract"] in bars_by_contract], errors
 
 
-def phase_opportunity_summary(alerts, rows, phase):
-    subset = [r for r in rows if r["phase"] == phase]
+def phase_opportunity_summary(alerts, rows, phase, group=None):
+    matching_alerts = [a for a in alerts if a["phase"] == phase
+                       and (group is None or instrument_group(a["contract"]) == group)]
+    subset = [r for r in rows if r["phase"] == phase
+              and (group is None or instrument_group(r["contract"]) == group)]
     setups = {}
     for row in subset:
         setups.setdefault(row.get("setup") or "Unknown", Counter()).update([row["opportunity_label"]])
-    return {"alert_count":sum(a["phase"] == phase for a in alerts),
-            "delivered_count":sum(a["phase"] == phase and a["delivery"] == "sent" for a in alerts),
+    return {"alert_count":len(matching_alerts),
+            "delivered_count":sum(a["delivery"] == "sent" for a in matching_alerts),
             "observed_count":sum(r["opportunity_label"] != "Unavailable" for r in subset),
-            "unobserved_count":sum(a["phase"] == phase for a in alerts)-sum(r["opportunity_label"] != "Unavailable" for r in subset),
+            "unobserved_count":len(matching_alerts)-sum(r["opportunity_label"] != "Unavailable" for r in subset),
             "opportunity_labels":dict(Counter(r["opportunity_label"] for r in subset)),
             "delivered_opportunity_labels":dict(Counter(r["opportunity_label"] for r in subset
                                                        if r["delivery"] == "sent")),
@@ -296,7 +305,7 @@ def run_nightly(store, day, directory, symbols=(), client=None):
         candidate_blocks.update(item["features"].get("blockers",[]))
         candidate_rows.append(item)
     alert_rows = [dict(r) for r in store.db.execute(
-        "SELECT id,phase,parent_id,thesis_id,delivery FROM alerts WHERE day=?", (day,))]
+        "SELECT id,contract,phase,parent_id,thesis_id,delivery FROM alerts WHERE day=?", (day,))]
     feedback_rows = alert_feedback(store, day)
     feedback_by_id = {row["id"]:row for row in feedback_rows}
     trade_high_rows, trade_high_errors = option_trade_high_feedback(store, day, root, client)
@@ -321,6 +330,10 @@ def run_nightly(store, day, directory, symbols=(), client=None):
         "option_trade_high_errors":trade_high_errors,
         "active_opportunity_summary":phase_opportunity_summary(alert_rows, trade_high_rows, "ACTIVE"),
         "potential_opportunity_summary":phase_opportunity_summary(alert_rows, trade_high_rows, "POTENTIAL"),
+        "opportunity_by_instrument":{
+            group:{"active":phase_opportunity_summary(alert_rows, trade_high_rows, "ACTIVE", group),
+                   "potential":phase_opportunity_summary(alert_rows, trade_high_rows, "POTENTIAL", group)}
+            for group in ("SPXW", "OTHER")},
         "research_notes":["Price setups are hypotheses, not confirmed option alerts.",
                           "Historical bars cannot reconstruct unrecorded intraday option quotes or aggressor side.",
                           "Trade highs are price-potential labels, not realized returns or assumed fills.",

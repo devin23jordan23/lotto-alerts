@@ -39,7 +39,8 @@ class AdapterTests(unittest.TestCase):
                     "totalVolume": 500, "openInterest": 50, "isIndexOption": True,
                     "quoteTimeInLong": int(at.timestamp() * 1000)}
         chain = {"putExpDateMap": {"2026-10-08:0": {"7800.0": [
-            contract("SPXW  261008P07800000"), contract("OTHER 261008P07800000")
+            contract("SPXW  261008P07800000"), contract("SPX   261008P07800000"),
+            contract("OTHER 261008P07800000")
         ]}}}
         self.assertEqual(Schwab.parse_chain(chain), ())
         self.assertEqual([o.symbol for o in Schwab.parse_chain(chain, allow_spx=True)],

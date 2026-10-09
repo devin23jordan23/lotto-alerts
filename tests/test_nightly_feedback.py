@@ -3,11 +3,26 @@ import unittest
 from datetime import datetime, timedelta
 
 from lotto.models import ET, Option, Snapshot
-from lotto.nightly import alert_feedback
+from lotto.nightly import alert_feedback, phase_opportunity_summary
 from lotto.store import Store
 
 
 class NightlyFeedbackTests(unittest.TestCase):
+    def test_spxw_opportunities_are_reported_separately(self):
+        alerts = [
+            {"phase":"ACTIVE", "contract":"SPXW  261008C07800000", "delivery":"sent"},
+            {"phase":"ACTIVE", "contract":"AAPL  261008C00340000", "delivery":"sent"},
+        ]
+        rows = [
+            {**alerts[0], "opportunity_label":"Strong", "setup":"OPENING_DRIVE"},
+            {**alerts[1], "opportunity_label":"Flat/failed", "setup":"OPENING_DRIVE"},
+        ]
+        spxw = phase_opportunity_summary(alerts, rows, "ACTIVE", "SPXW")
+        other = phase_opportunity_summary(alerts, rows, "ACTIVE", "OTHER")
+        self.assertEqual(spxw["opportunity_labels"], {"Strong":1})
+        self.assertEqual(other["opportunity_labels"], {"Flat/failed":1})
+        self.assertEqual(phase_opportunity_summary(alerts, rows, "ACTIVE")["alert_count"], 2)
+
     def test_compares_first_qualification_with_alert_and_future_bid(self):
         store = Store(":memory:")
         self.addCleanup(store.db.close)
