@@ -29,8 +29,12 @@ class ChainCoverage:
 
     def due(self, symbols, now, excluded=(), limit=24):
         excluded = set(excluded)
+        # A due name can wait one more whole scan cycle for a sweep slot.
+        # Start refreshing before the freshness window expires so the
+        # remaining universe does not repeatedly fall out of coverage.
+        refresh_after = max(self.interval - timedelta(minutes=1), self.interval / 2)
         eligible = (s for s in symbols if s not in excluded and
-                    (s not in self.last or now-self.last[s] >= self.interval))
+                    (s not in self.last or now-self.last[s] >= refresh_after))
         return sorted(eligible, key=lambda s: (self.attempted.get(s, datetime.min.replace(tzinfo=now.tzinfo)), s))[:limit]
 
     def attempt(self, symbol, now):
