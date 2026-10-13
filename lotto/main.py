@@ -137,32 +137,39 @@ def main():
     LOG.info("Strategy %s settings: %s",STRATEGY_VERSION,json.dumps(asdict(engine.settings),sort_keys=True))
     LOG.info("Coverage plan: %d deep slots; continuous=%s; full-universe sweep target=%d minutes",
              client.discovery.capacity,",".join(sorted(client.discovery.always_deep)),client.coverage.interval.seconds//60)
-    previous_day=store.db.execute("SELECT day FROM discovery ORDER BY day DESC LIMIT 1").fetchone()
-    if previous_day and previous_day["day"] < datetime.now(ET).date().isoformat():
+    local_start = datetime.now(ET)
+    market_hours = (local_start.weekday() < 5
+                    and (9, 30) <= (local_start.hour, local_start.minute) < (16, 0))
+    if market_hours:
+        LOG.info("Startup diagnostics deferred during market hours; entering live scan loop")
+    previous_day = None if market_hours else store.db.execute(
+        "SELECT day FROM discovery ORDER BY day DESC LIMIT 1").fetchone()
+    if previous_day and previous_day["day"] < local_start.date().isoformat():
         try:
             LOG.info("Prior-session audit: %s",json.dumps(audit_store(store,previous_day["day"],engine.settings)))
         except Exception as exc:
             LOG.warning("Prior-session audit unavailable (%s)",type(exc).__name__)
-    try:
-        LOG.info("Startup preflight: %s", json.dumps(check(client,symbols,data_dir)))
-    except Exception as exc:
-        LOG.error("Startup preflight failed (%s); live loop will retry market-data connectivity",type(exc).__name__)
+    if not market_hours:
+        try:
+            LOG.info("Startup preflight: %s", json.dumps(check(client,symbols,data_dir)))
+        except Exception as exc:
+            LOG.error("Startup preflight failed (%s); live loop will retry market-data connectivity",type(exc).__name__)
     diagnose = [s.strip().upper() for s in os.getenv("LOTTO_DIAGNOSE_SYMBOLS", "").split(",") if s.strip()]
-    if diagnose:
+    if diagnose and not market_hours:
         try:
             LOG.info("Targeted session diagnostic: %s", json.dumps(
                 diagnose_symbols(store, datetime.now(ET).date().isoformat(), diagnose, engine.settings)))
         except Exception as exc:
             LOG.warning("Targeted session diagnostic unavailable (%s)", type(exc).__name__)
     hypothesis_day = os.getenv("LOTTO_RULE_AUDIT_DAY", "")
-    if hypothesis_day:
+    if hypothesis_day and not market_hours:
         try:
             LOG.info("Coil burst hypothesis audit: %s", json.dumps(
                 audit_coil_burst_hypothesis(store, hypothesis_day, data_dir)))
         except Exception as exc:
             LOG.warning("Coil burst hypothesis audit unavailable (%s)", type(exc).__name__)
     forensic_request = os.getenv("LOTTO_FORENSIC_EXPORT", "")
-    if forensic_request:
+    if forensic_request and not market_hours:
         try:
             requested = json.loads(forensic_request)
             cases = requested if isinstance(requested, list) else [requested]
