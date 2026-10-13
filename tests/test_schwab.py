@@ -189,5 +189,5 @@ class AdapterTests(unittest.TestCase):
             client.poll(symbols,{},7)
         self.assertEqual({params['symbol'] for path,params in calls if path=='/chains'},
                          {api_symbol(symbol) for symbol in symbols})
-        self.assertEqual(client.coverage.count_fresh(symbols,datetime.now(timezone.utc)),105)
-        self.assertEqual(len(client.discovery.observations),105)
+        self.assertEqual(client.coverage.count_fresh(symbols,datetime.now(timezone.utc)),106)
+        self.assertEqual(len(client.discovery.observations),106)

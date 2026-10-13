@@ -3,11 +3,33 @@ import unittest
 from datetime import datetime, timedelta
 
 from lotto.models import ET, Option, Snapshot
-from lotto.nightly import alert_feedback, phase_opportunity_summary
+from lotto.nightly import alert_feedback, opening_confirmation_research, phase_opportunity_summary
 from lotto.store import Store
 
 
 class NightlyFeedbackTests(unittest.TestCase):
+    def test_opening_research_distinguishes_early_gain_from_later_dip(self):
+        store = Store(":memory:")
+        self.addCleanup(store.db.close)
+        start = datetime(2026, 10, 13, 9, 47, tzinfo=ET)
+        contract = "META  261014C00775000"
+        def sample(minutes, bid):
+            at = start+timedelta(minutes=minutes)
+            option = Option(contract, at.date()+timedelta(days=1), "CALL", 775,
+                            bid, bid+.10, 1000, 100, .4, .1, at)
+            return Snapshot("META", at, 760, at, 735, (), (option,), prior_atr=20)
+        for snap in (sample(0,2.90),sample(3,4.30),sample(12,2.30)):
+            store.record(snap)
+        with store.db:
+            store.db.execute("INSERT INTO decisions VALUES (?,?,?,?,?,?)",
+                ("META",start.isoformat(),"IGNITION","confirming persistence",89.6,
+                 json.dumps({"contract":contract,"side":"CALL","entry_ask":3.0,
+                             "setup":{"name":"OPENING_DRIVE"}})))
+        row = opening_confirmation_research(store,start.date().isoformat())[0]
+        self.assertFalse(row["active_within_2m"])
+        self.assertTrue(row["first_40pct_before_20pct_dip"])
+        self.assertAlmostEqual(row["peak_30m_ask_to_bid_return"],4.30/3.0-1)
+
     def test_spxw_opportunities_are_reported_separately(self):
         alerts = [
             {"phase":"ACTIVE", "contract":"SPXW  261008C07800000", "delivery":"sent"},

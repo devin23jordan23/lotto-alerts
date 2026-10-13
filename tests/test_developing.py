@@ -83,16 +83,16 @@ class DevelopingTests(unittest.TestCase):
         self.assertIsNone(observation_window(snap,history[:2]))
 
     def test_new_symbols_survive_existing_universe_override(self):
-        self.assertEqual(universe_symbols("SPY,AMD"), ["AMD", "CSCO", "HPE", "SPX", "SPY"])
+        self.assertEqual(universe_symbols("SPY,AMD"), ["AMD", "CSCO", "HPE", "SPCX", "SPX", "SPY"])
 
-    def test_all_105_names_get_discovery_even_with_twelve_chains(self):
-        symbols=DEFAULT_UNIVERSE.split(','); self.assertEqual(len(symbols),105)
+    def test_all_106_names_get_discovery_even_with_twelve_chains(self):
+        symbols=DEFAULT_UNIVERSE.split(','); self.assertEqual(len(symbols),106)
         now=self.frames[20].at
         quotes={s:{"price":101,"open":100,"previous":100,"volume":10000,"at":now,"high":102,"low":99} for s in symbols}
         discovery=Discovery(12)
         selected=discovery.update(quotes,now,set(symbols))
         self.assertEqual(len(selected),12)
-        self.assertEqual(len(discovery.observations),105)
+        self.assertEqual(len(discovery.observations),106)
         self.assertEqual({r['symbol'] for r in discovery.observations},set(symbols))
         self.assertEqual(sum(r['promoted'] for r in discovery.observations),12)
 

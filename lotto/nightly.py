@@ -112,6 +112,64 @@ def alert_feedback(store, day):
     return result
 
 
+def opening_confirmation_research(store, day):
+    """Label early qualified ideas withheld for persistence, without changing alerts."""
+    settings = Settings()
+    end = (date.fromisoformat(day)+timedelta(days=1)).isoformat()
+    rows = store.db.execute(
+        "SELECT symbol,at,score,features FROM decisions WHERE at>=? AND at<? "
+        "AND state='IGNITION' AND reason='confirming persistence' ORDER BY at",
+        (day,end)).fetchall()
+    results = []
+    for row in rows:
+        at = datetime.fromisoformat(row['at'])
+        local = at.astimezone(ET)
+        if not 9*60+35 <= local.hour*60+local.minute <= 10*60:
+            continue
+        features = json.loads(row['features'] or '{}')
+        contract, ask = features.get('contract'), features.get('entry_ask')
+        if not contract or not ask or ask <= 0:
+            continue
+        horizon = at+timedelta(minutes=30)
+        quotes = []
+        initial_quote_at = None
+        for saved in store.db.execute(
+            'SELECT payload FROM snapshots WHERE symbol=? AND at>=? AND at<=? ORDER BY at',
+            (row['symbol'],row['at'],horizon.isoformat())):
+            snap = read_snapshot(saved['payload'])
+            option = next((item for item in snap.options if item.symbol == contract),None)
+            if snap.at == at:
+                if option and quote_ok(option,snap,settings):
+                    initial_quote_at = option.quote_time
+                else:
+                    break
+            if not option or not quote_ok(option,snap,settings):
+                continue
+            if initial_quote_at is not None and option.quote_time >= initial_quote_at:
+                quotes.append((snap.at,option.bid))
+        first_40 = next((time for time,bid in quotes if bid >= ask*1.4),None)
+        first_20_dip = next((time for time,bid in quotes if bid <= ask*.8),None)
+        peak = max(quotes,key=lambda item:item[1],default=None)
+        active = store.db.execute(
+            "SELECT 1 FROM alerts WHERE day=? AND symbol=? AND side=? AND phase='ACTIVE' "
+            "AND delivery='sent' AND at>=? AND at<=? LIMIT 1",
+            (day,row['symbol'],features.get('side'),row['at'],
+             (at+timedelta(minutes=2,seconds=30)).isoformat())).fetchone()
+        results.append({
+            'symbol':row['symbol'],'at':row['at'],'side':features.get('side'),
+            'contract':contract,'setup':(features.get('setup') or {}).get('name'),
+            'score':row['score'],'entry_ask':ask,'sampled_quote_count':len(quotes),
+            'active_within_2m':bool(active),
+            'peak_30m_bid':peak[1] if peak else None,
+            'peak_30m_ask_to_bid_return':peak[1]/ask-1 if peak else None,
+            'first_40pct_at':first_40.isoformat() if first_40 else None,
+            'first_20pct_dip_at':first_20_dip.isoformat() if first_20_dip else None,
+            'first_40pct_before_20pct_dip':bool(first_40 and
+                (first_20_dip is None or first_40<first_20_dip)),
+        })
+    return results
+
+
 def trade_high_path(alert, candles):
     """Research opportunity from later option trades, never an assumed fill."""
     at = datetime.fromisoformat(alert["at"])
@@ -322,6 +380,7 @@ def run_nightly(store, day, directory, symbols=(), client=None):
         "data_errors":errors,"discovery_coverage":coverage,"chain_coverage":chain_coverage,
         "universe_flow_events":flow_events,
         "alert_feedback":feedback_rows,
+        "opening_confirmation_research":opening_confirmation_research(store,day),
         "alert_phase_counts":dict(Counter(r["phase"] for r in alert_rows)),
         "activated_watches":len(activated_ids),
         "unactivated_watches":sum(r["phase"] == "POTENTIAL" and r["id"] not in activated_ids for r in alert_rows),
