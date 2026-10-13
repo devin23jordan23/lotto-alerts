@@ -3,13 +3,14 @@ import tempfile
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from lotto.config import Settings
 from lotto.demo import demo_frames
 from lotto.discovery import Discovery
 from lotto.coverage import ChainCoverage
 from lotto.engine import Engine
-from lotto.features import candidates, persistent_activity
+from lotto.features import candidates, observation_window, persistent_activity
 from lotto.main import DEFAULT_UNIVERSE, universe_symbols
 from lotto.models import Bar, ET
 from lotto.nightly import run_nightly
@@ -66,6 +67,21 @@ class DevelopingTests(unittest.TestCase):
         history[12]=replace(history[12],options=tuple(replace(o,volume=0) for o in history[12].options))
         self.assertFalse(persistent_activity(snap,history,ids,Settings()))
 
+    def test_observation_window_accepts_completed_poll_just_after_target(self):
+        # The October 8 AMD put qualified at 12:53 ET, then lost confirmation
+        # because the 12:44 and 12:49 scans were one second after the exact
+        # five/ten-minute targets of the 12:54 scan.
+        base=datetime(2026,10,8,12,0,tzinfo=ET)
+        offsets=((42,4),(44,8),(45,9),(46,4),(48,8),(49,8),
+                 (50,5),(52,10),(53,10))
+        history=[SimpleNamespace(at=base+timedelta(minutes=m,seconds=s)) for m,s in offsets]
+        snap=SimpleNamespace(at=base+timedelta(minutes=54,seconds=7))
+        observed=observation_window(snap,history)
+        self.assertIsNotNone(observed)
+        self.assertEqual([s.at.minute for s in observed[:2]],[49,44])
+        # A real multi-minute gap must still fail rather than inventing flow.
+        self.assertIsNone(observation_window(snap,history[:2]))
+
     def test_new_symbols_survive_existing_universe_override(self):
         self.assertEqual(universe_symbols("SPY,AMD"), ["AMD", "CSCO", "HPE", "SPX", "SPY"])
 
@@ -98,6 +114,20 @@ class DevelopingTests(unittest.TestCase):
               'at':now+timedelta(minutes=5)} for s in symbols}
         self.assertIn('QUIET',d.update(q,now+timedelta(minutes=5),set(symbols),
                                        flow_priorities=flow.priorities(now+timedelta(minutes=5))))
+
+    def test_multiple_fresh_flow_names_displace_stale_core_leases(self):
+        now=self.frames[20].at
+        symbols=list('ABCDEFGHIJKLMN')+['UBER']
+        d=Discovery(12)
+        def quotes(at):
+            return {s:{'price':100,'open':100,'previous':100,'volume':1000,'at':at}
+                    for s in symbols}
+        first=d.update(quotes(now),now,set(symbols))
+        self.assertNotIn('UBER',first)
+        selected=d.update(quotes(now+timedelta(minutes=1)),now+timedelta(minutes=1),
+                          set(symbols),flow_priorities={'M':20,'N':19,'UBER':18})
+        self.assertEqual(len(selected),12)
+        self.assertTrue({'M','N','UBER'} <= set(selected))
 
     def test_lease_stability_and_strong_newcomer_promotion(self):
         now=self.frames[20].at; d=Discovery(4)

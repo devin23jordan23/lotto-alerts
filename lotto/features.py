@@ -89,10 +89,10 @@ def persistent_activity(snap, history, contract_ids, settings):
     endpoints = []
     for minutes in (20, 15, 10, 5, 0):
         target = snap.at-timedelta(minutes=minutes)
-        eligible = [s for s in frames if s.at <= target and (target-s.at).total_seconds() <= 90]
-        if not eligible:
+        endpoint = window_endpoint(frames, target)
+        if endpoint is None:
             return False
-        endpoints.append(eligible[-1])
+        endpoints.append(endpoint)
     window = [s for s in frames if s.at >= endpoints[0].at]
     if any((b.at-a.at).total_seconds() > 150 for a,b in zip(window, window[1:])):
         return False
@@ -109,6 +109,17 @@ def persistent_activity(snap, history, contract_ids, settings):
     return all(v >= settings.min_strike_volume_5m*len(contract_ids) for v in rates) and rates[-1] >= .8*rates[0]
 
 
+def window_endpoint(history, target):
+    """Use the closest completed observation despite small poll-time jitter.
+
+    Every caller supplies only observations available before its current scan.
+    A sample just after the exact target is therefore still causal, while a
+    missing minute remains missing rather than being filled from the future.
+    """
+    matches = [s for s in history if -20 <= (target-s.at).total_seconds() <= 90]
+    return min(matches, key=lambda s: abs((target-s.at).total_seconds())) if matches else None
+
+
 def observation_window(snap, history):
     # Windows use real timestamps, never poll counts. Missing windows do not become zeros.
     endpoints, window_minutes = [], 5
@@ -116,10 +127,10 @@ def observation_window(snap, history):
         endpoints = []
         for minutes in (width, 2*width):
             target = snap.at - timedelta(minutes=minutes)
-            matches = [s for s in history if s.at <= target and (target - s.at).total_seconds() <= 90]
-            if not matches:
+            endpoint = window_endpoint(history, target)
+            if endpoint is None:
                 break
-            endpoints.append(max(matches,key=lambda s:s.at))
+            endpoints.append(endpoint)
         if len(endpoints) == 2:
             window_minutes = width
             break

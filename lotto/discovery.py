@@ -75,6 +75,17 @@ class Discovery:
         held = {s:since for s,since in self.promoted.items() if s in ranks and now-since < timedelta(minutes=25)}
         protected = [s for s in held if s in self.flow_leases and s not in self.explore_leases]
         selected = sorted(self.always_deep & ranks.keys())
+        # A whole-universe sweep can reveal strong option flow in a name that
+        # has never held a deep slot. Reserve part of the core for those fresh
+        # events before existing 25-minute leases fill every available slot.
+        # Otherwise a high-ranking late mover can be swept repeatedly without
+        # ever building the option history required to produce an alert.
+        flow_slots = min(max(1, core_capacity // 3), core_capacity - len(selected))
+        flow_names = ({s for s, priority in (flow_priorities or {}).items()
+                       if s in ranks and priority >= 15} | set(protected)) - set(selected)
+        for symbol in sorted(flow_names, key=lambda s: (-ranks[s], s))[:flow_slots]:
+            if symbol not in selected:
+                selected.append(symbol)
         for symbol in sorted(protected, key=lambda s:-ranks[s]):
             if symbol not in selected and len(selected)<core_capacity:
                 selected.append(symbol)
