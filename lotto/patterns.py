@@ -16,8 +16,8 @@ class Setup:
 
 def path_features(snap: Snapshot, direction: int) -> dict:
     bars = snap.bars
-    if len(bars) < 5:
-        raise ValueError("Price research needs five completed bars")
+    if len(bars) < 3:
+        raise ValueError("Price research needs three completed bars")
     closes = [b.close for b in bars]
     volume = sum(b.volume for b in bars)
     cumul_volume, cumul_value, vwaps = 0, 0.0, []
@@ -60,7 +60,8 @@ def path_features(snap: Snapshot, direction: int) -> dict:
     extreme = high if direction == 1 else low
     adverse = low if direction == 1 else high
     # Each historical bar is compared with VWAP known at that bar, not today's final VWAP.
-    acceptance = sum(direction*(b.close-v) > 0 for b, v in zip(bars[-5:], vwaps[-5:]))/5
+    acceptance_bars = min(5, len(bars))
+    acceptance = sum(direction*(b.close-v) > 0 for b, v in zip(bars[-acceptance_bars:], vwaps[-acceptance_bars:]))/acceptance_bars
     near = sum(direction*(extreme-b.close)/extreme <= .01 for b in bars[-10:])/len(bars[-10:])
     extreme_index = max(range(len(bars)), key=lambda i: direction*(bars[i].high if direction == 1 else bars[i].low))
     after_extreme = bars[extreme_index:]
@@ -73,7 +74,7 @@ def path_features(snap: Snapshot, direction: int) -> dict:
         "pace_rvol": pace, "pace_persistence": pace/old_pace if old_pace else 0,
         "volume_acceleration": last5/max(1, prev5), "return_5m_directional": ret5,
         "local_rvol_5m": last5/expected5 if expected5 > 0 else 0,
-        "return_3m_directional": direction*(closes[-1]/closes[-4]-1),
+        "return_3m_directional": direction*(closes[-1]/(closes[-4] if len(bars) >= 4 else bars[0].open)-1),
         "price_acceleration": ret5-ret_previous, "extreme_distance": direction*(extreme-snap.spot)/extreme,
         "vwap": vwaps[-1], "vwap_slope_directional": direction*(vwaps[-1]-vwaps[-1-lookback]),
         "above_vwap_share": acceptance, "efficiency": abs(closes[-1]-closes[-1-efficiency_window])/path if path else 0,
@@ -86,7 +87,7 @@ def path_features(snap: Snapshot, direction: int) -> dict:
         "opening_high": opening_high, "opening_low": opening_low,
         "previous_high": previous_high, "previous_low": previous_low,
         "ema9": ema9[-1], "ema20": ema20[-1],
-        "ema_slope_directional": direction*(ema9[-1]-ema9[-4]),
+        "ema_slope_directional": direction*(ema9[-1]-(ema9[-4] if len(bars) >= 4 else ema9[0])),
         "atr_available": int(atr is not None), "session_range_atr": (high-low)/atr if atr else 0,
         "move_from_open_atr": direction*(snap.spot-bars[0].open)/atr if atr else 0,
         "volume_window_minutes": lookback,

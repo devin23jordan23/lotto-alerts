@@ -123,7 +123,8 @@ def window_endpoint(history, target):
 def observation_window(snap, history):
     # Windows use real timestamps, never poll counts. Missing windows do not become zeros.
     endpoints, window_minutes = [], 5
-    for width in (5, 2):
+    early_bars = getattr(snap, "bars", None)
+    for width in ((5, 2, 1) if early_bars is not None and len(early_bars) < 5 else (5, 2)):
         endpoints = []
         for minutes in (width, 2*width):
             target = snap.at - timedelta(minutes=minutes)
@@ -131,7 +132,7 @@ def observation_window(snap, history):
             if endpoint is None:
                 break
             endpoints.append(endpoint)
-        if len(endpoints) == 2:
+        if len(endpoints) == 2 and endpoints[1].at < endpoints[0].at < snap.at:
             window_minutes = width
             break
     if len(endpoints) != 2:
@@ -292,7 +293,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         metrics["target_to_invalidation_ratio"] = target_risk
         close = snap.session_end or snap.at.astimezone(ET).replace(hour=16,minute=0,second=0,microsecond=0)
         late = close-snap.at <= timedelta(minutes=30)
-        short = window_minutes == 2
+        short = window_minutes <= 2
         checks = {
             "score below threshold": score >= settings.min_score+(5 if short else 0)+(3 if late else 0),
             "stock volume pace/burst below threshold": metrics["pace_rvol"] >= settings.min_pace_rvol or local_burst or improving or sustained_coil or early_flow,
@@ -305,6 +306,8 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
             "price invalidation already crossed": setup is not None and direction*(snap.spot-setup.invalidation) > 0,
             "insufficient room to retest prior extreme": setup is None or setup.name!="PULLBACK_RESUMPTION" or (target_risk is not None and target_risk>=1.0),
             "short history needs a triggered broad setup": not short or (atr and setup is not None and not setup.building and len(best)>=3),
+            "three-bar opening needs high-score drive": len(snap.bars) >= 5 or (setup is not None and setup.name == "OPENING_DRIVE"
+                and not setup.building and score >= 82),
             "late entry needs near-strike confirmed momentum": not late or (setup is not None and not setup.building
                 and abs(option.delta)>=.20 and (option.ask-option.bid)/option.ask <= .10
                 and (gap is None or 0 <= gap <= .10)),

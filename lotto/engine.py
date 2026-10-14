@@ -85,7 +85,7 @@ class Engine:
             self.scores[score_key] = [s for s in prior_scores if snap.at - s[0] <= timedelta(minutes=10)]
             self.qualified_since.setdefault(score_key, snap.bars[-1].end)
             local = snap.at.astimezone(ET)
-            opening_fast_lane = (local.hour == 9 and 35 <= local.minute < 60
+            opening_fast_lane = (local.hour == 9 and 33 <= local.minute < 60
                                  and best.setup is not None and best.setup.name == "OPENING_DRIVE"
                                  and not best.setup.building and best.score >= 82)
             awaiting_confirmation = (snap.bars[-1].end - self.qualified_since[score_key]

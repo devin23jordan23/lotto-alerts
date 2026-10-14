@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from math import isfinite
 
-STRATEGY_VERSION = "phase1-opening-drive-fastlane-2026-10-14"
+STRATEGY_VERSION = "phase1-three-bar-opening-drive-2026-10-14"
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,7 @@ class Settings:
     max_otm_atr: float = 1.0
     max_building_distance_atr: float = .06
     max_entry_extension_atr: float = .25
-    min_opening_bars: int = 5
+    min_opening_bars: int = 3
 
     def __post_init__(self):
         if any(not isfinite(value) for value in vars(self).values()):
@@ -56,7 +56,7 @@ class Settings:
             raise ValueError("Invalid maximum expiration")
         if (not self.max_ask <= self.max_scaled_ask or self.premium_atr_fraction <= 0
                 or not 0 < self.max_building_distance_atr <= self.max_entry_extension_atr
-                or self.max_otm_atr <= 0 or not 5 <= self.min_opening_bars <= 11
+                or self.max_otm_atr <= 0 or not 3 <= self.min_opening_bars <= 11
                 or not 0 < self.entry_cutoff_minutes < 390
                 or not 0 < self.max_spread_fraction < 1 or self.max_spread_dollars <= 0):
             raise ValueError("Invalid phase-one quality limits")

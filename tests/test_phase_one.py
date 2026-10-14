@@ -72,6 +72,25 @@ class PhaseOneTests(unittest.TestCase):
                     self.assertEqual(alerts[0]["phase"], "ACTIVE")
                     self.assertIn("RISKY OPENING DRIVE", alerts[0]["payload"]["embeds"][0]["title"])
 
+    def test_three_bar_opening_drive_can_alert_at_933(self):
+        engine = Engine(self.store)
+        alerts = []
+        for index, snap in enumerate(self.frames[:3]):
+            bars = tuple(replace(bar, open=100 + minute*.5,
+                                 close=100 + (minute+1)*.5,
+                                 high=100 + (minute+1)*.5 + .02,
+                                 low=100 + minute*.5 - .02)
+                         for minute, bar in enumerate(snap.bars))
+            options = tuple(replace(option, volume=option.volume + (500 if index == 2 else 0))
+                            for option in snap.options)
+            alerts.extend(engine.process([replace(snap, bars=bars, spot=bars[-1].close,
+                                                  options=options)]))
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["phase"], "ACTIVE")
+        self.assertEqual(datetime.fromisoformat(alerts[0]["payload"]["embeds"][0]["timestamp"])
+                         .astimezone(ET).strftime("%H:%M"), "09:33")
+        self.assertIn("RISKY OPENING DRIVE", alerts[0]["payload"]["embeds"][0]["title"])
+
     def test_broad_early_flow_accepts_steady_options_volume_without_weakening_later_scans(self):
         snap = self.frames[15]
         setup = Setup("OPENING_DRIVE", snap.spot-.1, snap.spot-1)
