@@ -35,7 +35,11 @@ class Engine:
                 continue
             self.store.record(snap)
             self.store.track(snap, cfg)
-            problems = snap.problems(cfg.max_quote_age_seconds, min_bars=cfg.min_opening_bars)
+            local = snap.at.astimezone(ET)
+            early_opening_warmup = (local.hour == 9 and 33 <= local.minute < 35
+                                    and cfg.min_opening_bars <= 5)
+            required_bars = 3 if early_opening_warmup else cfg.min_opening_bars
+            problems = snap.problems(cfg.max_quote_age_seconds, min_bars=required_bars)
             if problems:
                 if not snap.problems(cfg.max_quote_age_seconds, min_bars=1):
                     history.append(snap)  # Capture opening options history before price setup warmup.
