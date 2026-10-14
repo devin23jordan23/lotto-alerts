@@ -196,12 +196,10 @@ class DevelopingTests(unittest.TestCase):
     def test_three_distinct_minute_observations_confirm(self):
         store=Store(':memory:');self.addCleanup(store.db.close)
         engine=Engine(store,Settings(confirmation_minutes=2,min_opening_bars=11))
-        for snap in self.frames[:12]:
+        for snap in self.frames[:10]:
             self.assertFalse(engine.process([snap]))
-        self.assertEqual(len(engine.process([self.frames[12]])),1)
-        reasons=[r[0] for r in store.db.execute("SELECT reason FROM decisions WHERE at>=? ORDER BY at",
-                                                 (self.frames[10].at.isoformat(),))]
-        self.assertEqual(reasons[:2],['confirming persistence','confirming persistence'])
+        self.assertEqual(len(engine.process([self.frames[10]])),1)
+        self.assertFalse(engine.process([self.frames[11]]))
 
     def test_nightly_waits_for_early_close_and_runs_once(self):
         store=Store(':memory:'); self.addCleanup(store.db.close)

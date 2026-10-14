@@ -84,9 +84,17 @@ class Engine:
             prior_scores.append((snap.at, best.score))
             self.scores[score_key] = [s for s in prior_scores if snap.at - s[0] <= timedelta(minutes=10)]
             self.qualified_since.setdefault(score_key, snap.bars[-1].end)
-            if snap.bars[-1].end - self.qualified_since[score_key] < timedelta(minutes=cfg.confirmation_minutes):
+            local = snap.at.astimezone(ET)
+            opening_fast_lane = (local.hour == 9 and 35 <= local.minute < 60
+                                 and best.setup is not None and best.setup.name == "OPENING_DRIVE"
+                                 and not best.setup.building and best.score >= 82)
+            awaiting_confirmation = (snap.bars[-1].end - self.qualified_since[score_key]
+                                     < timedelta(minutes=cfg.confirmation_minutes))
+            if awaiting_confirmation and not opening_fast_lane:
                 self.store.decision(snap, "IGNITION", "confirming persistence", best)
                 continue
+            if awaiting_confirmation and opening_fast_lane:
+                best.metrics["opening_fast_lane"] = 1
             # Flat strong scores can persist; materially deteriorating scores cannot alert.
             if best.score_change < -5:
                 self.store.decision(snap, "COOLING", "score deteriorating", best)

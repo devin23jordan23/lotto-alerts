@@ -8,7 +8,7 @@ from lotto.config import Settings, STRATEGY_VERSION
 from lotto.demo import demo_frames
 from lotto.discovery import Discovery
 from lotto.engine import Engine
-from lotto.features import candidates, contract_ok, early_broad_flow
+from lotto.features import Candidate, candidates, contract_ok, early_broad_flow
 from lotto.models import Bar, ET
 from lotto.nightly import alert_feedback
 from lotto.patterns import Setup, detect_setup, path_features
@@ -31,11 +31,11 @@ class PhaseOneTests(unittest.TestCase):
 
     def test_opening_drive_has_short_valid_window_and_no_future_bar(self):
         engine=Engine(self.store)
-        for snap in self.frames[:5]:
+        for snap in self.frames[:4]:
             self.assertFalse(engine.process([snap]))
-        alerts=engine.process([self.frames[5]])
+        alerts=engine.process([self.frames[4]])
         self.assertEqual(len(alerts),1)
-        setup = detect_setup(self.frames[5], 1, path_features(self.frames[5], 1))
+        setup = detect_setup(self.frames[4], 1, path_features(self.frames[4], 1))
         self.assertEqual(setup.name, "OPENING_DRIVE")
         self.assertIn("Trigger", alerts[0]["payload"]["embeds"][0]["description"])
         invalid=replace(self.frames[5],at=self.frames[4].at,spot_time=self.frames[4].at)
@@ -43,9 +43,34 @@ class PhaseOneTests(unittest.TestCase):
 
     def test_poll_jitter_does_not_add_an_extra_confirmation_minute(self):
         engine=Engine(self.store)
+        alerts=[]
         for snap in self.frames[:5]:
-            engine.process([replace(snap,at=snap.at+timedelta(seconds=40))])
-        self.assertEqual(len(engine.process([replace(self.frames[5],at=self.frames[5].at+timedelta(seconds=5))])),1)
+            alerts.extend(engine.process([replace(snap,at=snap.at+timedelta(seconds=40))]))
+        alerts.extend(engine.process([replace(self.frames[5],at=self.frames[5].at+timedelta(seconds=5))]))
+        self.assertEqual(len(alerts),1)
+
+    def test_only_high_score_opening_drives_skip_first_bar_confirmation(self):
+        snap = self.frames[5]
+        self.assertEqual((snap.at.astimezone(ET).hour, snap.at.astimezone(ET).minute), (9, 36))
+        cases = [
+            ("opening drive", "OPENING_DRIVE", 82, True, True),
+            ("low score", "OPENING_DRIVE", 81.9, False, False),
+            ("other setup", "LEVEL_RECLAIM", 90, False, False),
+            ("building watch", "OPENING_DRIVE", 90, False, False),
+        ]
+        for label, setup_name, score, building, expected in cases:
+            with self.subTest(label=label):
+                store = Store(":memory:")
+                self.addCleanup(store.db.close)
+                candidate = Candidate(snap, snap.options[0], score, {}, {}, [], True,
+                                      setup=Setup(setup_name, snap.spot, snap.spot - 1,
+                                                  building=label == "building watch"))
+                with patch("lotto.engine.candidates", return_value=[candidate]):
+                    alerts = Engine(store).process([snap])
+                self.assertEqual(bool(alerts), expected)
+                if expected:
+                    self.assertEqual(alerts[0]["phase"], "ACTIVE")
+                    self.assertIn("RISKY OPENING DRIVE", alerts[0]["payload"]["embeds"][0]["title"])
 
     def test_broad_early_flow_accepts_steady_options_volume_without_weakening_later_scans(self):
         snap = self.frames[15]
