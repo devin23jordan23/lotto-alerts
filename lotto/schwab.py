@@ -70,8 +70,11 @@ class Schwab:
         self.calendar_cache = {}
         self.atrs = {}
         self.levels = {}
-        self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "24")),
-            always_deep={s.strip().upper() for s in os.getenv("LOTTO_CONTINUOUS_SYMBOLS","SPY,QQQ,IWM").split(",") if s.strip()} | {"SPX"})
+        self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "30")),
+            always_deep={s.strip().upper() for s in os.getenv(
+                "LOTTO_CONTINUOUS_SYMBOLS",
+                "SPY,QQQ,IWM,META,NVDA,AMD,TSLA,AAPL,MSFT,AMZN,GOOGL,AVGO,MU,MRNA,SMCI,COIN,PLTR,NFLX"
+            ).split(",") if s.strip()} | {"SPX"})
         self.coverage = ChainCoverage(int(os.getenv("LOTTO_SWEEP_MINUTES", "3")))
 
     def token(self, force=False):

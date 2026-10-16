@@ -6,8 +6,8 @@ from math import isfinite
 
 class Discovery:
     def __init__(self, capacity=12, always_deep=()):
-        if not 4 <= capacity <= 24:
-            raise ValueError("LOTTO_CHAIN_CAPACITY must be between 4 and 24")
+        if not 4 <= capacity <= 60:
+            raise ValueError("LOTTO_CHAIN_CAPACITY must be between 4 and 60")
         self.capacity = capacity
         self.always_deep = set(always_deep)
         if len(self.always_deep)>capacity-max(1,capacity//4):

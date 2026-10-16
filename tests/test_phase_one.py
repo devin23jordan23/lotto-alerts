@@ -8,7 +8,7 @@ from lotto.config import Settings, STRATEGY_VERSION
 from lotto.demo import demo_frames
 from lotto.discovery import Discovery
 from lotto.engine import Engine
-from lotto.features import Candidate, candidates, contract_ok, early_broad_flow
+from lotto.features import Candidate, candidates, contract_ok, early_broad_flow, opening_expansion
 from lotto.models import Bar, ET
 from lotto.nightly import alert_feedback
 from lotto.patterns import Setup, detect_setup, path_features
@@ -28,6 +28,19 @@ class PhaseOneTests(unittest.TestCase):
             for i,p in enumerate(prices))
         return replace(self.frames[-1],at=bars[-1].end,spot_time=bars[-1].end,spot=prices[-1],
                        bars=bars,prior_close=100,prior_atr=atr)
+
+    def test_opening_expansion_requires_price_and_broad_option_flow(self):
+        snap = replace(self.frames[-1], at=datetime(2026, 10, 16, 9, 58, tzinfo=ET))
+        setup = Setup("LEVEL_RECLAIM", snap.spot, snap.spot + 1)
+        metrics = {"return_5m_directional": .037, "local_rvol_5m": 2.396,
+                   "volume_acceleration": 1.086}
+        self.assertTrue(opening_expansion(snap, setup, metrics, 86, 1.865, 9))
+        self.assertFalse(opening_expansion(snap, setup, metrics, 81, 1.865, 9))
+        self.assertFalse(opening_expansion(snap, setup, metrics, 86, 1.2, 9))
+        self.assertFalse(opening_expansion(snap, setup, {**metrics, "return_5m_directional": .002}, 86, 1.865, 9))
+        self.assertFalse(opening_expansion(snap, replace(setup, building=True), metrics, 86, 1.865, 9))
+        self.assertFalse(opening_expansion(replace(snap, at=snap.at + timedelta(minutes=2)), setup,
+                                           metrics, 86, 1.865, 9))
 
     def test_opening_drive_has_short_valid_window_and_no_future_bar(self):
         engine=Engine(self.store)

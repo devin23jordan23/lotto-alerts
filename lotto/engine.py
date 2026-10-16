@@ -92,6 +92,7 @@ class Engine:
             opening_fast_lane = (local.hour == 9 and 33 <= local.minute < 60
                                  and best.setup is not None and best.setup.name == "OPENING_DRIVE"
                                  and not best.setup.building and best.score >= 82)
+            opening_fast_lane = opening_fast_lane or bool(best.metrics.get("opening_expansion"))
             awaiting_confirmation = (snap.bars[-1].end - self.qualified_since[score_key]
                                      < timedelta(minutes=cfg.confirmation_minutes))
             if awaiting_confirmation and not opening_fast_lane:

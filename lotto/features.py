@@ -170,6 +170,23 @@ def early_broad_flow(snap: Snapshot, setup: Setup | None, metrics: dict,
             and (option.ask-option.bid)/option.ask <= .10)
 
 
+def opening_expansion(snap: Snapshot, setup: Setup | None, metrics: dict,
+                      score: float, acceleration: float, strike_count: int) -> bool:
+    """Let a confirmed opening impulse substitute for a weak cumulative volume baseline.
+
+    This does not relax the option-flow, price, liquidity, or context checks.
+    It applies equally to calls and puts and requires a directional five-minute
+    move, local volume, and broad replenishing option activity.
+    """
+    local = snap.at.astimezone(ET)
+    return (local.hour == 9 and 33 <= local.minute < 60
+            and setup is not None and not setup.building and score >= 82
+            and metrics["return_5m_directional"] >= .01
+            and metrics["local_rvol_5m"] >= 1.5
+            and metrics["volume_acceleration"] >= 1.0
+            and acceleration >= 1.5 and strike_count >= 4)
+
+
 def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> list[Candidate]:
     observed = observation_window(snap, history)
     if observed is None:
@@ -274,6 +291,8 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         score = round(sum(parts.values()), 2)
         early_flow = early_broad_flow(snap, setup, metrics, score, option, settings)
         metrics["early_broad_flow"] = int(early_flow)
+        opening_break = opening_expansion(snap, setup, metrics, score, acceleration, len(best))
+        metrics["opening_expansion"] = int(opening_break)
         coil = setup is not None and setup.name == "COILED_CONTINUATION"
         local_burst = (metrics["local_rvol_5m"] >= settings.min_local_rvol
                        and metrics["volume_acceleration"] >= settings.min_local_acceleration
@@ -296,7 +315,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         short = window_minutes <= 2
         checks = {
             "score below threshold": score >= settings.min_score+(5 if short else 0)+(3 if late else 0),
-            "stock volume pace/burst below threshold": metrics["pace_rvol"] >= settings.min_pace_rvol or local_burst or improving or sustained_coil or early_flow,
+            "stock volume pace/burst below threshold": metrics["pace_rvol"] >= settings.min_pace_rvol or local_burst or improving or sustained_coil or early_flow or opening_break,
             "stock volume pace fading": metrics["pace_persistence"] >= .80,
             "no developing price setup": setup is not None,
             "opposing volume dominates": metrics["opposing_volume_share"] <= (.60 if coil else .50),
