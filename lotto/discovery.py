@@ -3,11 +3,13 @@ from collections import defaultdict
 from datetime import timedelta
 from math import isfinite
 
+from .models import ET
+
 
 class Discovery:
     def __init__(self, capacity=12, always_deep=()):
-        if not 4 <= capacity <= 24:
-            raise ValueError("LOTTO_CHAIN_CAPACITY must be between 4 and 24")
+        if not 4 <= capacity <= 30:
+            raise ValueError("LOTTO_CHAIN_CAPACITY must be between 4 and 30")
         self.capacity = capacity
         self.always_deep = set(always_deep)
         if len(self.always_deep)>capacity-max(1,capacity//4):
@@ -16,6 +18,7 @@ class Discovery:
         self.promoted = {}
         self.explore_leases = {}
         self.flow_leases = {}
+        self.recovery_leases = {}
         self.explored = set()
         self.day = None
         self.observations = []
@@ -27,6 +30,7 @@ class Discovery:
             self.promoted.clear()
             self.explore_leases.clear()
             self.flow_leases.clear()
+            self.recovery_leases.clear()
             self.explored.clear()
             self.day = day
         ranks = {}
@@ -47,10 +51,24 @@ class Discovery:
             high, low = q.get("high"), q.get("low")
             excursion = max(abs(price/opening-1), abs(price/previous-1))
             intraday_range = (high-low)/opening if high and low else 0
+            # A strong reversal can return to the open while the old excursion
+            # rank falls toward zero. Preserve the move away from the session
+            # extreme so these names can earn continuous option observations.
+            recovery = 0.0
+            local = now.astimezone(ET)
+            if (local.hour == 9 and local.minute >= 35) or (local.hour == 10 and local.minute < 15):
+                if high and low and high >= price >= low > 0 and ret5 is not None:
+                    if ret5 >= .005:
+                        recovery = price/low-1
+                    elif ret5 <= -.005:
+                        recovery = high/price-1
+                    if recovery < .02:
+                        recovery = 0.0
             score = (100*(abs(ret5 or 0)*3 + excursion + intraday_range*.5)
                      + min(3, acceleration or 0) + (flow_priorities or {}).get(symbol, 0))
             record = {**q, "symbol":symbol, "observed_at":now, "return_5m":ret5,
-                      "volume_5m":delta, "volume_acceleration":acceleration, "priority":score}
+                      "volume_5m":delta, "volume_acceleration":acceleration,
+                      "opening_recovery":recovery, "priority":score}
             if not history or at > history[-1]["at"]:
                 history.append(record)
             self.history[symbol] = [v for v in history if now-v["at"] <= timedelta(minutes=12)]
@@ -72,20 +90,44 @@ class Discovery:
                 self.flow_leases[symbol] = now
         self.flow_leases = {s:at for s,at in self.flow_leases.items()
                             if s in ranks and now-at < timedelta(minutes=12)}
+        self.recovery_leases = {s:at for s,at in self.recovery_leases.items()
+                                if s in ranks and now-at < timedelta(minutes=12)}
         held = {s:since for s,since in self.promoted.items() if s in ranks and now-since < timedelta(minutes=25)}
-        protected = [s for s in held if s in self.flow_leases and s not in self.explore_leases]
+        protected = [s for s in held if (s in self.flow_leases or s in self.recovery_leases)
+                     and s not in self.explore_leases]
         selected = sorted(self.always_deep & ranks.keys())
         # A whole-universe sweep can reveal strong option flow in a name that
         # has never held a deep slot. Reserve part of the core for those fresh
         # events before existing 25-minute leases fill every available slot.
         # Otherwise a high-ranking late mover can be swept repeatedly without
         # ever building the option history required to produce an alert.
-        flow_slots = min(max(1, core_capacity // 3), core_capacity - len(selected))
+        # Keep two core slots available for opening recoveries instead of
+        # letting older sweep-flow leases consume every non-continuous slot.
+        flow_slots = min(max(1, core_capacity // 3),
+                         max(0, core_capacity - len(selected) - 2))
         flow_names = ({s for s, priority in (flow_priorities or {}).items()
                        if s in ranks and priority >= 15} | set(protected)) - set(selected)
         for symbol in sorted(flow_names, key=lambda s: (-ranks[s], s))[:flow_slots]:
             if symbol not in selected:
                 selected.append(symbol)
+        # Two core slots follow opening recoveries even when they have already
+        # returned to the open, where the ordinary excursion rank is small.
+        # Retain each selected name for an option-history baseline; keep the
+        # total chain budget unchanged.
+        recovery_rows = {row["symbol"]:row["opening_recovery"] for row in self.observations
+                         if row["opening_recovery"] > 0}
+        recovery_slots = min(2, max(0, core_capacity-len(selected)))
+        recovery_selected = sorted((s for s in self.recovery_leases if s in held),
+                                   key=lambda s:(-recovery_rows.get(s, 0), s))[:recovery_slots]
+        for symbol in sorted(recovery_rows, key=lambda s:(-recovery_rows[s], s)):
+            if len(recovery_selected) >= recovery_slots:
+                break
+            if symbol not in selected and symbol not in recovery_selected:
+                recovery_selected.append(symbol)
+        for symbol in recovery_selected:
+            if symbol not in selected:
+                selected.append(symbol)
+            self.recovery_leases.setdefault(symbol, now)
         for symbol in sorted(protected, key=lambda s:-ranks[s]):
             if symbol not in selected and len(selected)<core_capacity:
                 selected.append(symbol)
@@ -98,7 +140,8 @@ class Discovery:
                 selected.append(symbol)
         # A genuinely stronger newcomer may displace at most one low-priority lease.
         newcomers = [s for s in ranks if s not in selected]
-        replaceable = [s for s in selected if s not in tracked and s not in self.flow_leases and s not in self.always_deep]
+        replaceable = [s for s in selected if s not in tracked and s not in self.flow_leases
+                       and s not in self.recovery_leases and s not in self.always_deep]
         if newcomers and replaceable:
             best, worst = max(newcomers, key=ranks.get), min(replaceable, key=ranks.get)
             if ranks[best] > max(2, ranks[worst]*2):

@@ -206,8 +206,8 @@ class Store:
 
     def queue(self, candidate: Candidate, payload: dict, dry_run: bool,
               phase: str, parent_id: str | None = None) -> str:
-        if phase not in {"POTENTIAL", "ACTIVE"}:
-            raise ValueError("Alert phase must be POTENTIAL or ACTIVE")
+        if phase not in {"POTENTIAL", "ACTIVE", "RESEARCH"}:
+            raise ValueError("Alert phase must be POTENTIAL, ACTIVE or RESEARCH")
         snap, option = candidate.snapshot, candidate.option
         ident = sha256(f"{snap.day}:{snap.symbol}:{option.symbol}:{snap.at.isoformat()}".encode()).hexdigest()[:16]
         thesis_id = parent_id or ident
@@ -219,7 +219,7 @@ class Store:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ident, snap.day, snap.symbol, option.side, option.symbol, snap.at.isoformat(),
                  option.ask, json.dumps(payload), json.dumps(snap.to_dict()),
-                 "dry_run" if dry_run else "internal" if phase == "POTENTIAL" else "pending",
+                 "dry_run" if dry_run else "internal" if phase in {"POTENTIAL", "RESEARCH"} else "pending",
                  option.bid / option.ask - 1, option.bid / option.ask - 1,
                  option.bid / option.ask - 1, option.quote_time.isoformat(),
                  phase, parent_id, thesis_id))

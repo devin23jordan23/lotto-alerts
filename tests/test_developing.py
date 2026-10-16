@@ -15,6 +15,7 @@ from lotto.main import DEFAULT_UNIVERSE, universe_symbols
 from lotto.models import Bar, ET
 from lotto.nightly import run_nightly
 from lotto.patterns import detect_setup, path_features
+from lotto.quality import public_active_quality
 from lotto.schwab import benchmark_for
 from lotto.store import Store
 from unittest.mock import Mock, patch
@@ -82,6 +83,17 @@ class DevelopingTests(unittest.TestCase):
         # A real multi-minute gap must still fail rather than inventing flow.
         self.assertIsNone(observation_window(snap,history[:2]))
 
+    def test_fresh_opening_recovery_can_build_two_minute_options_history(self):
+        base=datetime(2026,10,15,9,44,tzinfo=ET)
+        history=[SimpleNamespace(at=base+timedelta(minutes=i)) for i in range(4)]
+        opening=SimpleNamespace(at=base+timedelta(minutes=4),bars=[None]*18)
+        observed=observation_window(opening,history)
+        self.assertIsNotNone(observed)
+        self.assertEqual(observed[-1],2)
+        midday=SimpleNamespace(at=base.replace(hour=12)+timedelta(minutes=4),bars=[None]*18)
+        mid_history=[SimpleNamespace(at=midday.at-timedelta(minutes=4-i)) for i in range(4)]
+        self.assertIsNone(observation_window(midday,mid_history))
+
     def test_new_symbols_survive_existing_universe_override(self):
         self.assertEqual(universe_symbols("SPY,AMD"), ["AMD", "CSCO", "HPE", "SPCX", "SPX", "SPY"])
 
@@ -114,6 +126,50 @@ class DevelopingTests(unittest.TestCase):
               'at':now+timedelta(minutes=5)} for s in symbols}
         self.assertIn('QUIET',d.update(q,now+timedelta(minutes=5),set(symbols),
                                        flow_priorities=flow.priorities(now+timedelta(minutes=5))))
+
+    def test_opening_recovery_gets_chain_history_despite_low_open_excursion(self):
+        start=datetime(2026,10,15,9,40,tzinfo=ET)
+        symbols=[f'N{i:02d}' for i in range(30)]+['MRNA']
+        d=Discovery(24,always_deep={'N00','N01','N02','N03'})
+        def quotes(at, mrna_price):
+            result={s:{'price':103,'open':100,'previous':100,'volume':100000,
+                       'high':104,'low':99,'at':at} for s in symbols}
+            result['MRNA']={'price':mrna_price,'open':225.48,'previous':226.30,
+                            'volume':150000,'high':226.30,'low':217.02,'at':at}
+            return result
+        d.update(quotes(start,223.26),start,set(symbols),
+                 flow_priorities={s:20 for s in symbols if s!='MRNA'})
+        at=start+timedelta(minutes=5)
+        selected=d.update(quotes(at,225.21),at,set(symbols),
+                          flow_priorities={s:20 for s in symbols if s!='MRNA'})
+        self.assertEqual(len(selected),24)
+        self.assertIn('MRNA',selected)
+        self.assertGreater(d.history['MRNA'][-1]['opening_recovery'],.03)
+        # A brief pause does not discard the option-history baseline.
+        at+=timedelta(minutes=1)
+        self.assertIn('MRNA',d.update(quotes(at,225.21),at,set(symbols),
+                                      flow_priorities={s:20 for s in symbols if s!='MRNA'}))
+
+    def test_requested_continuous_names_leave_dynamic_coverage(self):
+        fixed={'SPY','QQQ','IWM','META','NVDA','AMD','TSLA','AAPL','MSFT','AMZN',
+               'GOOGL','AVGO','MU','MRNA','SMCI','COIN','PLTR','NFLX','SPX'}
+        d=Discovery(30,always_deep=fixed)
+        start=datetime(2026,10,15,9,40,tzinfo=ET)
+        names=fixed | {f'X{i:02d}' for i in range(30)} | {'NEW'}
+        def quotes(at, new_price):
+            result={s:{'price':101,'open':100,'previous':100,'volume':100000,
+                       'high':102,'low':99,'at':at} for s in names}
+            result['NEW']={'price':new_price,'open':225.48,'previous':226.30,
+                           'volume':150000,'high':226.30,'low':217.02,'at':at}
+            return result
+        d.update(quotes(start,223.26),start,names,
+                 flow_priorities={s:20 for s in names if s not in fixed and s!='NEW'})
+        at=start+timedelta(minutes=5)
+        selected=d.update(quotes(at,225.21),at,names,
+                          flow_priorities={s:20 for s in names if s not in fixed and s!='NEW'})
+        self.assertEqual(len(selected),30)
+        self.assertTrue(fixed <= set(selected))
+        self.assertIn('NEW',selected)
 
     def test_multiple_fresh_flow_names_displace_stale_core_leases(self):
         now=self.frames[20].at
@@ -200,6 +256,29 @@ class DevelopingTests(unittest.TestCase):
             self.assertFalse(engine.process([snap]))
         self.assertEqual(len(engine.process([self.frames[10]])),1)
         self.assertFalse(engine.process([self.frames[11]]))
+
+    def test_public_quality_accepts_convexity_or_accelerating_stock(self):
+        settings=Settings(active_quality_gate=1)
+        candidate=SimpleNamespace(score=91,metrics={'response_proxy':1.11,'price_acceleration':0})
+        self.assertTrue(public_active_quality(candidate,settings))
+        candidate.metrics={'response_proxy':0.5,'price_acceleration':.0021}
+        self.assertTrue(public_active_quality(candidate,settings))
+        candidate.metrics={'response_proxy':0.5,'price_acceleration':.001}
+        self.assertFalse(public_active_quality(candidate,settings))
+        candidate.score=89
+        candidate.metrics={'response_proxy':2.0,'price_acceleration':.01}
+        self.assertFalse(public_active_quality(candidate,settings))
+
+    def test_research_only_candidate_keeps_auditable_quote_without_public_alert(self):
+        store=Store(':memory:');self.addCleanup(store.db.close)
+        engine=Engine(store,Settings(active_quality_gate=1,active_min_score=100),dry_run=False)
+        alerts=[alert for snap in self.frames for alert in engine.process([snap])]
+        self.assertEqual(alerts,[])
+        self.assertGreater(store.db.execute('SELECT COUNT(*) FROM candidate_evaluations').fetchone()[0],0)
+        self.assertEqual(store.db.execute("SELECT COUNT(*) FROM alerts WHERE phase='RESEARCH'").fetchone()[0],1)
+        self.assertEqual(store.db.execute("SELECT delivery FROM alerts WHERE phase='RESEARCH'").fetchone()[0],'internal')
+        self.assertEqual(store.last_alert(self.frames[-1].day,self.frames[-1].symbol)['phase'],'RESEARCH')
+        self.assertGreater(store.db.execute("SELECT COUNT(*) FROM decisions WHERE reason LIKE 'research alert %'").fetchone()[0],0)
 
     def test_nightly_waits_for_early_close_and_runs_once(self):
         store=Store(':memory:'); self.addCleanup(store.db.close)

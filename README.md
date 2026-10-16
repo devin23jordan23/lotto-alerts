@@ -13,11 +13,13 @@ replaces the configured universe.
 Every cycle requests stock quotes for the **whole universe** in one batch.
 The worker also rotates `/chains` requests across every configured symbol:
 up to `LOTTO_SWEEP_PER_CYCLE=26` non-promoted names per minute, due again after
-`LOTTO_SWEEP_MINUTES=3`. Up to `LOTTO_CHAIN_CAPACITY=24` developing names
+`LOTTO_SWEEP_MINUTES=3`. Up to `LOTTO_CHAIN_CAPACITY=30` developing names
 receive minute bars and chains each cycle, plus previously alerted names for
 outcome tracking. At normal request speed, the 104-name chain sweep completes
-in roughly three cycles. SPY, QQQ and IWM retain deep slots throughout the session
-through `LOTTO_CONTINUOUS_SYMBOLS`; the remaining slots rotate across the universe.
+in roughly three cycles. The configured continuous symbols and SPX retain deep
+slots throughout the session; the remaining slots rotate across the universe.
+Two dynamic slots prioritize strong opening recoveries so a reversal back
+toward the open still builds option history.
 The log reports actual coverage within the configured sweep window in
 minutes; request failures or slow responses can lengthen that interval.
 
@@ -65,6 +67,15 @@ first found sends an active idea directly. The watch-to-active transition bypass
 the usual ticker cooldown; later distinct legs still require the existing
 cooldown/reset. Internal watches remain in nightly research and do not count as
 Discord deliveries.
+
+With `LOTTO_ACTIVE_QUALITY_GATE=1`, a triggered candidate reaches Discord only
+at score 90+ with either option response proxy 1.1+ or directional stock price
+acceleration 0.2 percentage points+. Other triggered candidates are saved as
+`RESEARCH` with their original quote and tracked outcome. They retain the same
+cooldown/reset behavior as an active idea, so reducing Discord posts cannot
+silently create a flood of new entries. The nightly report measures public
+ACTIVE and internal RESEARCH opportunities separately. The historical +40%
+rate for this tier was selected on seven sessions and is not a forecast.
 
 The active Discord embed shows the contract, ask/bid, stock price, trigger,
 invalidation, research score, and supportive sector/market or peer context.

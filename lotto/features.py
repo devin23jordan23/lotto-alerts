@@ -124,7 +124,10 @@ def observation_window(snap, history):
     # Windows use real timestamps, never poll counts. Missing windows do not become zeros.
     endpoints, window_minutes = [], 5
     early_bars = getattr(snap, "bars", None)
-    for width in ((5, 2, 1) if early_bars is not None and len(early_bars) < 5 else (5, 2)):
+    local = snap.at.astimezone(ET)
+    opening = local.hour == 9 and local.minute < 55
+    for width in ((5, 2, 1) if early_bars is not None and len(early_bars) < 5
+                  else (5, 2) if opening else (5,)):
         endpoints = []
         for minutes in (width, 2*width):
             target = snap.at - timedelta(minutes=minutes)

@@ -388,15 +388,18 @@ def run_nightly(store, day, directory, symbols=(), client=None):
         "option_trade_high_feedback":trade_high_rows,
         "option_trade_high_errors":trade_high_errors,
         "active_opportunity_summary":phase_opportunity_summary(alert_rows, trade_high_rows, "ACTIVE"),
+        "research_opportunity_summary":phase_opportunity_summary(alert_rows, trade_high_rows, "RESEARCH"),
         "potential_opportunity_summary":phase_opportunity_summary(alert_rows, trade_high_rows, "POTENTIAL"),
         "opportunity_by_instrument":{
             group:{"active":phase_opportunity_summary(alert_rows, trade_high_rows, "ACTIVE", group),
+                   "research":phase_opportunity_summary(alert_rows, trade_high_rows, "RESEARCH", group),
                    "potential":phase_opportunity_summary(alert_rows, trade_high_rows, "POTENTIAL", group)}
             for group in ("SPXW", "OTHER")},
         "research_notes":["Price setups are hypotheses, not confirmed option alerts.",
                           "Historical bars cannot reconstruct unrecorded intraday option quotes or aggressor side.",
                           "Trade highs are price-potential labels, not realized returns or assumed fills.",
                           "Potential watches never count as active ideas; linked active alerts start a new measurement window.",
+                          "Research ideas are tracked internally and never delivered to Discord.",
                           "Future labels never enter the feature calculation. No automatic live threshold changes.",
                           "Small, selected daily cohorts do not establish predictive accuracy."],
         "decision_reasons":dict(Counter(r["reason"] for r in rows)),

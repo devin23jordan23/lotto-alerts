@@ -5,6 +5,7 @@ from .config import Settings
 from .discord import alert_payload
 from .features import candidates
 from .models import ET, Snapshot
+from .quality import public_active_quality
 from .store import Store
 
 
@@ -135,13 +136,17 @@ class Engine:
                 self.store.decision(snap, candidate.state, "alert budget/ranking suppressed", candidate)
                 continue
             phase = "POTENTIAL" if candidate.setup.building else "ACTIVE"
+            public = phase != "ACTIVE" or public_active_quality(candidate, cfg)
+            stored_phase = phase if public else "RESEARCH"
             last = self.store.last_alert(snap.day, snap.symbol)
             parent_id = (last["id"] if candidate.state == "ACTIVATION" and last else None)
             payload = alert_payload(candidate, phase, parent_id)
-            ident = self.store.queue(candidate, payload, self.dry_run, phase, parent_id)
+            ident = self.store.queue(candidate, payload, self.dry_run, stored_phase, parent_id)
             self.rearmed.discard((snap.day, snap.symbol))
-            self.store.decision(snap, candidate.state, f"{phase.lower()} alert {ident}", candidate)
-            alerts.append({"id": ident, "phase": phase, "parent_id": parent_id, "payload": payload})
+            self.store.decision(snap, candidate.state,
+                                f"{stored_phase.lower()} alert {ident}", candidate)
+            if public:
+                alerts.append({"id": ident, "phase": phase, "parent_id": parent_id, "payload": payload})
         return alerts
 
     def _clear_confirmation(self, key):

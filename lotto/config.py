@@ -1,13 +1,19 @@
 from dataclasses import dataclass
 from math import isfinite
 
-STRATEGY_VERSION = "phase1-three-bar-opening-drive-2026-10-14"
+STRATEGY_VERSION = "phase1-entry-quality-2026-10-15"
 
 
 @dataclass(frozen=True)
 class Settings:
     # Research defaults, not fitted probabilities or proven thresholds.
     min_score: float = 70
+    # Continue scoring every candidate. Restrict only public ACTIVE ideas when
+    # enabled; decisions and candidate evaluations remain available for audit.
+    active_quality_gate: int = 0
+    active_min_score: float = 90
+    active_min_response_proxy: float = 1.1
+    active_min_price_acceleration: float = .002
     min_pace_rvol: float = 2.0
     min_local_rvol: float = 1.2
     min_local_acceleration: float = 1.2
@@ -41,6 +47,11 @@ class Settings:
     def __post_init__(self):
         if any(not isfinite(value) for value in vars(self).values()):
             raise ValueError("Settings must be finite")
+        if self.active_quality_gate not in (0, 1):
+            raise ValueError("Active quality gate must be 0 or 1")
+        if (not 0 < self.active_min_score <= 100 or self.active_min_response_proxy <= 0
+                or self.active_min_price_acceleration <= 0):
+            raise ValueError("Invalid active quality thresholds")
         if not 0 < self.min_score <= 100 or min(self.min_pace_rvol,self.min_local_rvol,self.min_local_acceleration,self.min_range_atr,self.min_option_acceleration) <= 0:
             raise ValueError("Invalid score or RVOL threshold")
         for name in ("confirmation_minutes", "ticker_cooldown_minutes", "rearm_minutes",
