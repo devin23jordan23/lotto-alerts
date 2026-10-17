@@ -191,3 +191,31 @@ class AdapterTests(unittest.TestCase):
                          {api_symbol(symbol) for symbol in symbols})
         self.assertEqual(client.coverage.count_fresh(symbols,datetime.now(timezone.utc)),106)
         self.assertEqual(len(client.discovery.observations),106)
+
+    def test_sixty_deep_names_are_fetched_while_universe_quotes_remain_visible(self):
+        now = datetime.now(timezone.utc)
+        client = self.client
+        client.discovery = Discovery(60)
+        client.atrs = {}
+        client.session = Mock(return_value=(now-timedelta(hours=1), now+timedelta(hours=1)))
+        client.bars = Mock(return_value=())
+        symbols = DEFAULT_UNIVERSE.split(',')
+        def get(path, params):
+            if path == '/quotes':
+                return {s:{'realtime':True,'quote':{'lastPrice':101,'openPrice':100,'closePrice':100,
+                           'totalVolume':100000,'tradeTime':now.timestamp()*1000,'highPrice':102,'lowPrice':99}}
+                        for s in params['symbols'].split(',')}
+            return {'isDelayed':False}
+        client.get = get
+        frames = client.poll(symbols, {}, 1)
+        self.assertEqual(len(frames), 60)
+        self.assertEqual(len(client.discovery.observations), 106)
+
+    def test_known_empty_near_expiry_chain_leaves_deep_slot_open(self):
+        now = datetime.now(timezone.utc)
+        discovery = Discovery(4, always_deep={'A'})
+        quotes = {s:{'price':100,'open':100,'previous':100,'volume':100,'at':now}
+                  for s in 'ABCDE'}
+        selected = discovery.update(quotes, now, set(quotes), unavailable={'A'})
+        self.assertNotIn('A', selected)
+        self.assertEqual(len(discovery.observations), 5)

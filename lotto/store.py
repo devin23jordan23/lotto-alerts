@@ -37,6 +37,12 @@ class Store:
             CREATE TABLE IF NOT EXISTS milestones (
                 alert_id TEXT, percent INTEGER, at TEXT, PRIMARY KEY(alert_id, percent));
             CREATE INDEX IF NOT EXISTS alerts_day ON alerts(day, symbol);
+            CREATE TABLE IF NOT EXISTS research_ideas (
+                id TEXT PRIMARY KEY, day TEXT, symbol TEXT, contract TEXT,
+                at TEXT, expires_at TEXT, reason TEXT, entry_ask REAL,
+                snapshot TEXT, last_quote TEXT, max_return REAL, min_return REAL,
+                latest_return REAL, closed INTEGER DEFAULT 0);
+            CREATE INDEX IF NOT EXISTS research_ideas_day ON research_ideas(day, symbol);
             CREATE INDEX IF NOT EXISTS snapshots_at ON snapshots(at);
             CREATE TABLE IF NOT EXISTS discovery (
                 day TEXT, symbol TEXT, at TEXT, promoted INTEGER, payload TEXT,
@@ -225,6 +231,21 @@ class Store:
                  phase, parent_id, thesis_id))
         return ident
 
+    def research_candidate(self, candidate: Candidate, reason: str) -> None:
+        """Pin one excluded thesis for a 30-minute quote-path comparison."""
+        snap, option = candidate.snapshot, candidate.option
+        ident = sha256(f"{snap.day}:{snap.symbol}:{option.symbol}:{reason}".encode()).hexdigest()[:16]
+        initial = option.bid / option.ask - 1
+        with self.db:
+            self.db.execute("""INSERT OR IGNORE INTO research_ideas
+                (id,day,symbol,contract,at,expires_at,reason,entry_ask,snapshot,last_quote,
+                 max_return,min_return,latest_return)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (ident,snap.day,snap.symbol,option.symbol,snap.at.isoformat(),
+                 (snap.at+timedelta(minutes=30)).isoformat(),reason,option.ask,
+                 json.dumps(snap.to_dict()),option.quote_time.isoformat(),
+                 initial,initial,initial))
+
     def track(self, snap: Snapshot, settings) -> list[dict]:
         milestones = []
         options = {o.symbol: o for o in snap.options}
@@ -250,6 +271,17 @@ class Store:
                             milestones.append({"alert_id": row["id"], "symbol": snap.symbol,
                                                "percent": percent, "bid": option.bid,
                                                "entry_ask": row["entry_ask"]})
+            for row in self.db.execute("SELECT * FROM research_ideas WHERE symbol=? AND closed=0", (snap.symbol,)).fetchall():
+                if row["day"] != snap.day or snap.at > datetime.fromisoformat(row["expires_at"]):
+                    self.db.execute("UPDATE research_ideas SET closed=1 WHERE id=?", (row["id"],))
+                    continue
+                option = options.get(row["contract"])
+                if not option or not quote_ok(option, snap, settings) or option.quote_time <= datetime.fromisoformat(row["last_quote"]):
+                    continue
+                change = option.bid / row["entry_ask"] - 1
+                self.db.execute("""UPDATE research_ideas SET max_return=?,min_return=?,latest_return=?,last_quote=?
+                                   WHERE id=?""",(max(row["max_return"],change),min(row["min_return"],change),
+                                                 change,option.quote_time.isoformat(),row["id"]))
         return milestones
 
     def active_options(self, day: str):
@@ -258,6 +290,11 @@ class Store:
             snap = Snapshot.from_dict(json.loads(row["snapshot"]))
             option = next(o for o in snap.options if o.symbol == row["contract"])
             result.setdefault(row["symbol"], []).append(option)
+        for row in self.db.execute("SELECT symbol,contract,snapshot FROM research_ideas WHERE day=? AND closed=0", (day,)):
+            snap = Snapshot.from_dict(json.loads(row["snapshot"]))
+            option = next(o for o in snap.options if o.symbol == row["contract"])
+            if option.symbol not in {o.symbol for o in result.get(row["symbol"], ())}:
+                result.setdefault(row["symbol"], []).append(option)
         return result
 
     def summary(self) -> list[dict]:

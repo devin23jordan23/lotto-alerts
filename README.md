@@ -5,7 +5,7 @@ No orders are placed. Scores are research rules, not probabilities or promised r
 
 ## Universe and collection
 
-The default universe is the same 104 names as the unusual-options scanner.
+The default universe includes the unusual-options scanner's core names (106 in the current deployed configuration).
 Set `LOTTO_UNIVERSE` explicitly in Railway; CSCO and HPE are included even when
 an older environment value overrides the code default. No case-study ticker list
 replaces the configured universe.
@@ -13,10 +13,10 @@ replaces the configured universe.
 Every cycle requests stock quotes for the **whole universe** in one batch.
 The worker also rotates `/chains` requests across every configured symbol:
 up to `LOTTO_SWEEP_PER_CYCLE=26` non-promoted names per minute, due again after
-`LOTTO_SWEEP_MINUTES=3`. Up to `LOTTO_CHAIN_CAPACITY=24` developing names
+`LOTTO_SWEEP_MINUTES=3`. Up to `LOTTO_CHAIN_CAPACITY=60` eligible developing names
 receive minute bars and chains each cycle, plus previously alerted names for
-outcome tracking. At normal request speed, the 104-name chain sweep completes
-in roughly three cycles. SPY, QQQ and IWM retain deep slots throughout the session
+outcome tracking. At normal request speed, the 106-name chain sweep completes
+in roughly two cycles when 60 names are deep. SPY, QQQ and IWM retain deep slots when they have 0/1-day expirations
 through `LOTTO_CONTINUOUS_SYMBOLS`; the remaining slots rotate across the universe.
 The log reports actual coverage within the configured sweep window in
 minutes; request failures or slow responses can lengthen that interval.
@@ -30,10 +30,11 @@ history. All quote discovery and chain-coverage observations are recorded.
 Names outside the deep pool have sampled chain coverage rather than minute-level
 option history, so an intracycle move can still be missed.
 
-A 27-second sweep budget and 54-second total collection budget prevent slow
-responses from silently aging out most observations. Unfinished names resume
-next cycle. Before the open, historical volume baselines are loaded sixteen names
-per cycle. One worker and a persistent volume are required.
+Independent chain and history requests now use six workers with paced request starts
+and retries for Schwab throttling. Actual completed deep-chain count and cycle time
+must be checked under market-open load; a configured capacity is not proof that
+every chain was fetched. Before the open, historical volume baselines are loaded
+sixteen names per cycle. One scanner process and a persistent volume are required.
 
 ## Developing setups
 

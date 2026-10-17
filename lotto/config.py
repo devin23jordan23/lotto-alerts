@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from math import isfinite
 
-STRATEGY_VERSION = "phase1-three-bar-opening-drive-2026-10-14"
+STRATEGY_VERSION = "phase1-coverage-entry-quality-2026-10-17"
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,7 @@ class Settings:
     max_building_distance_atr: float = .06
     max_entry_extension_atr: float = .25
     min_opening_bars: int = 3
+    active_quality_gate: int = 1  # Keep excluded ideas in candidate/decision history.
 
     def __post_init__(self):
         if any(not isfinite(value) for value in vars(self).values()):
@@ -50,6 +51,8 @@ class Settings:
         for name in ("max_alerts_per_day", "max_alerts_per_ticker", "max_alerts_per_cycle"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} cannot be negative")
+        if self.active_quality_gate not in (0, 1):
+            raise ValueError("active_quality_gate must be 0 or 1")
         if not 0 < self.min_ask <= self.max_ask or not 0 < self.min_delta <= self.max_delta <= 1:
             raise ValueError("Invalid contract limits")
         if not 0 <= self.max_dte <= 1:

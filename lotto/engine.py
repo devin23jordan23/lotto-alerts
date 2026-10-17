@@ -8,6 +8,21 @@ from .models import ET, Snapshot
 from .store import Store
 
 
+def active_quality_reason(candidate) -> str | None:
+    """Historical all-session hypothesis using only information at alert time."""
+    metrics = candidate.metrics
+    response = metrics.get("response_proxy")
+    momentum = metrics.get("return_5m_directional")
+    if (not metrics.get("opening_expansion") and response is not None and momentum is not None
+            and response < .5 and momentum < .005):
+        return "research only: weak option response and five-minute stock follow-through"
+    local = candidate.snapshot.at.astimezone(ET)
+    extension = metrics.get("move_from_open_atr")
+    if local.hour >= 14 and extension is not None and extension >= 1:
+        return "research only: late entry after one ATR move from open"
+    return None
+
+
 class Engine:
     def __init__(self, store: Store, settings: Settings | None = None, dry_run: bool = True):
         self.store = store
@@ -123,6 +138,12 @@ class Engine:
                         continue
             else:
                 best.state = "IGNITION"
+            if phase == "ACTIVE" and cfg.active_quality_gate:
+                reason = active_quality_reason(best)
+                if reason:
+                    self.store.research_candidate(best, reason)
+                    self.store.decision(snap, "RESEARCH", reason, best)
+                    continue
             # A previously alerted contract may form a genuinely new leg after
             # cooldown and a recorded reset.
             ready.append(best)

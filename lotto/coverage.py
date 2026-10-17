@@ -15,6 +15,7 @@ class ChainCoverage:
         self.attempted = {}
         self.previous = {}
         self.flow = {}
+        self.has_near_expiry = {}
         self.rows = []
 
     def reset(self, now):
@@ -25,6 +26,7 @@ class ChainCoverage:
             self.attempted.clear()
             self.previous.clear()
             self.flow.clear()
+            self.has_near_expiry.clear()
         self.rows = []
 
     def due(self, symbols, now, excluded=(), limit=24):
@@ -60,6 +62,7 @@ class ChainCoverage:
                     if total > best_cluster:
                         best_side, best_cluster = side, total
         self.last[symbol] = now
+        self.has_near_expiry[symbol] = bool(options)
         self.previous[symbol] = (now, {o.symbol:o.volume for o in options})
         if best_cluster:
             self.flow[symbol] = (now, best_side, best_cluster)

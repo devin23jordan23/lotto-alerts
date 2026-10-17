@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, wait
 from collections import defaultdict
 from dataclasses import replace
 from datetime import date, datetime, time as wall_time, timedelta, timezone
@@ -66,11 +68,15 @@ class Schwab:
         if not self.broker_url and (not self.client_id or not self.secret or not (self.seed or self.token_path.exists())):
             raise ValueError("Schwab client ID, secret, and refresh token are required")
         self.last_request = 0
+        self.request_lock = threading.Lock()
+        self.min_request_interval = float(os.getenv("LOTTO_API_MIN_INTERVAL_SECONDS", "0.25"))
+        if not 0.2 <= self.min_request_interval <= 2:
+            raise ValueError("LOTTO_API_MIN_INTERVAL_SECONDS must be between 0.2 and 2")
         self.baselines = {}
         self.calendar_cache = {}
         self.atrs = {}
         self.levels = {}
-        self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "30")),
+        self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "60")),
             always_deep={s.strip().upper() for s in os.getenv(
                 "LOTTO_CONTINUOUS_SYMBOLS",
                 "SPY,QQQ,IWM,META,NVDA,AMD,TSLA,AAPL,MSFT,AMZN,GOOGL,AVGO,MU,MRNA,SMCI,COIN,PLTR,NFLX"
@@ -125,16 +131,26 @@ class Schwab:
         return token
 
     def get(self, path: str, params: dict) -> dict:
-        for attempt in range(2):
-            time.sleep(max(0, .55 - (time.monotonic() - self.last_request)))
-            self.last_request = time.monotonic()
-            request = Request(f"{BASE}{path}?{urlencode(params)}", headers={"Authorization": f"Bearer {self.token()}", "Accept": "application/json"})
+        retry_auth = False
+        for attempt in range(3):
+            with self.request_lock:
+                access_token = self.token(force=retry_auth)
+                retry_auth = False
+                time.sleep(max(0, self.min_request_interval - (time.monotonic() - self.last_request)))
+                self.last_request = time.monotonic()
+            request = Request(f"{BASE}{path}?{urlencode(params)}", headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"})
             try:
                 with urlopen(request, timeout=15) as response:
                     return json.load(response)
             except HTTPError as exc:
-                if exc.code == 401 and attempt == 0:
-                    self.token(force=True)
+                if exc.code in (401, 429) and attempt < 2:
+                    retry_auth = exc.code == 401
+                    if exc.code == 429:
+                        with self.request_lock:
+                            self.min_request_interval = min(2.0, max(0.5, self.min_request_interval * 2))
+                        LOG.warning("Schwab rate limit on %s; request spacing increased to %.2fs",
+                                    path, self.min_request_interval)
+                        time.sleep(min(5, 1 + attempt * 2))
                     continue
                 raise RuntimeError(f"Schwab {path} failed (HTTP {exc.code})") from None
         raise RuntimeError("Schwab authorization retry failed")
@@ -319,43 +335,62 @@ class Schwab:
         if "SPX" in parsed:
             parsed["SPX"]["volume"] = parsed.get("SPY", {}).get("volume")
         selected = self.discovery.update(parsed, datetime.now(timezone.utc), set(symbols), tracked,
-                                         self.coverage.priorities(now))
+                                         self.coverage.priorities(now),
+                                         {s for s, available in self.coverage.has_near_expiry.items() if not available})
         result = []
         began = time.monotonic()
         sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "26")))
         sweep_targets = self.coverage.due(symbols, now, selected, sweep_limit)
-        for symbol in sweep_targets:
-            if time.monotonic()-began >= 27:
-                LOG.warning("Universe chain sweep time budget reached; remaining names resume next cycle")
-                break
-            self.coverage.attempt(symbol, datetime.now(timezone.utc))
-            try:
-                data = self.get("/chains", {"symbol":api_symbol(symbol), "contractType":"ALL", "strategy":"SINGLE",
-                                            "includeUnderlyingQuote":"true", "strikeCount":80,
-                                            "fromDate":now.astimezone(ET).date().isoformat(),
-                                            "toDate":(now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()})
-                if data.get("isDelayed") is True:
-                    raise ValueError("delayed option chain")
-                self.coverage.observe(symbol, datetime.now(timezone.utc), self.parse_chain(data, allow_spx=symbol == "SPX"),
-                                      parsed.get(symbol, {}).get("price"))
-            except Exception as exc:
-                LOG.warning("Universe chain sweep %s unavailable (%s)", symbol, type(exc).__name__)
-        # Continue unfinished cold-start work first; a slow baseline must not starve later names.
-        selected.sort(key=lambda s: (s not in tracked, s not in self.discovery.always_deep,
-                                     getattr(self, "last_polled", {}).get(s, 0)))
-        for symbol in selected:
-            if time.monotonic()-began >= 54:
-                LOG.warning("Deep chain time budget reached; remaining candidates resume next cycle")
-                break
+        def chain(symbol):
+            return self.get("/chains", {"symbol":api_symbol(symbol), "contractType":"ALL", "strategy":"SINGLE",
+                                         "includeUnderlyingQuote":"true", "strikeCount":80,
+                                         "fromDate":now.astimezone(ET).date().isoformat(),
+                                         "toDate":(now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()})
+        def deep(symbol):
+            bars = self.bars(symbol, datetime.now(timezone.utc))
+            return bars, chain(symbol)
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            sweep_jobs = {pool.submit(chain, symbol): symbol for symbol in sweep_targets}
+            sweep_done, sweep_pending = wait(sweep_jobs, timeout=27)
+            for job in sweep_pending:
+                job.cancel()
+            if sweep_pending:
+                LOG.warning("Universe sweep budget reached: %d/%d chains completed", len(sweep_done), len(sweep_jobs))
+            for job in sweep_done:
+                symbol = sweep_jobs[job]
+                self.coverage.attempt(symbol, datetime.now(timezone.utc))
+                try:
+                    data = job.result()
+                    if data.get("isDelayed") is True:
+                        raise ValueError("delayed option chain")
+                    self.coverage.observe(symbol, datetime.now(timezone.utc), self.parse_chain(data, allow_spx=symbol == "SPX"),
+                                          parsed.get(symbol, {}).get("price"))
+                except Exception as exc:
+                    LOG.warning("Universe chain sweep %s unavailable (%s)", symbol, type(exc).__name__)
+            # Continue unfinished cold-start work first; a slow baseline must not starve later names.
+            selected.sort(key=lambda s: (s not in tracked, s not in self.discovery.always_deep,
+                                         getattr(self, "last_polled", {}).get(s, 0)))
             if not hasattr(self, "last_polled"):
                 self.last_polled = {}
-            self.last_polled[symbol] = time.monotonic()
+            deep_jobs = {pool.submit(deep, symbol): symbol for symbol in selected}
+            completed = {}
+            deep_done, deep_pending = wait(deep_jobs, timeout=max(0, 54-(time.monotonic()-began)))
+            for job in deep_pending:
+                job.cancel()
+            if deep_pending:
+                LOG.warning("Deep collection budget reached: %d/%d names completed", len(deep_done), len(deep_jobs))
+            for job in deep_done:
+                symbol = deep_jobs[job]
+                self.last_polled[symbol] = time.monotonic()
+                try:
+                    completed[symbol] = job.result()
+                except Exception as exc:
+                    LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)
+        for symbol in selected:
+            if symbol not in completed:
+                continue
             try:
-                bars = self.bars(symbol, datetime.now(timezone.utc))
-                data = self.get("/chains", {"symbol": api_symbol(symbol), "contractType": "ALL", "strategy": "SINGLE",
-                                            "includeUnderlyingQuote": "true", "strikeCount": 80,
-                                            "fromDate": now.astimezone(ET).date().isoformat(),
-                                            "toDate": (now.astimezone(ET).date() + timedelta(days=max_dte)).isoformat()})
+                bars, data = completed[symbol]
                 options = list(self.parse_chain(data, allow_spx=symbol == "SPX"))
                 if data.get("isDelayed") is not True:
                     self.coverage.observe(symbol, datetime.now(timezone.utc), options,
@@ -400,8 +435,8 @@ class Schwab:
                                        **getattr(self,"levels",{}).get((symbol,now.astimezone(ET).date()),{})))
             except Exception as exc:
                 LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)
-        LOG.info("Discovery: %d/%d fresh quotes, %d promoted, %d deep chains; universe chains %d/%d fresh within %d min (%d this cycle)",
+        LOG.info("Discovery: %d/%d fresh quotes, %d promoted, %d deep chains; universe chains %d/%d fresh within %d min (%d this cycle); collection %.1fs",
                  len(self.discovery.observations), len(symbols), len(selected), len(result),
                  self.coverage.count_fresh(symbols, datetime.now(timezone.utc)), len(symbols),
-                 self.coverage.interval.seconds//60, len(self.coverage.rows))
+                 self.coverage.interval.seconds//60, len(self.coverage.rows), time.monotonic()-began)
         return result
