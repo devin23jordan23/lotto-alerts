@@ -6,7 +6,7 @@ import os
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, wait
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import replace
 from datetime import date, datetime, time as wall_time, timedelta, timezone
 from math import isfinite
@@ -69,9 +69,13 @@ class Schwab:
             raise ValueError("Schwab client ID, secret, and refresh token are required")
         self.last_request = 0
         self.request_lock = threading.Lock()
-        self.min_request_interval = float(os.getenv("LOTTO_API_MIN_INTERVAL_SECONDS", "0.25"))
+        self.base_request_interval = float(os.getenv("LOTTO_API_MIN_INTERVAL_SECONDS", "0.25"))
+        self.min_request_interval = self.base_request_interval
         if not 0.2 <= self.min_request_interval <= 2:
             raise ValueError("LOTTO_API_MIN_INTERVAL_SECONDS must be between 0.2 and 2")
+        self.request_starts = deque()
+        self.rate_limit_hits = 0
+        self.success_streak = 0
         self.baselines = {}
         self.calendar_cache = {}
         self.atrs = {}
@@ -138,22 +142,54 @@ class Schwab:
                 retry_auth = False
                 time.sleep(max(0, self.min_request_interval - (time.monotonic() - self.last_request)))
                 self.last_request = time.monotonic()
+                self.request_starts.append(self.last_request)
+                self._prune_request_starts(self.last_request)
             request = Request(f"{BASE}{path}?{urlencode(params)}", headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"})
             try:
                 with urlopen(request, timeout=15) as response:
-                    return json.load(response)
+                    payload = json.load(response)
+                self._request_succeeded()
+                return payload
             except HTTPError as exc:
+                if exc.code != 429:
+                    with self.request_lock:
+                        self.success_streak = 0
                 if exc.code in (401, 429) and attempt < 2:
                     retry_auth = exc.code == 401
                     if exc.code == 429:
-                        with self.request_lock:
-                            self.min_request_interval = min(2.0, max(0.5, self.min_request_interval * 2))
-                        LOG.warning("Schwab rate limit on %s; request spacing increased to %.2fs",
-                                    path, self.min_request_interval)
+                        self._rate_limited(path)
                         time.sleep(min(5, 1 + attempt * 2))
                     continue
                 raise RuntimeError(f"Schwab {path} failed (HTTP {exc.code})") from None
         raise RuntimeError("Schwab authorization retry failed")
+
+    def _prune_request_starts(self, now):
+        while self.request_starts and now-self.request_starts[0] >= 60:
+            self.request_starts.popleft()
+
+    def _request_succeeded(self):
+        with self.request_lock:
+            self.success_streak += 1
+            if self.success_streak >= 50 and self.min_request_interval > self.base_request_interval:
+                self.min_request_interval = max(self.base_request_interval,
+                                                round(self.min_request_interval * .8, 3))
+                self.success_streak = 0
+                LOG.info("Schwab request spacing recovered to %.3fs", self.min_request_interval)
+
+    def _rate_limited(self, path):
+        with self.request_lock:
+            self.rate_limit_hits += 1
+            self.success_streak = 0
+            self.min_request_interval = min(2.0, max(0.5, self.min_request_interval * 2))
+            spacing = self.min_request_interval
+        LOG.warning("Schwab rate limit on %s; request spacing increased to %.2fs", path, spacing)
+
+    def request_statistics(self):
+        if not hasattr(self, "request_lock"):
+            return 0, 0.0, 0
+        with self.request_lock:
+            self._prune_request_starts(time.monotonic())
+            return len(self.request_starts), self.min_request_interval, self.rate_limit_hits
 
     def session(self, now: datetime) -> tuple[datetime, datetime] | None:
         day = now.astimezone(ET).date().isoformat()
@@ -339,6 +375,7 @@ class Schwab:
                                          {s for s, available in self.coverage.has_near_expiry.items() if not available})
         result = []
         began = time.monotonic()
+        _, _, rate_limits_before = self.request_statistics()
         sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "26")))
         sweep_targets = self.coverage.due(symbols, now, selected, sweep_limit)
         def chain(symbol):
@@ -435,8 +472,10 @@ class Schwab:
                                        **getattr(self,"levels",{}).get((symbol,now.astimezone(ET).date()),{})))
             except Exception as exc:
                 LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)
-        LOG.info("Discovery: %d/%d fresh quotes, %d promoted, %d deep chains; universe chains %d/%d fresh within %d min (%d this cycle); collection %.1fs",
+        recent_requests, spacing, rate_limits_total = self.request_statistics()
+        LOG.info("Discovery: %d/%d fresh quotes, %d promoted, %d deep chains; universe chains %d/%d fresh within %d min (%d this cycle); collection %.1fs; Schwab requests/60s=%d spacing=%.3fs 429s/cycle=%d total=%d",
                  len(self.discovery.observations), len(symbols), len(selected), len(result),
                  self.coverage.count_fresh(symbols, datetime.now(timezone.utc)), len(symbols),
-                 self.coverage.interval.seconds//60, len(self.coverage.rows), time.monotonic()-began)
+                 self.coverage.interval.seconds//60, len(self.coverage.rows), time.monotonic()-began,
+                 recent_requests, spacing, rate_limits_total-rate_limits_before, rate_limits_total)
         return result

@@ -1,6 +1,9 @@
 import io
 import json
 import tempfile
+import threading
+import time
+from collections import deque
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
@@ -114,6 +117,29 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(client.token(), "broker-token")
             self.assertEqual(client.token(), "broker-token")
             self.assertEqual(open_url.call_count, 1)
+
+    def test_rate_limit_spacing_recovers_after_successful_requests(self):
+        client = self.client
+        client.request_lock = threading.Lock()
+        client.base_request_interval = .25
+        client.min_request_interval = .25
+        client.rate_limit_hits = 0
+        client.success_streak = 0
+        for _ in range(6):
+            client._rate_limited('/chains')
+        self.assertEqual(client.min_request_interval, 2.0)
+        for _ in range(500):
+            client._request_succeeded()
+        self.assertEqual(client.min_request_interval, .25)
+        self.assertEqual(client.rate_limit_hits, 6)
+
+    def test_request_statistics_uses_a_rolling_minute(self):
+        client = self.client
+        client.request_lock = threading.Lock()
+        client.request_starts = deque([time.monotonic()-65, time.monotonic()-5])
+        client.min_request_interval = .5
+        client.rate_limit_hits = 2
+        self.assertEqual(client.request_statistics(), (1, .5, 2))
 
     def test_baseline_excludes_today_and_uses_same_elapsed_time(self):
         today = datetime(2026, 9, 21, 10, 0, tzinfo=ET)
