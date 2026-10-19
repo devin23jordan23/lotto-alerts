@@ -135,6 +135,10 @@ def main():
              "disabled" if not any((engine.settings.max_alerts_per_day, engine.settings.max_alerts_per_ticker,
                                      engine.settings.max_alerts_per_cycle)) else "configured")
     LOG.info("Strategy %s settings: %s",STRATEGY_VERSION,json.dumps(asdict(engine.settings),sort_keys=True))
+    LOG.info('Quality policy: mode=%s policy=%s secondary_delivery=%s disabled=%s',
+             engine.quality.mode,engine.quality.policy,
+             'configured' if os.getenv('DISCORD_LOTTO_SECONDARY_WEBHOOK') else 'internal',
+             ','.join(sorted(engine.quality.disabled_rules)) or 'none')
     LOG.info("Coverage plan: %d deep slots; continuous=%s; full-universe sweep target=%d minutes",
              client.discovery.capacity,",".join(sorted(client.discovery.always_deep)),client.coverage.interval.seconds//60)
     local_start = datetime.now(ET)
