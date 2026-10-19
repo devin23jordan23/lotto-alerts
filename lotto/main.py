@@ -236,6 +236,12 @@ def main():
                                      ((now-timedelta(minutes=5)).isoformat(),)).fetchall()
             if counts:
                 LOG.info("Recent decision reasons: %s", "; ".join(f"{r['n']}× {r['reason']}" for r in counts))
+            for symbol in diagnose:
+                row = store.db.execute(
+                    "SELECT at,state,reason,score FROM decisions WHERE symbol=? AND at>=? ORDER BY at DESC LIMIT 1",
+                    (symbol, (now-timedelta(seconds=90)).isoformat())).fetchone()
+                if row:
+                    LOG.info('Live decision %s: %s', symbol, json.dumps(dict(row)))
             maybe_nightly(store,client,symbols,data_dir,now)
             client.warm_universe(symbols, now)
         except Exception as exc:

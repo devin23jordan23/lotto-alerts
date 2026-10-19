@@ -344,6 +344,50 @@ class Schwab:
                                              number(raw.get("vega"))))
         return tuple(result)
 
+    def option_chain(self, symbol, now, max_dte):
+        params = {"symbol": api_symbol(symbol), "contractType": "ALL", "strategy": "SINGLE",
+                  "includeUnderlyingQuote": "true", "strikeCount": 80,
+                  "fromDate": now.astimezone(ET).date().isoformat(),
+                  "toDate": (now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()}
+        data = self.get('/chains', params)
+        options = self.parse_chain(data, allow_spx=symbol == 'SPX')
+        def usable(o):
+            return (o.delta is not None and 0 < abs(o.delta) <= 1
+                    and (o.delta > 0) == (o.side == 'CALL')
+                    and o.gamma is not None and o.gamma > 0)
+        # Provider sentinel values (-999) are not Greeks. Retry once with a
+        # smaller request, retaining the broad chain and only merging real,
+        # newer provider quotes with usable Greeks. Never synthesize Greeks.
+        if not options or any(usable(o) for o in options):
+            return data
+        LOG.warning('Chain Greeks unavailable for %s (%d contracts); retrying near-money chain', symbol, len(options))
+        try:
+            retry = self.get('/chains', {**params, 'strikeCount': 20})
+            recovered = {o.symbol:o for o in self.parse_chain(retry, allow_spx=symbol == 'SPX') if usable(o)}
+        except Exception as exc:
+            LOG.warning('Chain Greek recovery %s failed (%s)', symbol, type(exc).__name__)
+            return data
+        merged = dict(data)
+        count = 0
+        for map_name in ('callExpDateMap', 'putExpDateMap'):
+            replacements = {raw.get('symbol'):raw for strikes in retry.get(map_name, {}).values()
+                            for contracts in strikes.values() for raw in contracts
+                            if raw.get('symbol') in recovered}
+            merged[map_name] = {}
+            for expiry, strikes in data.get(map_name, {}).items():
+                merged[map_name][expiry] = {}
+                for strike, contracts in strikes.items():
+                    rows = []
+                    for raw in contracts:
+                        newer = replacements.get(raw.get('symbol'))
+                        if newer and (number(newer.get('quoteTimeInLong')) or 0) >= (number(raw.get('quoteTimeInLong')) or 0):
+                            rows.append(newer); count += 1
+                        else:
+                            rows.append(raw)
+                    merged[map_name][expiry][strike] = rows
+        LOG.info('Chain Greek recovery %s: %d/%d contracts restored from provider', symbol, count, len(options))
+        return merged
+
     def poll(self, symbols: list[str], tracked: dict, max_dte: int) -> list[Snapshot]:
         now = datetime.now(timezone.utc)
         if not hasattr(self, "coverage"):
@@ -379,10 +423,7 @@ class Schwab:
         sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "26")))
         sweep_targets = self.coverage.due(symbols, now, selected, sweep_limit)
         def chain(symbol):
-            return self.get("/chains", {"symbol":api_symbol(symbol), "contractType":"ALL", "strategy":"SINGLE",
-                                         "includeUnderlyingQuote":"true", "strikeCount":80,
-                                         "fromDate":now.astimezone(ET).date().isoformat(),
-                                         "toDate":(now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()})
+            return self.option_chain(symbol, now, max_dte)
         def deep(symbol):
             bars = self.bars(symbol, datetime.now(timezone.utc))
             return bars, chain(symbol)
