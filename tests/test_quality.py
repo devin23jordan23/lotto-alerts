@@ -37,9 +37,37 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(evaluate(self.candidate(m,ask=1.51)).tier,'RESEARCH')
 
     def test_opening_time_boundary(self):
-        at=datetime(2026,10,16,9,59,59,tzinfo=ET)
+        at=datetime(2026,10,16,9,34,59,tzinfo=ET)
         self.assertIn('OPEN',evaluate(self.candidate(at=at)).reasons)
         self.assertNotIn('OPEN',evaluate(self.candidate(at=at+timedelta(seconds=1))).reasons)
+        for minute in (35,39,45,59):
+            c=self.candidate(at=at.replace(minute=minute,second=0))
+            self.assertEqual(evaluate(c).tier,'MAIN')
+            self.assertEqual(evaluate(c,'stack8').tier,'SECONDARY')
+        self.assertNotIn('OPEN',evaluate(self.candidate(at=at.replace(hour=10,minute=0)),'stack8').reasons)
+
+    def test_opening_relief_preserves_other_quality_rules(self):
+        at=datetime(2026,10,16,9,35,tzinfo=ET)
+        self.assertEqual(evaluate(self.candidate(at=at,ask=2)).reasons,('PREM',))
+        self.assertEqual(evaluate(self.candidate({'response_proxy':.4,'return_5m_directional':.001},at=at)).tier,'RESEARCH')
+
+    def test_0935_opening_drive_delivers_to_main_without_secondary_hook(self):
+        store=Store(':memory:');self.addCleanup(store.db.close)
+        engine=Engine(store,dry_run=False,quality=QualityConfig(mode='enforce'))
+        snap=list(demo_frames())[4][0]  # Five completed bars, 09:35 ET.
+        c=Candidate(snap,snap.options[0],90,{},
+                    {'response_proxy':.8,'return_5m_directional':.01},[],True,
+                    setup=Setup('OPENING_DRIVE',snap.spot,snap.spot-1))
+        with patch('lotto.engine.candidates',return_value=[c]):
+            alerts=engine.process([snap])
+        self.assertEqual(len(alerts),1)
+        self.assertEqual(store.db.execute('SELECT quality_tier FROM alerts').fetchone()[0],'MAIN')
+        with patch('lotto.discord.datetime') as clock,patch('lotto.discord.urlopen') as send:
+            clock.now.return_value=snap.at
+            clock.fromisoformat.side_effect=datetime.fromisoformat
+            deliver_pending(store,'https://discord.com/api/webhooks/main/test',secondary_webhook='')
+        self.assertEqual(send.call_args.args[0].full_url,'https://discord.com/api/webhooks/main/test')
+        self.assertEqual(store.db.execute('SELECT delivery FROM alerts').fetchone()[0],'sent')
 
     def test_exhaustion_exact_constants(self):
         self.assertNotIn('EXHQ',evaluate(self.candidate({'local_rvol_5m':2.16036,'price_acceleration':0})).reasons)

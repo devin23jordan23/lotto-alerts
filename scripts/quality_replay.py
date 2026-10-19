@@ -42,8 +42,8 @@ if __name__=='__main__':
     args=parser.parse_args();result=replay(args.path)
     if args.assert_benchmark:
         assert result['population']==433
-        assert result['S']['tiers']=={'MAIN':245,'SECONDARY':103,'RESEARCH':85},result
-        assert result['S']['MAIN']=={'count':245,'win40':130,'win100':58,'below40':115},result
+        assert result['S']['tiers']=={'MAIN':261,'SECONDARY':87,'RESEARCH':85},result
+        assert result['S']['MAIN']=={'count':261,'win40':133,'win100':58,'below40':128},result
         assert result['stack8']['tiers']=={'MAIN':254,'SECONDARY':179},result
         assert result['stack8']['MAIN']['win40']==129 and result['stack8']['MAIN']['win100']==54,result
     print(json.dumps(result,indent=2))
