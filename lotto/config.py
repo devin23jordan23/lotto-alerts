@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from math import isfinite
 
-STRATEGY_VERSION = "phase2-model-s-chain-recovery-2026-10-19"
+STRATEGY_VERSION = "phase2-model-s-direct-quote-opening-2026-10-19"
 
 
 @dataclass(frozen=True)
