@@ -1,5 +1,8 @@
 from collections import defaultdict
 from datetime import datetime, timedelta
+import json
+import logging
+import os
 
 from .config import Settings
 from .discord import alert_payload
@@ -86,8 +89,15 @@ class Engine:
                         self.rearmed.add(key)
                 else:
                     self.cool_since.pop(key, None)
-                self.store.decision(snap, "COOLING" if self.store.last_alert(*key) else "DISCOVERY",
-                                    "; ".join(best.blockers) if best else "options history, liquidity, or neighboring-strike activity unavailable", best)
+                if best is None:
+                    from .audit import chain_reasons
+                    detail = chain_reasons(snap, history, cfg)
+                    reason = 'option stage: ' + json.dumps(detail, sort_keys=True)
+                    if snap.symbol in os.getenv('LOTTO_DIAGNOSE_SYMBOLS', '').upper().split(','):
+                        logging.getLogger(__name__).info('Option stage %s: %s', snap.symbol, json.dumps(detail))
+                else:
+                    reason = '; '.join(best.blockers)
+                self.store.decision(snap, "COOLING" if self.store.last_alert(*key) else "DISCOVERY", reason, best)
                 continue
             self.cool_since.pop(key, None)
             best = max(valid, key=lambda c: c.score)
