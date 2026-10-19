@@ -13,10 +13,13 @@ Authorized by Andre: "finish and ship Model S." Baseline/rollback code is
 - RESEARCH: tracked research idea, no Discord alert and no new alert cooldown.
 - Potential watches remain internal. No new count caps or repeat suppression.
 
-The secondary webhook was absent in the deployment preflight. Consequently the
-OPEN rule makes 09:30–09:59 eligible active ideas internal unless a secondary
-webhook is subsequently configured. This is explicit Model S routing, not a
-coverage repair. SPX is also disproportionately classified SECONDARY by PREM.
+The user subsequently authorized opening alerts from **09:35 ET**. The revised
+S OPEN rule applies only from 09:30 through 09:34:59. At 09:35 and later,
+otherwise-qualified MAIN ideas use the existing Discord destination without a
+secondary webhook. Other quality rules still apply. Stack 8 retains its original
+09:30–09:59 window for comparison. Policy ID `S-2026-10-19-open0935` separates
+these outcomes from the original S release. SPX remains disproportionately
+classified SECONDARY by PREM.
 
 ## Exact policy
 
@@ -24,7 +27,7 @@ WF: no opening_expansion flag, response_proxy < .50 and directional ret5 < .004.
 LATE: ET hour >= 14 and directional move from open >= 1 ATR.
 Either is RESEARCH. Remaining rules make SECONDARY:
 
-- OPEN: 09:30 <= ET < 10:00.
+- OPEN: 09:30 <= ET < 09:35 (Stack 8 comparison remains < 10:00).
 - EXHQ: local_rvol_5m > 2.16036 AND price_acceleration < .00039389.
 - W1DTE: one calendar day to expiry, setup other than LEVEL_RECLAIM.
 - PREM: ask > 1.50 without all five trend-escape conditions.
@@ -38,19 +41,24 @@ The implementation does not mutate candidate numerical metrics with policy data.
 
 ## Corrected historical benchmark
 
-The actual policy module replays all 433 delivered alerts:
+The actual revised policy module replays all 433 delivered alerts:
 
 | Policy | MAIN | SECONDARY | RESEARCH | MAIN +40 | MAIN doubles |
 |---|---:|---:|---:|---:|---:|
-| S | 245 | 103 | 85 | 130 | 58 |
-| Stack 8 | 254 | 179 | 0 | 129 | 54 |
+| S, opening alerts from 09:35 | 261 | 87 | 85 | 133 | 58 |
+| Original S release | 245 | 103 | 85 | 130 | 58 |
+| Stack 8 comparison | 254 | 179 | 0 | 129 | 54 |
 
-S rule fires: WF65, LATE25, OPEN25, EXHQ35, W1DTE77, PREM69.
-The handoff's 246/102/85 requires a different RVOL threshold precision. Literal
-2.16036 flags QQQ 2026-10-14 11:42, whose RVOL was 2.1603607104117084.
-We retain the written rule and correct the benchmark, rather than silently fit
-the boundary to preserve that winner. MAIN rate = 130/245 = 53.1%, historical
-selected-alert opportunity only. Excluding Oct16: 91/192 = 47.4%.
+Removing the time-only restriction from 09:35 restores 16 historical MAIN ideas,
+including three sampled +40% outcomes. Revised MAIN opportunity rate is
+133/261 = 51.0%; this is retrospective selected-alert evidence, not a promised
+future win rate. No doubles are removed by this revision. Other S rule counts
+are unchanged: WF65, LATE25, EXHQ35, W1DTE77, PREM69.
+There are no pre-09:35 delivered alerts in this historical benchmark.
+
+Original handoff parity correction remains: literal EXHQ threshold 2.16036
+flags QQQ October 14 at 11:42 (RVOL 2.1603607104117084); the threshold was not
+retuned to recover that observation.
 
 Reproduce with `scripts/quality_replay.py <full-alert-paths.jsonl> --assert-benchmark`.
 No raw private trading archive is committed to GitHub. The immutable export,

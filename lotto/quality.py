@@ -74,7 +74,10 @@ def evaluate(candidate, policy='S', disabled=frozenset()):
         rules.append('WF')
     if local.hour >= 14 and extension is not None and extension >= 1:
         rules.append('LATE')
-    if time(9, 30) <= local.time() < time(10):
+    # Live S permits opening alerts from 09:35; preserve the original window
+    # in Stack 8 so its historical comparison does not change silently.
+    opening_end = time(9, 35) if policy == 'S' else time(10)
+    if time(9, 30) <= local.time() < opening_end:
         rules.append('OPEN')
     if rv is not None and accel is not None and rv > 2.16036 and accel < .00039389:
         rules.append('EXHQ')
@@ -102,4 +105,5 @@ def evaluate(candidate, policy='S', disabled=frozenset()):
     reasons = tuple(r for r in rules if r in allowed and r not in disabled)
     tier = ('RESEARCH' if policy == 'S' and any(r in reasons for r in ('WF', 'LATE'))
             else 'SECONDARY' if reasons else 'MAIN')
-    return QualityDecision(f'{policy}-2026-10-19', tier, reasons, tuple(labels), escape)
+    version = 'S-2026-10-19-open0935' if policy == 'S' else 'stack8-2026-10-19'
+    return QualityDecision(version, tier, reasons, tuple(labels), escape)
