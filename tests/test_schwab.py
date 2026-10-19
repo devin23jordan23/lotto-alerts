@@ -8,8 +8,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
-from lotto.models import ET, Snapshot
-from lotto.features import Candidate
+from lotto.models import ET, Option, Snapshot
+from lotto.features import Candidate, contract_ok, response_proxy
+from lotto.config import Settings
 from lotto.discord import alert_payload
 from lotto.schwab import Schwab, api_symbol, benchmark_for
 from lotto.discovery import Discovery
@@ -288,3 +289,42 @@ class AdapterTests(unittest.TestCase):
         self.client.get=Mock(side_effect=[data,RuntimeError('provider unavailable')])
         self.assertIs(self.client.option_chain('AMZN',now,1),data)
         self.assertEqual(self.client.get.call_count,2)
+
+    def test_direct_quote_only_unlocks_changed_greekless_opening_market(self):
+        at = datetime(2026,10,19,13,39,tzinfo=timezone.utc)
+        class OpeningDateTime(datetime):
+            @classmethod
+            def now(cls,tz=None):
+                return at
+        option = Option('MSFT  261019C00535000',at.date(),'CALL',535,1.20,1.46,
+                        2000,1000,-999,-999,at)
+        unchanged = Option('MSFT  261019C00537500',at.date(),'CALL',537.5,.75,.88,
+                           1500,1000,-999,-999,at)
+        cheap = Option('MSFT  261019C00540000',at.date(),'CALL',540,.01,.04,
+                       1200,1000,-999,-999,at)
+        chains={'MSFT':[option,unchanged,cheap]}
+        stamp=int(at.timestamp()*1000)
+        self.client.get=Mock(return_value={
+            option.symbol:{'realtime':True,'quote':{'bidPrice':1.00,'askPrice':1.06,
+                           'quoteTime':stamp,'totalVolume':2100}},
+            unchanged.symbol:{'realtime':True,'quote':{'bidPrice':.75,'askPrice':.88,
+                           'quoteTime':stamp,'totalVolume':1500}},
+            cheap.symbol:{'realtime':True,'quote':{'bidPrice':.42,'askPrice':.45,
+                           'quoteTime':stamp,'totalVolume':1250}},
+        })
+        with patch('lotto.schwab.datetime',OpeningDateTime):
+            self.client.verify_greekless_opening_quotes(chains,{'MSFT':533},1)
+        fresh,still_frozen,recovered_cheap=chains['MSFT']
+        self.assertTrue(fresh.direct_quote_verified)
+        self.assertEqual((fresh.bid,fresh.ask,fresh.volume),(1.00,1.06,2100))
+        self.assertFalse(still_frozen.direct_quote_verified)
+        self.assertTrue(recovered_cheap.direct_quote_verified)
+        self.assertEqual(recovered_cheap.ask,.45)
+        snap=Snapshot('MSFT',at,533,at,530,(),tuple(chains['MSFT']),prior_atr=11)
+        self.assertTrue(contract_ok(fresh,snap,Settings()))
+        self.assertFalse(contract_ok(still_frozen,snap,Settings()))
+        self.assertTrue(contract_ok(recovered_cheap,snap,Settings()))
+        self.assertEqual(response_proxy(fresh,snap),0.0)
+        late=Snapshot('MSFT',at+timedelta(minutes=52),533,at+timedelta(minutes=52),
+                      530,(),(fresh,),prior_atr=11)
+        self.assertFalse(contract_ok(fresh,late,Settings()))
