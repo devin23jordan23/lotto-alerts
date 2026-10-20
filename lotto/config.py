@@ -16,11 +16,10 @@ class Settings:
     min_cluster: int = 2
     min_strike_volume_5m: int = 75
     confirmation_minutes: int = 1  # Two distinct completed one-minute observations.
-    # Zero disables count limits. Distinct-setup, cooldown, and quality gates remain.
+    # Zero disables count limits. Same-leg deduplication and quality gates remain.
     max_alerts_per_day: int = 0
     max_alerts_per_ticker: int = 0
     max_alerts_per_cycle: int = 0
-    ticker_cooldown_minutes: int = 30
     rearm_minutes: int = 3
     max_quote_age_seconds: int = 90
     min_ask: float = 0.10
@@ -44,7 +43,7 @@ class Settings:
             raise ValueError("Settings must be finite")
         if not 0 < self.min_score <= 100 or min(self.min_pace_rvol,self.min_local_rvol,self.min_local_acceleration,self.min_range_atr,self.min_option_acceleration) <= 0:
             raise ValueError("Invalid score or RVOL threshold")
-        for name in ("confirmation_minutes", "ticker_cooldown_minutes", "rearm_minutes",
+        for name in ("confirmation_minutes", "rearm_minutes",
                      "max_quote_age_seconds", "min_cluster", "min_strike_volume_5m"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")

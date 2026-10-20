@@ -88,7 +88,8 @@ class Store:
             if "thesis_id" not in columns:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN thesis_id TEXT")
             for name, declaration in (("quality_tier", "TEXT NOT NULL DEFAULT 'MAIN'"),
-                                      ("quality_policy", "TEXT"), ("delivered_at", "TEXT")):
+                                      ("quality_policy", "TEXT"), ("delivered_at", "TEXT"),
+                                      ("setup_name", "TEXT"), ("setup_trigger", "REAL")):
                 if name not in columns:
                     self.db.execute(f"ALTER TABLE alerts ADD COLUMN {name} {declaration}")
 
@@ -234,8 +235,13 @@ class Store:
             args.append(symbol)
         return self.db.execute(query, args).fetchone()[0]
 
-    def last_alert(self, day: str, symbol: str):
-        return self.db.execute("SELECT * FROM alerts WHERE day=? AND symbol=? ORDER BY at DESC LIMIT 1", (day, symbol)).fetchone()
+    def last_alert(self, day: str, symbol: str, phase: str | None = None):
+        query = "SELECT * FROM alerts WHERE day=? AND symbol=?"
+        args = [day, symbol]
+        if phase is not None:
+            query += " AND phase=?"
+            args.append(phase)
+        return self.db.execute(query + " ORDER BY at DESC LIMIT 1", args).fetchone()
 
     def already_alerted(self, day: str, contract: str) -> bool:
         return self.db.execute("SELECT 1 FROM alerts WHERE day=? AND contract=?", (day, contract)).fetchone() is not None
@@ -251,14 +257,17 @@ class Store:
         with self.db:
             self.db.execute("""INSERT INTO alerts
                 (id, day, symbol, side, contract, at, entry_ask, payload, snapshot, delivery,
-                 max_return, min_return, latest_return, last_quote, phase, parent_id, thesis_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 max_return, min_return, latest_return, last_quote, phase, parent_id, thesis_id,
+                 setup_name, setup_trigger)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ident, snap.day, snap.symbol, option.side, option.symbol, snap.at.isoformat(),
                  option.ask, json.dumps(payload), json.dumps(snap.to_dict()),
                  "dry_run" if dry_run else "internal" if phase == "POTENTIAL" else "pending",
                  option.bid / option.ask - 1, option.bid / option.ask - 1,
                  option.bid / option.ask - 1, option.quote_time.isoformat(),
-                 phase, parent_id, thesis_id))
+                 phase, parent_id, thesis_id,
+                 candidate.setup.name if candidate.setup else None,
+                 candidate.setup.trigger if candidate.setup else None))
             if quality is not None:
                 self.db.execute("UPDATE alerts SET quality_tier=?,quality_policy=? WHERE id=?",
                                 (quality.tier,quality.policy_id,ident))

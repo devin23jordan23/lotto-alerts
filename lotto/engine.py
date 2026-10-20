@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import timedelta
 import json
 import logging
 import os
@@ -10,6 +10,30 @@ from .features import candidates
 from .models import ET, Snapshot
 from .store import Store
 from .quality import QualityConfig, evaluate
+
+
+def distinct_price_leg(candidate, previous) -> bool:
+    """A new level can alert while the ticker is running, without a timer.
+
+    Repeated polls of the same breakout are one thesis. A higher call trigger
+    or lower put trigger, accompanied by actual stock progress, is a new leg.
+    """
+    setup = candidate.setup
+    if setup is None or setup.building or previous["setup_trigger"] is None:
+        return False
+    direction = 1 if candidate.option.side == "CALL" else -1
+    prior_spot = json.loads(previous["snapshot"])["spot"]
+    atr = candidate.snapshot.prior_atr
+    if not atr or atr <= 0:
+        return False
+    # Rolling pivots change every minute during a single continuation; that
+    # alone is not a second setup. Distinct frozen reclaim levels can re-alert.
+    if previous["setup_name"] == setup.name and setup.name != "LEVEL_RECLAIM":
+        return False
+    distance = .15 if previous["setup_name"] != setup.name else .25
+    threshold = max(distance * atr, .001 * candidate.snapshot.spot)
+    return (direction * (setup.trigger - previous["setup_trigger"]) >= threshold
+            and direction * (candidate.snapshot.spot - prior_spot) >= threshold)
 
 
 def active_quality_reason(candidate) -> str | None:
@@ -144,20 +168,15 @@ class Engine:
                 self.store.decision(snap, "RUNNER", "entry cutoff; tracking only", best)
                 continue
             phase = "POTENTIAL" if best.setup.building else "ACTIVE"
-            last = self.store.last_alert(*key)
-            # A watch becoming a confirmed setup is a new, separately measured
-            # alert, not a duplicate blocked by the ticker cooldown.
-            promotion = bool(last and phase == "ACTIVE" and last["phase"] == "POTENTIAL"
-                             and last["side"] == best.option.side and key not in self.rearmed)
-            if last:
-                best.state = "ACTIVATION" if promotion else "RUNNER"
-                if not promotion:
-                    if (snap.at - datetime.fromisoformat(last["at"]) < timedelta(minutes=cfg.ticker_cooldown_minutes)
-                            or (key not in self.rearmed and last["side"] == best.option.side)):
-                        self.store.decision(snap, "RUNNER", "cooldown or fresh reset required", best)
-                        continue
-            else:
-                best.state = "IGNITION"
+            last = self.store.last_alert(*key, phase)
+            watch = self.store.last_alert(*key, "POTENTIAL") if phase == "ACTIVE" else None
+            if last and last["side"] == best.option.side and key not in self.rearmed:
+                if not distinct_price_leg(best, last):
+                    self.store.decision(snap, "RUNNER", "same price leg already alerted", best)
+                    continue
+            promotion = bool(phase == "ACTIVE" and watch and watch["side"] == best.option.side
+                             and (not last or watch["at"] > last["at"]))
+            best.state = "ACTIVATION" if promotion else "RUNNER" if last else "IGNITION"
             if phase == 'ACTIVE' and self.quality.mode == 'enforce':
                 policy = quality_decisions[(snap.symbol,snap.at,best.option.symbol)]
                 if policy.tier == 'RESEARCH':
@@ -171,8 +190,7 @@ class Engine:
                     self.store.research_candidate(best, reason)
                     self.store.decision(snap, "RESEARCH", reason, best)
                     continue
-            # A previously alerted contract may form a genuinely new leg after
-            # cooldown and a recorded reset.
+            # A renewed thesis or a materially new price leg can alert again.
             ready.append(best)
         alerts = []
         # Rank the whole scan cycle. Zero-valued count settings impose no budget.
@@ -184,7 +202,7 @@ class Engine:
                 self.store.decision(snap, candidate.state, "alert budget/ranking suppressed", candidate)
                 continue
             phase = "POTENTIAL" if candidate.setup.building else "ACTIVE"
-            last = self.store.last_alert(snap.day, snap.symbol)
+            last = self.store.last_alert(snap.day, snap.symbol, "POTENTIAL")
             parent_id = (last["id"] if candidate.state == "ACTIVATION" and last else None)
             policy = (quality_decisions.get((snap.symbol,snap.at,candidate.option.symbol))
                       if self.quality.mode == 'enforce' and phase == 'ACTIVE' else None)
