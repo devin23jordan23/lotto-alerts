@@ -134,7 +134,7 @@ class QualityTests(unittest.TestCase):
                          [tuple(r) for r in shadow.db.execute('SELECT * FROM decisions')])
         self.assertEqual(off.db.execute('SELECT COUNT(*) FROM quality_shadow').fetchone()[0],0)
         self.assertGreater(shadow.db.execute('SELECT COUNT(*) FROM quality_shadow').fetchone()[0],0)
-        self.assertTrue(shadow.db.execute("SELECT COUNT(*) FROM quality_shadow WHERE live_outcome LIKE '%cooldown%'").fetchone()[0])
+        self.assertTrue(shadow.db.execute("SELECT COUNT(*) FROM quality_shadow WHERE live_outcome LIKE '%same price leg%'").fetchone()[0])
 
     def test_research_has_no_alert_or_cooldown(self):
         store,alerts,_=self.engine_run('enforce',{'response_proxy':.4,'return_5m_directional':.001})

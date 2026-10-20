@@ -63,8 +63,8 @@ but only **ACTIVE TRADE IDEA** posts to the main Discord webhook. When a watch
 later qualifies as a triggered setup, the active idea gets its own time and
 fresh option ask and can link to the watch ID. A setup already triggered when
 first found sends an active idea directly. The watch-to-active transition bypasses
-the usual ticker cooldown; later distinct legs still require the existing
-cooldown/reset. Internal watches remain in nightly research and do not count as
+same-leg duplicate check; a fresh price leg or a recorded reset can alert again
+without a fixed ticker timer. Internal watches remain in nightly research and do not count as
 Discord deliveries.
 
 The active Discord embed shows the contract, ask/bid, stock price, trigger,
@@ -131,8 +131,9 @@ There are no daily, per-cycle, or per-ticker alert-count ceilings by default;
 `LOTTO_MAX_ALERTS_PER_DAY`, `LOTTO_MAX_ALERTS_PER_CYCLE`, and
 `LOTTO_MAX_ALERTS_PER_TICKER` are `0` (unlimited). One minute of confirmation requires two distinct
 completed bars; poll jitter no longer adds another minute. A 30-minute ticker
-cooldown and a fresh reset or direction change govern a new leg, including a
-new attempt in the same contract. The earliest possible opening signal is
+same-leg deduplication governs a new alert, including a new attempt in the
+same contract. A distinct price-level break or a recorded reset can alert again
+while the ticker is still running. The earliest possible opening signal is
 approximately 9:36 ET with complete, timely observations; collection delays can
 make it later. New ideas stop 15 minutes before the actual close. In the final
 30 minutes, only triggered setups with delta at least 0.20, spread at most 10%,

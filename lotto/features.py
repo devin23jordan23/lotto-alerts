@@ -92,6 +92,21 @@ def response_proxy(option, snap):
     return (abs(option.delta)*move + .5*option.gamma*move*move)/option.ask
 
 
+def index_price_flow_confirmation(snap, setup, metrics, score, response, strike_count, acceleration, persistent):
+    """Let a liquid index break qualify on actual price/option follow-through.
+
+    Cumulative RVOL is a poor hard veto for heavily traded index ETFs; it
+    remains part of the score. This alternative still needs a triggered setup,
+    directional price travel, efficient bars and responsive multi-strike flow.
+    """
+    return (snap.symbol in {"SPY", "QQQ", "IWM"}
+            and setup is not None and not setup.building and score >= 80
+            and metrics["return_5m_directional"] >= .001
+            and metrics["efficiency"] >= .5
+            and response >= .7 and strike_count >= 3
+            and (acceleration >= 1.3 or persistent))
+
+
 def persistent_activity(snap, history, contract_ids, settings):
     """Twenty minutes of replenishment, using identical contracts and fresh samples."""
     frames = sorted([s for s in history if snap.at-timedelta(minutes=22) <= s.at < snap.at] + [snap], key=lambda s:s.at)
@@ -316,6 +331,9 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
                      and metrics["efficiency"] >= .4 and len(best) >= 3 and acceleration >= 1.5)
         sustained_coil = coil and persistent and metrics["local_rvol_5m"] >= .8
         metrics["locally_improving_volume"] = int(improving)
+        index_flow = index_price_flow_confirmation(
+            snap, setup, metrics, score, response, len(best), acceleration, persistent)
+        metrics["index_price_flow_confirmation"] = int(index_flow)
         stock_risk = direction*(snap.spot-setup.invalidation) if setup else 0
         target_room = direction*(setup.target-snap.spot) if setup and setup.target is not None else None
         target_risk = target_room/stock_risk if target_room is not None and stock_risk>0 else None
@@ -325,7 +343,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         short = window_minutes <= 2
         checks = {
             "score below threshold": score >= settings.min_score+(5 if short else 0)+(3 if late else 0),
-            "stock volume pace/burst below threshold": metrics["pace_rvol"] >= settings.min_pace_rvol or local_burst or improving or sustained_coil or early_flow or opening_break,
+            "stock volume pace/burst below threshold": metrics["pace_rvol"] >= settings.min_pace_rvol or local_burst or improving or sustained_coil or early_flow or opening_break or index_flow,
             "stock volume pace fading": metrics["pace_persistence"] >= .80,
             "no developing price setup": setup is not None,
             "opposing volume dominates": metrics["opposing_volume_share"] <= (.60 if coil else .50),
