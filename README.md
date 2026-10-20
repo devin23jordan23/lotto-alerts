@@ -130,8 +130,8 @@ delta/gamma ranking proxy holds IV and time fixed; it is not a return forecast.
 There are no daily, per-cycle, or per-ticker alert-count ceilings by default;
 `LOTTO_MAX_ALERTS_PER_DAY`, `LOTTO_MAX_ALERTS_PER_CYCLE`, and
 `LOTTO_MAX_ALERTS_PER_TICKER` are `0` (unlimited). One minute of confirmation requires two distinct
-completed bars; poll jitter no longer adds another minute. A 30-minute ticker
-same-leg deduplication governs a new alert, including a new attempt in the
+completed bars; poll jitter no longer adds another minute. Same-leg
+deduplication governs a new alert, including a new attempt in the
 same contract. A distinct price-level break or a recorded reset can alert again
 while the ticker is still running. The earliest possible opening signal is
 approximately 9:36 ET with complete, timely observations; collection delays can
