@@ -80,6 +80,18 @@ test must add as-of acceptance, range location, displacement, and market
 context one at a time, while naming every big mover each addition loses.
 Machine-readable details: `docs/reports/model-t-stock-events-2026-10-25.json`.
 
+Exploratory splits on these **overlapping stock events** further caution
+against copying intuitive weights into Model T. A 15-minute push >=0.25 ATR
+had 21.9% clean further +0.25 ATR versus 14.7% below it. Local RVOL >=0.8
+was 19.3% versus 14.0%. But being near the session range edge was 18.1%
+versus 22.7% elsewhere; VWAP on the trade side was 17.8% versus 29.0%; and
+five-minute market alignment was 16.1% versus 24.5%. Those latter comparison
+groups are small, overlap setup types, and include unknown values, so these
+are **not** evidence that opposing SPY or VWAP is good. They are evidence
+that neither should receive an automatic positive weight or become a veto
+without event-specific held-out testing. A level break is meaningful only in
+the context of where the stock is in its session move and what it does next.
+
 ## Changes to the build spec before code promotion
 
 1. Make `STOCK THESIS` and `ACTIVE TRADE IDEA` distinct timestamps. A stock

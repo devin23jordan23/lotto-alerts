@@ -144,9 +144,23 @@ def run(db):
                 outcome = forward_grade(rows, index, side, atr)
                 if outcome is None:
                     continue
+                high, low = levels["high"][index], levels["low"][index]
+                range_position = (side * (row["spot"] - low) / (high - low) if side == 1 else
+                                  side * (row["spot"] - high) / (high - low)) if high and low and high > low else None
+                metrics = (row.get("metrics") or {}).get(str(side)) or {}
+                signed_market = row.get("market_return_5m")
+                if isinstance(signed_market, (int, float)):
+                    signed_market *= side
                 item = {"day": day, "symbol": symbol, "at": at.isoformat(),
                         "kind": kind, "side": side_name, "motion15_atr": round(motion15, 3),
-                        "move_open_atr": round(move_open, 3), **outcome}
+                        "move_open_atr": round(move_open, 3),
+                        "break_distance_atr": round(side * (row["spot"] - level) / atr, 3),
+                        "range_position": round(range_position, 3) if range_position is not None else None,
+                        "vwap_distance_atr": metrics.get("distance_from_vwap_atr"),
+                        "local_rvol": metrics.get("local_rvol_5m"),
+                        "market_5m_side": signed_market,
+                        "day_range_atr": round((high - low) / atr, 3) if high and low else None,
+                        **outcome}
                 totals[kind].append(item)
                 result["by_day"].setdefault(day, []).append(item)
                 if symbol in {"META", "AAPL", "AMZN", "MSFT", "SPY"} and len(result["examples"]) < 150:
@@ -160,6 +174,27 @@ def run(db):
                 "peak50": round(sum(r["peak50"] for r in items) / n, 4) if n else None}
     result["events"] = {kind: stats(items) for kind, items in totals.items()}
     result["by_day"] = {day: stats(items) for day, items in result["by_day"].items()}
+    conditions = {
+        "range_edge_0_9": lambda r: r["range_position"] is not None and r["range_position"] >= .9,
+        "vwap_with_side": lambda r: isinstance(r["vwap_distance_atr"], (int, float)) and r["vwap_distance_atr"] >= 0,
+        "rvol_0_8": lambda r: isinstance(r["local_rvol"], (int, float)) and r["local_rvol"] >= .8,
+        "market_with_side": lambda r: isinstance(r["market_5m_side"], (int, float)) and r["market_5m_side"] >= 0,
+        "motion15_0_25": lambda r: r["motion15_atr"] >= .25,
+        "move_open_0_4": lambda r: r["move_open_atr"] >= .4,
+    }
+    result["splits"] = {}
+    all_items = [item for items in totals.values() for item in items]
+    for name, condition in conditions.items():
+        yes = [item for item in all_items if condition(item)]
+        no = [item for item in all_items if not condition(item)]
+        result["splits"][name] = {"yes": stats(yes), "no_or_unknown": stats(no)}
+    for name, condition in {
+        "range_edge_and_vwap": lambda r: conditions["range_edge_0_9"](r) and conditions["vwap_with_side"](r),
+        "range_edge_and_market": lambda r: conditions["range_edge_0_9"](r) and conditions["market_with_side"](r),
+        "range_edge_and_motion": lambda r: conditions["range_edge_0_9"](r) and conditions["motion15_0_25"](r),
+    }.items():
+        result["splits"][name] = {"yes": stats([r for r in all_items if condition(r)]),
+                                   "no_or_unknown": stats([r for r in all_items if not condition(r)])}
     return result
 
 
