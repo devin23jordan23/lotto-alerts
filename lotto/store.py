@@ -76,6 +76,15 @@ class Store:
             CREATE TABLE IF NOT EXISTS quality_quotes (
                 candidate_id TEXT, at TEXT, quote_time TEXT, bid REAL, ask REAL,
                 PRIMARY KEY(candidate_id,quote_time));
+            CREATE TABLE IF NOT EXISTS stock_ideas (
+                id TEXT PRIMARY KEY, day TEXT, symbol TEXT, side TEXT, at TEXT,
+                stock_price REAL, trigger REAL, invalidation REAL, setup TEXT,
+                metrics TEXT, payload TEXT, delivery TEXT, delivered_at TEXT,
+                max_stock_return REAL DEFAULT 0, min_stock_return REAL DEFAULT 0,
+                latest_stock_return REAL DEFAULT 0, last_stock_quote TEXT);
+            CREATE INDEX IF NOT EXISTS stock_ideas_day ON stock_ideas(day,symbol,side,at);
+            CREATE TABLE IF NOT EXISTS stock_decisions (
+                symbol TEXT, at TEXT, side TEXT, reason TEXT, metrics TEXT);
         """)
         # Railway volumes retain older databases. Do not recast historical alerts
         # as active trades when the phase distinction did not exist yet.
@@ -89,7 +98,8 @@ class Store:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN thesis_id TEXT")
             for name, declaration in (("quality_tier", "TEXT NOT NULL DEFAULT 'MAIN'"),
                                       ("quality_policy", "TEXT"), ("delivered_at", "TEXT"),
-                                      ("setup_name", "TEXT"), ("setup_trigger", "REAL")):
+                                      ("setup_name", "TEXT"), ("setup_trigger", "REAL"),
+                                      ("expiry", "TEXT")):
                 if name not in columns:
                     self.db.execute(f"ALTER TABLE alerts ADD COLUMN {name} {declaration}")
 
@@ -235,19 +245,69 @@ class Store:
             args.append(symbol)
         return self.db.execute(query, args).fetchone()[0]
 
-    def last_alert(self, day: str, symbol: str, phase: str | None = None):
+    def last_alert(self, day: str, symbol: str, phase: str | None = None,
+                   side: str | None = None, expiry: str | None = None,
+                   exclude_tier_c: bool = False):
         query = "SELECT * FROM alerts WHERE day=? AND symbol=?"
         args = [day, symbol]
         if phase is not None:
             query += " AND phase=?"
             args.append(phase)
+        if side is not None:
+            query += " AND side=?"
+            args.append(side)
+        if expiry is not None:
+            query += " AND expiry=?"
+            args.append(expiry)
+        if exclude_tier_c:
+            query += " AND quality_tier!='C'"
         return self.db.execute(query + " ORDER BY at DESC LIMIT 1", args).fetchone()
+
+    def count_direction(self, day: str, symbol: str, side: str, expiry: str) -> int:
+        return self.db.execute("""SELECT COUNT(*) FROM alerts WHERE day=? AND symbol=? AND side=?
+                AND expiry=? AND phase='ACTIVE' AND quality_tier!='C'""",
+                (day,symbol,side,expiry)).fetchone()[0]
 
     def already_alerted(self, day: str, contract: str) -> bool:
         return self.db.execute("SELECT 1 FROM alerts WHERE day=? AND contract=?", (day, contract)).fetchone() is not None
 
+    def last_stock_idea(self, day: str, symbol: str, side: str):
+        return self.db.execute("""SELECT * FROM stock_ideas WHERE day=? AND symbol=? AND side=?
+                                ORDER BY at DESC LIMIT 1""", (day, symbol, side)).fetchone()
+
+    def stock_decision(self, idea, reason: str):
+        with self.db:
+            self.db.execute("INSERT INTO stock_decisions VALUES (?,?,?,?,?)",
+                            (idea.symbol, idea.at.isoformat(), idea.side, reason, json.dumps(idea.metrics)))
+
+    def queue_stock_idea(self, idea, payload: dict, dry_run: bool, mode: str):
+        delivery = "dry_run" if dry_run else "internal" if mode == "shadow" else "pending"
+        with self.db:
+            self.db.execute("""INSERT OR IGNORE INTO stock_ideas
+                (id,day,symbol,side,at,stock_price,trigger,invalidation,setup,metrics,payload,delivery,last_stock_quote)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (idea.id, idea.day, idea.symbol, idea.side, idea.at.isoformat(), idea.price,
+                 idea.trigger, idea.invalidation, idea.setup, json.dumps(idea.metrics),
+                 json.dumps(payload), delivery, idea.at.isoformat()))
+
+    def track_stock_ideas(self, row: dict):
+        at = row["observed_at"]
+        day = at.astimezone(ET).date().isoformat()
+        with self.db:
+            for idea in self.db.execute("""SELECT id,side,stock_price,max_stock_return,min_stock_return,last_stock_quote
+                    FROM stock_ideas WHERE day=? AND symbol=?""", (day, row["symbol"])).fetchall():
+                if at.isoformat() <= idea["last_stock_quote"]:
+                    continue
+                direction = 1 if idea["side"] == "CALL" else -1
+                change = direction*(row["price"]/idea["stock_price"]-1)
+                self.db.execute("""UPDATE stock_ideas SET max_stock_return=?,min_stock_return=?,
+                        latest_stock_return=?,last_stock_quote=? WHERE id=?""",
+                        (max(idea["max_stock_return"],change),min(idea["min_stock_return"],change),
+                         change,at.isoformat(),idea["id"]))
+
     def queue(self, candidate: Candidate, payload: dict, dry_run: bool,
-              phase: str, parent_id: str | None = None, quality=None) -> str:
+              phase: str, parent_id: str | None = None, quality=None,
+              tier: str | None = None, sendable: bool = True) -> str:
         if phase not in {"POTENTIAL", "ACTIVE"}:
             raise ValueError("Alert phase must be POTENTIAL or ACTIVE")
         snap, option = candidate.snapshot, candidate.option
@@ -258,19 +318,21 @@ class Store:
             self.db.execute("""INSERT INTO alerts
                 (id, day, symbol, side, contract, at, entry_ask, payload, snapshot, delivery,
                  max_return, min_return, latest_return, last_quote, phase, parent_id, thesis_id,
-                 setup_name, setup_trigger)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 setup_name, setup_trigger, expiry)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ident, snap.day, snap.symbol, option.side, option.symbol, snap.at.isoformat(),
                  option.ask, json.dumps(payload), json.dumps(snap.to_dict()),
-                 "dry_run" if dry_run else "internal" if phase == "POTENTIAL" else "pending",
+                 "dry_run" if dry_run else "internal" if phase == "POTENTIAL" or not sendable else "pending",
                  option.bid / option.ask - 1, option.bid / option.ask - 1,
                  option.bid / option.ask - 1, option.quote_time.isoformat(),
                  phase, parent_id, thesis_id,
                  candidate.setup.name if candidate.setup else None,
-                 candidate.setup.trigger if candidate.setup else None))
+                 candidate.setup.trigger if candidate.setup else None,option.expiry.isoformat()))
+            if tier is not None:
+                self.db.execute("UPDATE alerts SET quality_tier=? WHERE id=?", (tier,ident))
             if quality is not None:
                 self.db.execute("UPDATE alerts SET quality_tier=?,quality_policy=? WHERE id=?",
-                                (quality.tier,quality.policy_id,ident))
+                                (tier or quality.tier,quality.policy_id,ident))
             self.db.execute("UPDATE quality_shadow SET alert_id=? WHERE candidate_id=?",(ident,ident))
         return ident
 

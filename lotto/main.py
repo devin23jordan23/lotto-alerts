@@ -11,11 +11,12 @@ from pathlib import Path
 
 from .config import Settings, STRATEGY_VERSION
 from .demo import demo_frames
-from .discord import deliver_pending
+from .discord import deliver_pending, deliver_stock_pending
 from .engine import Engine
 from .models import ET, Snapshot
 from .schwab import Schwab
 from .store import Store
+from .stock_first import StockFirst
 from .nightly import maybe_nightly, run_nightly
 from .health import check
 from .audit import audit_store, diagnose_symbols, audit_coil_burst_hypothesis
@@ -106,6 +107,10 @@ def main():
     if live_delivery and not webhook:
         raise SystemExit("DISCORD_LOTTO_WEBHOOK is required when LOTTO_SEND_ALERTS=true")
     engine = Engine(store, env_settings(), dry_run=not live_delivery)
+    stock_first = StockFirst(store,
+        enabled=os.getenv("LOTTO_STOCK_FIRST_ENABLED", "true").lower() == "true",
+        mode=os.getenv("LOTTO_STOCK_FIRST_MODE", "send").lower(),
+        max_quote_age=engine.settings.max_quote_age_seconds)
     health_monitor = HealthMonitor(store, webhook)
     if args.mode in {"demo", "replay"}:
         if args.mode == "replay" and not args.input:
@@ -139,6 +144,7 @@ def main():
              engine.quality.mode,engine.quality.policy,
              'configured' if os.getenv('DISCORD_LOTTO_SECONDARY_WEBHOOK') else 'internal',
              ','.join(sorted(engine.quality.disabled_rules)) or 'none')
+    LOG.info("Stock-first: enabled=%s mode=%s", stock_first.enabled, stock_first.mode)
     LOG.info("Coverage plan: %d deep slots; continuous=%s; full-universe sweep target=%d minutes",
              client.discovery.capacity,",".join(sorted(client.discovery.always_deep)),client.coverage.interval.seconds//60)
     local_start = datetime.now(ET)
@@ -201,7 +207,14 @@ def main():
         try:
             today = datetime.now(ET).date().isoformat()
             tracked = store.active_options(today)
-            frame = client.poll(sorted(set(symbols) | set(tracked)), tracked, engine.settings.max_dte)
+            def on_discovery(rows):
+                ideas = stock_first.process(rows, dry_run=not live_delivery)
+                for idea in ideas:
+                    LOG.info("Stock-first %s %s %s at %.2f", idea.symbol, idea.side, idea.setup, idea.price)
+                if live_delivery and stock_first.enabled and stock_first.mode == "send":
+                    deliver_stock_pending(store, webhook)
+            frame = client.poll(sorted(set(symbols) | set(tracked)), tracked,
+                                engine.settings.max_dte, on_discovery=on_discovery)
             store.record_discovery(client.discovery.observations)
             store.record_chain_coverage(client.coverage.rows)
             # Poll latency cannot turn an old candidate into a current alert.
@@ -211,7 +224,8 @@ def main():
             for alert in alerts:
                 LOG.info("%s setup %s: %s", alert["phase"], alert["id"], alert["payload"]["embeds"][0]["description"])
             if live_delivery:
-                deliver_pending(store, webhook)
+                deliver_pending(store, webhook,
+                                quoter=client.send_quote if engine.settings.send_requote else None)
             with store.db:
                 # Expire intraday trackers after the session even if no further quotes arrive.
                 store.db.execute("UPDATE alerts SET closed=1 WHERE day < ?", (today,))

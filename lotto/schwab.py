@@ -80,6 +80,7 @@ class Schwab:
         self.calendar_cache = {}
         self.atrs = {}
         self.levels = {}
+        self.bar_cache = {}
         self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "60")),
             always_deep={s.strip().upper() for s in os.getenv(
                 "LOTTO_CONTINUOUS_SYMBOLS",
@@ -134,9 +135,9 @@ class Schwab:
         self.broker_deadline = time.monotonic() + ttl
         return token
 
-    def get(self, path: str, params: dict) -> dict:
+    def get(self, path: str, params: dict, attempts: int = 3, timeout: int = 15) -> dict:
         retry_auth = False
-        for attempt in range(3):
+        for attempt in range(attempts):
             with self.request_lock:
                 access_token = self.token(force=retry_auth)
                 retry_auth = False
@@ -146,7 +147,7 @@ class Schwab:
                 self._prune_request_starts(self.last_request)
             request = Request(f"{BASE}{path}?{urlencode(params)}", headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"})
             try:
-                with urlopen(request, timeout=15) as response:
+                with urlopen(request, timeout=timeout) as response:
                     payload = json.load(response)
                 self._request_succeeded()
                 return payload
@@ -154,7 +155,7 @@ class Schwab:
                 if exc.code != 429:
                     with self.request_lock:
                         self.success_streak = 0
-                if exc.code in (401, 429) and attempt < 2:
+                if exc.code in (401, 429) and attempt < attempts-1:
                     retry_auth = exc.code == 401
                     if exc.code == 429:
                         self._rate_limited(path)
@@ -162,6 +163,24 @@ class Schwab:
                     continue
                 raise RuntimeError(f"Schwab {path} failed (HTTP {exc.code})") from None
         raise RuntimeError("Schwab authorization retry failed")
+
+    def send_quote(self, contract_symbol: str, underlying: str) -> dict | None:
+        """One bounded market-data request; never a brokerage/order endpoint."""
+        data = self.get("/quotes", {"symbols": f"{contract_symbol},{api_symbol(underlying)}"},
+                        attempts=1, timeout=3)
+        item = data.get(contract_symbol, {})
+        base = data.get(api_symbol(underlying), data.get(underlying, {}))
+        option_q, stock_q = item.get("quote", {}), base.get("quote", {})
+        bid, ask = number(option_q.get("bidPrice")), number(option_q.get("askPrice"))
+        quote_time = epoch(option_q.get("quoteTime"))
+        spot = number(stock_q.get("lastPrice"))
+        spot_time = epoch(stock_q.get("tradeTime") or stock_q.get("quoteTime"))
+        if (item.get("realtime") is False or base.get("realtime") is False
+                or bid is None or ask is None or not 0 < bid <= ask
+                or quote_time is None or spot is None or spot_time is None):
+            return None
+        return {"bid": bid, "ask": ask, "quote_time": quote_time,
+                "spot": spot, "spot_time": spot_time, "source": "Schwab /quotes", "realtime": True}
 
     def _prune_request_starts(self, now):
         while self.request_starts and now-self.request_starts[0] >= 60:
@@ -253,12 +272,23 @@ class Schwab:
                 profiles[local.date()][minute] = volume
         observations = defaultdict(list)
         for historic_day in sorted(profiles)[-20:]:
+            minutes = profiles[historic_day]
+            if 0 not in minutes:
+                continue
+            # Preserve the observed prefix and bridge at most two isolated
+            # missing minutes. Three missing minutes end that day's profile.
             total = 0
+            missing = 0
             for minute in range(390):
-                if minute not in profiles[historic_day]:
-                    break  # Missing bars never lower the cumulative baseline artificially.
-                total += profiles[historic_day][minute]
-                observations[minute + 1].append(total)
+                if minute not in minutes:
+                    missing += 1
+                    if missing > 2:
+                        break
+                else:
+                    missing = 0
+                total += minutes.get(minute, 0)
+                if minute in minutes:
+                    observations[minute + 1].append(total)
         baseline = {minute: median(values) for minute, values in observations.items() if len(values) >= 10}
         if symbol == "SPX":
             # Schwab index candles have zero volume; use traded SPY volume only
@@ -271,11 +301,19 @@ class Schwab:
 
     def bars(self, symbol: str, now: datetime, with_baseline=True) -> tuple[Bar, ...]:
         opening = now.astimezone(ET).replace(hour=9, minute=30, second=0, microsecond=0)
-        raw = self.candles(symbol, opening.replace(hour=4), now, True)
+        key = (symbol, opening.date())
+        if not hasattr(self, "bar_cache"):
+            self.bar_cache = {}
+        cached = self.bar_cache.get(key, {})
+        # Re-fetch only a short overlap after the first full load. A full
+        # 4 a.m.-to-now request for every deep symbol every minute caused
+        # request pressure and stale-bar vetoes on October 23.
+        start = max(opening, max(cached) - timedelta(minutes=3)) if cached else opening.replace(hour=4)
+        raw = self.candles(symbol, start, now, True)
         baseline = self.baseline(symbol, now) if with_baseline else {}
         proxy_volumes = None
         if symbol == "SPX":
-            proxy = self.candles("SPY", opening.replace(hour=4), now, True)
+            proxy = self.candles("SPY", start, now, True)
             proxy_volumes = {start + timedelta(minutes=1): number(c.get("volume"))
                              for c in proxy.get("candles", []) if (start := epoch(c.get("datetime")))}
         if not hasattr(self,"levels"):
@@ -286,7 +324,7 @@ class Schwab:
         if premarket:
             self.levels.setdefault((symbol,opening.date()),{}).update(
                 premarket_high=max(c["high"] for c in premarket),premarket_low=min(c["low"] for c in premarket))
-        bars = {}
+        bars = dict(cached)
         for candle in raw.get("candles", []):
             start = epoch(candle.get("datetime"))
             if not start or start < opening or start + timedelta(minutes=1) > now:
@@ -301,6 +339,8 @@ class Schwab:
             if not 1 <= offset <= 390:
                 continue
             bars[end] = Bar(end, *values[:4], int(values[4]), baseline.get(offset))
+        self.bar_cache = {k:v for k,v in self.bar_cache.items() if k[1] == opening.date()}
+        self.bar_cache[key] = bars
         return tuple(bars[k] for k in sorted(bars))
 
     def warm_universe(self, symbols, now):
@@ -453,7 +493,7 @@ class Schwab:
         LOG.info('Opening Greekless chains: independently refreshed %d/%d near-money contracts',
                  len(refreshed),len(requested))
 
-    def poll(self, symbols: list[str], tracked: dict, max_dte: int) -> list[Snapshot]:
+    def poll(self, symbols: list[str], tracked: dict, max_dte: int, on_discovery=None) -> list[Snapshot]:
         now = datetime.now(timezone.utc)
         if not hasattr(self, "coverage"):
             self.coverage = ChainCoverage()
@@ -476,12 +516,17 @@ class Schwab:
                 "open":number(q.get("openPrice")), "volume":number(q.get("totalVolume")),
                 "high":number(q.get("highPrice")), "low":number(q.get("lowPrice")),
                 "at":epoch(q.get("tradeTime") or q.get("quoteTime")),
+                "prior_atr": self.atrs.get((symbol, now.astimezone(ET).date())) if hasattr(self, "atrs") else None,
             }
         if "SPX" in parsed:
             parsed["SPX"]["volume"] = parsed.get("SPY", {}).get("volume")
         selected = self.discovery.update(parsed, datetime.now(timezone.utc), set(symbols), tracked,
                                          self.coverage.priorities(now),
                                          {s for s, available in self.coverage.has_near_expiry.items() if not available})
+        # The whole-universe stock path runs now. It must not wait for the
+        # slower option-chain sweep or deep historical-bar downloads.
+        if on_discovery is not None:
+            on_discovery(self.discovery.observations)
         result = []
         began = time.monotonic()
         _, _, rate_limits_before = self.request_statistics()

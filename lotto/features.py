@@ -232,6 +232,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
               if 0 <= (o.expiry - snap.at.astimezone(ET).date()).days <= settings.max_dte}
     results = []
     for expiry, side in sorted(groups):
+        rules = "B" if settings.hybrid and (expiry-snap.at.astimezone(ET).date()).days == 0 else "F"
         direction = 1 if side == "CALL" else -1
         listed = sorted([o for o in snap.options if (o.expiry, o.side) == (expiry, side)], key=lambda o: o.strike)
         duration_now = (snap.at - five.at).total_seconds()
@@ -306,6 +307,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
             "contract_response": 5*clamp(response),
         })
         metrics.update({"option_acceleration": acceleration, "cluster_size": len(best),
+                        "rules": rules,
                         "migration": migration, "option_volume_5m": now_total,
                         "context_directional_return": context, "relative_sector_5m": relative,
                         "peer_directional_return": peer, "options_persistent_20m": int(persistent),
@@ -360,7 +362,21 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
                 and (gap is None or 0 <= gap <= .10)),
         }
         blockers = tuple(k for k,v in checks.items() if not v)
-        qualifying = not blockers
+        if settings.hybrid and settings.soft_blocks:
+            # Keep the evidence from every failed setup check, but let score
+            # and the A/B delivery tier decide whether it reaches the channel.
+            # Invalid or stale option quotes were rejected before this point.
+            for name, passed in checks.items():
+                if name == "score below threshold":
+                    continue
+                slug = name.replace(" ", "_").replace("/", "_")
+                metrics[f"chk_{slug}"] = int(bool(passed))
+                if not passed:
+                    parts[f"pen_{slug}"] = -10
+            score = round(sum(parts.values()), 2)
+            qualifying = score >= settings.min_score+(5 if short else 0)+(3 if late else 0)
+        else:
+            qualifying = not blockers
         context_reason = (f"{snap.context_label} supportive" if context > 0
                           else f"Outperforming {snap.context_label}" if context_confirms
                           else f"{snap.context_label or 'Benchmark'} unconfirmed")
@@ -378,5 +394,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
             reasons.append("Options activity sustained 20m")
         if peer_valid and peer > 0:
             reasons.append("Peers: " + ", ".join(snap.peer_leaders))
+        if settings.hybrid and blockers:
+            reasons.extend(f"Soft check: {name}" for name in blockers if name != "score below threshold")
         results.append(Candidate(snap, option, score, parts, metrics, reasons, qualifying, setup=setup, blockers=blockers))
     return results

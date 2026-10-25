@@ -35,9 +35,11 @@ class Discovery:
             price, opening, previous, volume = (q.get(k) for k in ("price", "open", "previous", "volume"))
             at = q.get("at")
             if (at is None or not 0 <= (now-at).total_seconds() <= 90
-                    or any(v is None or not isfinite(v) or v <= 0 for v in (price, opening, previous))
-                    or volume is None or not isfinite(volume) or volume < 0):
+                    or any(v is None or not isfinite(v) or v <= 0 for v in (price, opening, previous))):
                 continue
+            volume_unknown = volume is None or not isfinite(volume) or volume < 0
+            if volume_unknown:
+                volume = 0
             history = self.history[symbol]
             old = [v for v in history if 300 <= (now-v["at"]).total_seconds() <= 390]
             ret5 = price/old[-1]["price"]-1 if old else None
@@ -49,7 +51,8 @@ class Discovery:
             intraday_range = (high-low)/opening if high and low else 0
             score = (100*(abs(ret5 or 0)*3 + excursion + intraday_range*.5)
                      + min(3, acceleration or 0) + (flow_priorities or {}).get(symbol, 0))
-            record = {**q, "symbol":symbol, "observed_at":now, "return_5m":ret5,
+            record = {**q, "symbol":symbol, "volume":volume, "volume_unknown":int(volume_unknown),
+                      "observed_at":now, "return_5m":ret5,
                       "volume_5m":delta, "volume_acceleration":acceleration, "priority":score}
             if not history or at > history[-1]["at"]:
                 history.append(record)

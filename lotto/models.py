@@ -135,11 +135,13 @@ class Snapshot:
             if (not bar.valid() or local_bar.date() != local.date()
                     or not time(9, 31) <= local_bar.time() <= time(16) or bar.end > self.at):
                 return ["invalid, future, or mixed-session bar"]
-            if i and (bar.end - self.bars[i - 1].end).total_seconds() != 60:
-                return ["incomplete one-minute bar history"]
-        if self.bars[0].end.astimezone(ET).time() != time(9, 31):
-            return ["session open bar missing"]
-        baseline = self.bars[-1].expected_cumulative_volume
-        if baseline is None or not positive(baseline):
-            return ["same-time historical volume baseline unavailable"]
+            if i:
+                elapsed = (bar.end - self.bars[i - 1].end).total_seconds()
+                if elapsed <= 0 or elapsed > 180:
+                    return ["more than two consecutive stock bars missing"]
+        if self.bars[0].end.astimezone(ET).time() > time(9, 33):
+            return ["more than two opening stock bars missing"]
+        # A missing historical volume profile is an unknown feature, not proof
+        # that a fresh price/level breakout did not happen. path_features()
+        # already scores absent pace as zero while retaining local movement.
         return []

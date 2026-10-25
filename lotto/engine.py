@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 import logging
 import os
@@ -10,6 +10,20 @@ from .features import candidates
 from .models import ET, Snapshot
 from .store import Store
 from .quality import QualityConfig, evaluate
+
+
+def hybrid_tier(candidate, policy, settings):
+    """Compute the proposed tier blend; it is not a calibrated win probability."""
+    rules = set(policy.reasons)
+    blend = candidate.score - 10*len(rules & {"OPEN", "EXHQ", "W1DTE", "PREM"})
+    if rules & {"WF", "LATE"}:
+        blend -= 25
+    blend += 5 if candidate.metrics.get("hourly_break") else 0
+    tier = "A" if blend >= settings.tier_a else "B" if blend >= settings.tier_b else "C"
+    candidate.metrics.update({"tier": tier, "tier_blend": round(blend, 2),
+                              "tier_v2": None, "score_v2": None,
+                              "s_rules": sorted(rules)})
+    return tier
 
 
 def distinct_price_leg(candidate, previous) -> bool:
@@ -126,7 +140,7 @@ class Engine:
             self.cool_since.pop(key, None)
             best = max(valid, key=lambda c: c.score)
             if self.quality.mode != 'off':
-                phase = 'POTENTIAL' if best.setup.building else 'ACTIVE'
+                phase = 'POTENTIAL' if best.setup and best.setup.building else 'ACTIVE'
                 policy = evaluate(best, disabled=self.quality.disabled_rules)
                 quality_decisions[(snap.symbol,snap.at,best.option.symbol)] = policy
                 self.store.quality_shadow(best,policy,phase)
@@ -167,24 +181,54 @@ class Engine:
             if close - snap.at <= timedelta(minutes=cfg.entry_cutoff_minutes):
                 self.store.decision(snap, "RUNNER", "entry cutoff; tracking only", best)
                 continue
-            phase = "POTENTIAL" if best.setup.building else "ACTIVE"
-            last = self.store.last_alert(*key, phase)
-            watch = self.store.last_alert(*key, "POTENTIAL") if phase == "ACTIVE" else None
-            if last and last["side"] == best.option.side and key not in self.rearmed:
+            phase = "POTENTIAL" if best.setup and best.setup.building else "ACTIVE"
+            expiry = best.option.expiry.isoformat()
+            if cfg.hybrid:
+                fire_n = self.store.count_direction(snap.day,snap.symbol,best.option.side,expiry)+1
+                best.metrics["fire_n"] = fire_n
+                if fire_n > 1:
+                    fire_penalty = 3 if fire_n == 2 else 6
+                    best.parts["pen_fire_n"] = -fire_penalty
+                    best.score -= fire_penalty
+                prior = self.store.last_alert(snap.day,snap.symbol,"ACTIVE",
+                    best.option.side,expiry,exclude_tier_c=True)
+                if (prior and snap.at-datetime.fromisoformat(prior["at"]) < timedelta(minutes=30)):
+                    best.parts["pen_repeat"] = -cfg.repeat_penalty
+                    best.score -= cfg.repeat_penalty
+                    best.metrics["repeat_number"] = fire_n
+                if best.score < cfg.min_score:
+                    self.store.decision(snap,"RESEARCH","hybrid score below floor after repeat",best)
+                    continue
+                policy = evaluate(best, disabled=self.quality.disabled_rules)
+                hybrid_tier(best,policy,cfg)
+            last = self.store.last_alert(*key, phase,
+                side=best.option.side if cfg.hybrid else None,
+                expiry=expiry if cfg.hybrid else None,
+                exclude_tier_c=bool(cfg.hybrid))
+            watch = (self.store.last_alert(*key, "POTENTIAL",
+                     side=best.option.side if cfg.hybrid else None,
+                     expiry=expiry if cfg.hybrid else None)
+                     if phase == "ACTIVE" else None)
+            if last and last["side"] == best.option.side and (cfg.hybrid or key not in self.rearmed):
                 if not distinct_price_leg(best, last):
                     self.store.decision(snap, "RUNNER", "same price leg already alerted", best)
+                    continue
+            if cfg.hybrid and best.metrics["tier"] == "C":
+                prior_c = self.store.last_alert(*key, phase, side=best.option.side, expiry=expiry)
+                if prior_c and prior_c["quality_tier"] == "C" and not distinct_price_leg(best,prior_c):
+                    self.store.decision(snap,"RESEARCH","same internal C-tier price leg",best)
                     continue
             promotion = bool(phase == "ACTIVE" and watch and watch["side"] == best.option.side
                              and (not last or watch["at"] > last["at"]))
             best.state = "ACTIVATION" if promotion else "RUNNER" if last else "IGNITION"
-            if phase == 'ACTIVE' and self.quality.mode == 'enforce':
+            if phase == 'ACTIVE' and self.quality.mode == 'enforce' and not cfg.hybrid:
                 policy = quality_decisions[(snap.symbol,snap.at,best.option.symbol)]
                 if policy.tier == 'RESEARCH':
                     reason = 'Model S research only: ' + ', '.join(policy.reasons)
                     self.store.research_candidate(best,reason)
                     self.store.decision(snap,'RESEARCH',reason,best)
                     continue
-            elif phase == "ACTIVE" and cfg.active_quality_gate:
+            elif phase == "ACTIVE" and cfg.active_quality_gate and not cfg.hybrid:
                 reason = active_quality_reason(best)
                 if reason:
                     self.store.research_candidate(best, reason)
@@ -201,13 +245,18 @@ class Engine:
                     or (cfg.max_alerts_per_ticker and self.store.count(snap.day, snap.symbol) >= cfg.max_alerts_per_ticker)):
                 self.store.decision(snap, candidate.state, "alert budget/ranking suppressed", candidate)
                 continue
-            phase = "POTENTIAL" if candidate.setup.building else "ACTIVE"
+            phase = "POTENTIAL" if candidate.setup and candidate.setup.building else "ACTIVE"
             last = self.store.last_alert(snap.day, snap.symbol, "POTENTIAL")
             parent_id = (last["id"] if candidate.state == "ACTIVATION" and last else None)
             policy = (quality_decisions.get((snap.symbol,snap.at,candidate.option.symbol))
-                      if self.quality.mode == 'enforce' and phase == 'ACTIVE' else None)
+                      if self.quality.mode == 'enforce' and phase == 'ACTIVE' and not cfg.hybrid else None)
+            if cfg.send_requote:
+                candidate.metrics["send_requote"] = 1
             payload = alert_payload(candidate, phase, parent_id, quality=policy)
-            ident = self.store.queue(candidate, payload, self.dry_run, phase, parent_id, quality=policy)
+            tier = candidate.metrics.get("tier") if cfg.hybrid else None
+            ident = self.store.queue(candidate, payload, self.dry_run, phase, parent_id,
+                                     quality=policy, tier=tier,
+                                     sendable=not cfg.hybrid or tier in cfg.send_tiers)
             self.rearmed.discard((snap.day, snap.symbol))
             self.store.decision(snap, candidate.state, f"{phase.lower()} alert {ident}", candidate)
             alerts.append({"id": ident, "phase": phase, "parent_id": parent_id, "payload": payload})

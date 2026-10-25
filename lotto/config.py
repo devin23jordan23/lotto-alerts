@@ -1,13 +1,20 @@
 from dataclasses import dataclass
 from math import isfinite
 
-STRATEGY_VERSION = "phase2-model-s-direct-quote-opening-2026-10-19"
+STRATEGY_VERSION = "phase2-stock-led-v1-2026-10-25"
 
 
 @dataclass(frozen=True)
 class Settings:
     # Research defaults, not fitted probabilities or proven thresholds.
     min_score: float = 70
+    hybrid: int = 0
+    soft_blocks: int = 0
+    repeat_penalty: int = 10
+    tier_a: float = 91
+    tier_b: float = 81
+    send_tiers: str = "AB"
+    send_requote: int = 0
     min_pace_rvol: float = 2.0
     min_local_rvol: float = 1.2
     min_local_acceleration: float = 1.2
@@ -39,8 +46,15 @@ class Settings:
     active_quality_gate: int = 1  # Keep excluded ideas in candidate/decision history.
 
     def __post_init__(self):
-        if any(not isfinite(value) for value in vars(self).values()):
+        if any(not isfinite(value) for value in vars(self).values() if isinstance(value, (int, float))):
             raise ValueError("Settings must be finite")
+        if (self.hybrid not in (0, 1) or self.soft_blocks not in (0, 1)
+                or self.send_requote not in (0, 1) or self.repeat_penalty < 0
+                or self.send_tiers not in ("A", "AB", "ABC")
+                or not 0 < self.tier_b < self.tier_a <= 100):
+            raise ValueError("Invalid hybrid or tier setting")
+        if self.hybrid and (self.min_score > 60 or not self.soft_blocks):
+            raise ValueError("Hybrid requires LOTTO_MIN_SCORE <= 60 and LOTTO_SOFT_BLOCKS=1")
         if not 0 < self.min_score <= 100 or min(self.min_pace_rvol,self.min_local_rvol,self.min_local_acceleration,self.min_range_atr,self.min_option_acceleration) <= 0:
             raise ValueError("Invalid score or RVOL threshold")
         for name in ("confirmation_minutes", "rearm_minutes",
