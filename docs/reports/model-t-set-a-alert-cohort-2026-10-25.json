@@ -1,0 +1,744 @@
+{
+  "definition": "sent ACTIVE alerts, ask at alert, fresh sampled bids in next 30m",
+  "n": 340,
+  "missing_candidate": 0,
+  "missing_quote_path": 0,
+  "all": {
+    "n": 340,
+    "clean28": 0.2971,
+    "clean35": 0.3441,
+    "peak40": 0.3853,
+    "peak100": 0.1382
+  },
+  "by_day": {
+    "2026-10-07": {
+      "n": 28,
+      "clean28": 0.2857,
+      "clean35": 0.3929,
+      "peak40": 0.4643,
+      "peak100": 0.1429
+    },
+    "2026-10-08": {
+      "n": 43,
+      "clean28": 0.186,
+      "clean35": 0.2326,
+      "peak40": 0.2558,
+      "peak100": 0.093
+    },
+    "2026-10-09": {
+      "n": 35,
+      "clean28": 0.2571,
+      "clean35": 0.3143,
+      "peak40": 0.3714,
+      "peak100": 0.2286
+    },
+    "2026-10-12": {
+      "n": 18,
+      "clean28": 0.2222,
+      "clean35": 0.2778,
+      "peak40": 0.3889,
+      "peak100": 0.0556
+    },
+    "2026-10-13": {
+      "n": 29,
+      "clean28": 0.0345,
+      "clean35": 0.0345,
+      "peak40": 0.069,
+      "peak100": 0.0
+    },
+    "2026-10-14": {
+      "n": 61,
+      "clean28": 0.2951,
+      "clean35": 0.3607,
+      "peak40": 0.4262,
+      "peak100": 0.082
+    },
+    "2026-10-15": {
+      "n": 54,
+      "clean28": 0.2778,
+      "clean35": 0.2778,
+      "peak40": 0.2778,
+      "peak100": 0.1111
+    },
+    "2026-10-16": {
+      "n": 72,
+      "clean28": 0.5278,
+      "clean35": 0.5833,
+      "peak40": 0.6111,
+      "peak100": 0.2639
+    }
+  },
+  "by_half": {
+    "H1": {
+      "n": 71,
+      "clean28": 0.2254,
+      "clean35": 0.2958,
+      "peak40": 0.338,
+      "peak100": 0.1127
+    },
+    "H2": {
+      "n": 269,
+      "clean28": 0.316,
+      "clean35": 0.3569,
+      "peak40": 0.3978,
+      "peak100": 0.145
+    }
+  },
+  "filters": {
+    "intraday_reversal": {
+      "removed": {
+        "n": 11,
+        "clean28": 0.0909,
+        "clean35": 0.0909,
+        "peak40": 0.0909,
+        "peak100": 0.0
+      },
+      "kept": {
+        "n": 329,
+        "clean28": 0.304,
+        "clean35": 0.3526,
+        "peak40": 0.3951,
+        "peak100": 0.1429
+      },
+      "removed_winners": [],
+      "by_half": {
+        "H1": {
+          "removed": {
+            "n": 5,
+            "clean28": 0.0,
+            "clean35": 0.0,
+            "peak40": 0.0,
+            "peak100": 0.0
+          },
+          "kept": {
+            "n": 66,
+            "clean28": 0.2424,
+            "clean35": 0.3182,
+            "peak40": 0.3636,
+            "peak100": 0.1212
+          }
+        },
+        "H2": {
+          "removed": {
+            "n": 6,
+            "clean28": 0.1667,
+            "clean35": 0.1667,
+            "peak40": 0.1667,
+            "peak100": 0.0
+          },
+          "kept": {
+            "n": 263,
+            "clean28": 0.3194,
+            "clean35": 0.3612,
+            "peak40": 0.403,
+            "peak100": 0.1483
+          }
+        }
+      }
+    },
+    "one_dte": {
+      "removed": {
+        "n": 89,
+        "clean28": 0.1798,
+        "clean35": 0.1798,
+        "peak40": 0.1798,
+        "peak100": 0.0337
+      },
+      "kept": {
+        "n": 251,
+        "clean28": 0.3386,
+        "clean35": 0.4024,
+        "peak40": 0.4582,
+        "peak100": 0.1753
+      },
+      "removed_winners": [
+        {
+          "day": "2026-10-08",
+          "symbol": "NVDA",
+          "at": "2026-10-08T16:50:17.555476+00:00",
+          "contract": "NVDA  261009P00232500",
+          "clean28": true,
+          "peak_pct": 100
+        },
+        {
+          "day": "2026-10-08",
+          "symbol": "MU",
+          "at": "2026-10-08T16:51:03.339399+00:00",
+          "contract": "MU    261009P01025000",
+          "clean28": true,
+          "peak_pct": 210
+        },
+        {
+          "day": "2026-10-15",
+          "symbol": "AMD",
+          "at": "2026-10-15T19:00:15.669640+00:00",
+          "contract": "AMD   261016C00575000",
+          "clean28": true,
+          "peak_pct": 126
+        }
+      ],
+      "by_half": {
+        "H1": {
+          "removed": {
+            "n": 33,
+            "clean28": 0.2121,
+            "clean35": 0.2121,
+            "peak40": 0.2121,
+            "peak100": 0.0606
+          },
+          "kept": {
+            "n": 38,
+            "clean28": 0.2368,
+            "clean35": 0.3684,
+            "peak40": 0.4474,
+            "peak100": 0.1579
+          }
+        },
+        "H2": {
+          "removed": {
+            "n": 56,
+            "clean28": 0.1607,
+            "clean35": 0.1607,
+            "peak40": 0.1607,
+            "peak100": 0.0179
+          },
+          "kept": {
+            "n": 213,
+            "clean28": 0.3568,
+            "clean35": 0.4085,
+            "peak40": 0.4601,
+            "peak100": 0.1784
+          }
+        }
+      }
+    },
+    "against_open": {
+      "removed": {
+        "n": 17,
+        "clean28": 0.0588,
+        "clean35": 0.1176,
+        "peak40": 0.1176,
+        "peak100": 0.0
+      },
+      "kept": {
+        "n": 323,
+        "clean28": 0.3096,
+        "clean35": 0.356,
+        "peak40": 0.3994,
+        "peak100": 0.1455
+      },
+      "removed_winners": [],
+      "by_half": {
+        "H1": {
+          "removed": {
+            "n": 6,
+            "clean28": 0.0,
+            "clean35": 0.1667,
+            "peak40": 0.1667,
+            "peak100": 0.0
+          },
+          "kept": {
+            "n": 65,
+            "clean28": 0.2462,
+            "clean35": 0.3077,
+            "peak40": 0.3538,
+            "peak100": 0.1231
+          }
+        },
+        "H2": {
+          "removed": {
+            "n": 11,
+            "clean28": 0.0909,
+            "clean35": 0.0909,
+            "peak40": 0.0909,
+            "peak100": 0.0
+          },
+          "kept": {
+            "n": 258,
+            "clean28": 0.3256,
+            "clean35": 0.3682,
+            "peak40": 0.4109,
+            "peak100": 0.1512
+          }
+        }
+      }
+    },
+    "rvol_below_0_8": {
+      "removed": {
+        "n": 19,
+        "clean28": 0.1579,
+        "clean35": 0.2105,
+        "peak40": 0.2632,
+        "peak100": 0.1053
+      },
+      "kept": {
+        "n": 321,
+        "clean28": 0.3053,
+        "clean35": 0.352,
+        "peak40": 0.3925,
+        "peak100": 0.1402
+      },
+      "removed_winners": [
+        {
+          "day": "2026-10-16",
+          "symbol": "IWM",
+          "at": "2026-10-16T15:09:07.607781+00:00",
+          "contract": "IWM   261016P00273000",
+          "clean28": true,
+          "peak_pct": 100
+        },
+        {
+          "day": "2026-10-16",
+          "symbol": "AMD",
+          "at": "2026-10-16T17:05:55.242287+00:00",
+          "contract": "AMD   261016P00530000",
+          "clean28": true,
+          "peak_pct": 638
+        }
+      ],
+      "by_half": {
+        "H1": {
+          "removed": {
+            "n": 3,
+            "clean28": 0.0,
+            "clean35": 0.0,
+            "peak40": 0.0,
+            "peak100": 0.0
+          },
+          "kept": {
+            "n": 68,
+            "clean28": 0.2353,
+            "clean35": 0.3088,
+            "peak40": 0.3529,
+            "peak100": 0.1176
+          }
+        },
+        "H2": {
+          "removed": {
+            "n": 16,
+            "clean28": 0.1875,
+            "clean35": 0.25,
+            "peak40": 0.3125,
+            "peak100": 0.125
+          },
+          "kept": {
+            "n": 253,
+            "clean28": 0.3241,
+            "clean35": 0.3636,
+            "peak40": 0.4032,
+            "peak100": 0.1462
+          }
+        }
+      }
+    },
+    "pace_climax": {
+      "removed": {
+        "n": 117,
+        "clean28": 0.3077,
+        "clean35": 0.359,
+        "peak40": 0.3932,
+        "peak100": 0.1282
+      },
+      "kept": {
+        "n": 223,
+        "clean28": 0.2915,
+        "clean35": 0.3363,
+        "peak40": 0.3812,
+        "peak100": 0.1435
+      },
+      "removed_winners": [
+        {
+          "day": "2026-10-07",
+          "symbol": "MU",
+          "at": "2026-10-07T14:22:59.686362+00:00",
+          "contract": "MU    261007C01070000",
+          "clean28": true,
+          "peak_pct": 111
+        },
+        {
+          "day": "2026-10-08",
+          "symbol": "NVDA",
+          "at": "2026-10-08T16:50:17.555476+00:00",
+          "contract": "NVDA  261009P00232500",
+          "clean28": true,
+          "peak_pct": 100
+        },
+        {
+          "day": "2026-10-08",
+          "symbol": "MU",
+          "at": "2026-10-08T16:51:03.339399+00:00",
+          "contract": "MU    261009P01025000",
+          "clean28": true,
+          "peak_pct": 210
+        },
+        {
+          "day": "2026-10-08",
+          "symbol": "QQQ",
+          "at": "2026-10-08T16:53:05.859017+00:00",
+          "contract": "QQQ   261008P00746000",
+          "clean28": false,
+          "peak_pct": 102
+        },
+        {
+          "day": "2026-10-08",
+          "symbol": "IWM",
+          "at": "2026-10-08T16:56:26.947423+00:00",
+          "contract": "IWM   261008C00277000",
+          "clean28": false,
+          "peak_pct": 150
+        },
+        {
+          "day": "2026-10-09",
+          "symbol": "GOOGL",
+          "at": "2026-10-09T15:40:39.709013+00:00",
+          "contract": "GOOGL 261009C00352500",
+          "clean28": true,
+          "peak_pct": 187
+        },
+        {
+          "day": "2026-10-14",
+          "symbol": "AMD",
+          "at": "2026-10-14T16:12:34.721901+00:00",
+          "contract": "AMD   261014P00570000",
+          "clean28": true,
+          "peak_pct": 155
+        },
+        {
+          "day": "2026-10-15",
+          "symbol": "IWM",
+          "at": "2026-10-15T14:04:13.358503+00:00",
+          "contract": "IWM   261015C00273000",
+          "clean28": true,
+          "peak_pct": 120
+        },
+        {
+          "day": "2026-10-16",
+          "symbol": "NVDA",
+          "at": "2026-10-16T14:23:27.283579+00:00",
+          "contract": "NVDA  261016C00220000",
+          "clean28": true,
+          "peak_pct": 105
+        },
+        {
+          "day": "2026-10-16",
+          "symbol": "INTC",
+          "at": "2026-10-16T14:55:16.393417+00:00",
+          "contract": "INTC  261016P00092500",
+          "clean28": true,
+          "peak_pct": 144
+        },
+        {
+          "day": "2026-10-16",
+          "symbol": "AMD",
+          "at": "2026-10-16T14:55:58.426776+00:00",
+          "contract": "AMD   261016P00535000",
+          "clean28": true,
+          "peak_pct": 200
+        },
+        {
+          "day": "2026-10-16",
+          "symbol": "PLTR",
+          "at": "2026-10-16T15:06:06.802319+00:00",
+          "contract": "PLTR  261016P00190000",
+          "clean28": true,
+          "peak_pct": 232
+        },
+        {
+          "day": "2026-10-16",
+          "symbol": "SPX",
+          "at": "2026-10-16T15:09:12.577819+00:00",
+          "contract": "SPXW  261016P07695000",
+          "clean28": true,
+          "peak_pct": 107
+        },
+        {
+          "day": "2026-10-16",
+          "symbol": "HOOD",
+          "at": "2026-10-16T17:02:11.701535+00:00",
+          "contract": "HOOD  261016P00100000",
+          "clean28": true,
+          "peak_pct": 107
+        },
+        {
+          "day": "2026-10-16",
+          "symbol": "META",
+          "at": "2026-10-16T17:09:01.167033+00:00",
+          "contract": "META  261016P00710000",
+          "clean28": true,
+          "peak_pct": 176
+        }
+      ],
+      "by_half": {
+        "H1": {
+          "removed": {
+            "n": 34,
+            "clean28": 0.3235,
+            "clean35": 0.4118,
+            "peak40": 0.4412,
+            "peak100": 0.1471
+          },
+          "kept": {
+            "n": 37,
+            "clean28": 0.1351,
+            "clean35": 0.1892,
+            "peak40": 0.2432,
+            "peak100": 0.0811
+          }
+        },
+        "H2": {
+          "removed": {
+            "n": 83,
+            "clean28": 0.3012,
+            "clean35": 0.3373,
+            "peak40": 0.3735,
+            "peak100": 0.1205
+          },
+          "kept": {
+            "n": 186,
+            "clean28": 0.3226,
+            "clean35": 0.3656,
+            "peak40": 0.4086,
+            "peak100": 0.1559
+          }
+        }
+      }
+    },
+    "all_spec_vetoes": {
+      "components": [
+        "intraday_reversal",
+        "one_dte",
+        "against_open",
+        "rvol_below_0_8",
+        "pace_climax"
+      ],
+      "removed": {
+        "n": 201,
+        "clean28": 0.2289,
+        "clean35": 0.2687,
+        "peak40": 0.2935,
+        "peak100": 0.0896
+      },
+      "kept": {
+        "n": 139,
+        "clean28": 0.3957,
+        "clean35": 0.4532,
+        "peak40": 0.518,
+        "peak100": 0.2086
+      },
+      "removed_plus100": 18,
+      "removed_clean28": 46,
+      "by_half": {
+        "H1": {
+          "removed": {
+            "n": 53,
+            "clean28": 0.2075,
+            "clean35": 0.283,
+            "peak40": 0.3019,
+            "peak100": 0.0943
+          },
+          "kept": {
+            "n": 18,
+            "clean28": 0.2778,
+            "clean35": 0.3333,
+            "peak40": 0.4444,
+            "peak100": 0.1667
+          }
+        },
+        "H2": {
+          "removed": {
+            "n": 148,
+            "clean28": 0.2365,
+            "clean35": 0.2635,
+            "peak40": 0.2905,
+            "peak100": 0.0878
+          },
+          "kept": {
+            "n": 121,
+            "clean28": 0.4132,
+            "clean35": 0.4711,
+            "peak40": 0.5289,
+            "peak100": 0.2149
+          }
+        }
+      }
+    },
+    "without_pace": {
+      "components": [
+        "intraday_reversal",
+        "one_dte",
+        "against_open",
+        "rvol_below_0_8"
+      ],
+      "removed": {
+        "n": 113,
+        "clean28": 0.1681,
+        "clean35": 0.1858,
+        "peak40": 0.1947,
+        "peak100": 0.0442
+      },
+      "kept": {
+        "n": 227,
+        "clean28": 0.3612,
+        "clean35": 0.4229,
+        "peak40": 0.4802,
+        "peak100": 0.185
+      },
+      "removed_plus100": 5,
+      "removed_clean28": 19,
+      "by_half": {
+        "H1": {
+          "removed": {
+            "n": 38,
+            "clean28": 0.1842,
+            "clean35": 0.2105,
+            "peak40": 0.2105,
+            "peak100": 0.0526
+          },
+          "kept": {
+            "n": 33,
+            "clean28": 0.2727,
+            "clean35": 0.3939,
+            "peak40": 0.4848,
+            "peak100": 0.1818
+          }
+        },
+        "H2": {
+          "removed": {
+            "n": 75,
+            "clean28": 0.16,
+            "clean35": 0.1733,
+            "peak40": 0.1867,
+            "peak100": 0.04
+          },
+          "kept": {
+            "n": 194,
+            "clean28": 0.3763,
+            "clean35": 0.4278,
+            "peak40": 0.4794,
+            "peak100": 0.1856
+          }
+        }
+      }
+    },
+    "reversal_and_against_open": {
+      "components": [
+        "intraday_reversal",
+        "against_open"
+      ],
+      "removed": {
+        "n": 18,
+        "clean28": 0.0556,
+        "clean35": 0.1111,
+        "peak40": 0.1111,
+        "peak100": 0.0
+      },
+      "kept": {
+        "n": 322,
+        "clean28": 0.3106,
+        "clean35": 0.3571,
+        "peak40": 0.4006,
+        "peak100": 0.146
+      },
+      "removed_plus100": 0,
+      "removed_clean28": 1,
+      "by_half": {
+        "H1": {
+          "removed": {
+            "n": 6,
+            "clean28": 0.0,
+            "clean35": 0.1667,
+            "peak40": 0.1667,
+            "peak100": 0.0
+          },
+          "kept": {
+            "n": 65,
+            "clean28": 0.2462,
+            "clean35": 0.3077,
+            "peak40": 0.3538,
+            "peak100": 0.1231
+          }
+        },
+        "H2": {
+          "removed": {
+            "n": 12,
+            "clean28": 0.0833,
+            "clean35": 0.0833,
+            "peak40": 0.0833,
+            "peak100": 0.0
+          },
+          "kept": {
+            "n": 257,
+            "clean28": 0.3268,
+            "clean35": 0.3696,
+            "peak40": 0.4125,
+            "peak100": 0.1518
+          }
+        }
+      }
+    }
+  },
+  "tier_a_proposal": {
+    "H1": {
+      "n": 20,
+      "clean28": 0.25,
+      "clean35": 0.35,
+      "peak40": 0.35,
+      "peak100": 0.15
+    },
+    "H2": {
+      "n": 113,
+      "clean28": 0.3805,
+      "clean35": 0.4248,
+      "peak40": 0.469,
+      "peak100": 0.1593
+    }
+  },
+  "tier_a_proposal_with_flow": {
+    "H1": {
+      "n": 16,
+      "clean28": 0.25,
+      "clean35": 0.3125,
+      "peak40": 0.3125,
+      "peak100": 0.0625
+    },
+    "H2": {
+      "n": 90,
+      "clean28": 0.3889,
+      "clean35": 0.4333,
+      "peak40": 0.4667,
+      "peak100": 0.1889
+    }
+  },
+  "tier_b_proposal": {
+    "H1": {
+      "n": 7,
+      "clean28": 0.2857,
+      "clean35": 0.2857,
+      "peak40": 0.5714,
+      "peak100": 0.2857
+    },
+    "H2": {
+      "n": 13,
+      "clean28": 0.1538,
+      "clean35": 0.2308,
+      "peak40": 0.2308,
+      "peak100": 0.0769
+    }
+  },
+  "tier_b_proposal_with_flow": {
+    "H1": {
+      "n": 1,
+      "clean28": 0.0,
+      "clean35": 0.0,
+      "peak40": 1.0,
+      "peak100": 1.0
+    },
+    "H2": {
+      "n": 10,
+      "clean28": 0.2,
+      "clean35": 0.3,
+      "peak40": 0.3,
+      "peak100": 0.1
+    }
+  }
+}
