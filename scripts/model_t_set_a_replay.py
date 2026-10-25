@@ -20,10 +20,11 @@ def finite_number(value):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-def grade(quotes, at, ask, stop):
+def grade(quotes, at, ask, stop, required_observations=1):
     seen = set()
     ordered = []
-    for observed_at, quote_time, bid in quotes:
+    for quote in quotes:
+        observed_at, quote_time, bid = quote[:3]
         if not bid or bid <= 0 or quote_time in seen:
             continue
         seen.add(quote_time)
@@ -33,11 +34,18 @@ def grade(quotes, at, ask, stop):
     ordered.sort()
     if not ordered:
         return None
-    first_target = next((time for time, gain in ordered if gain >= .4), None)
-    first_stop = next((time for time, gain in ordered if gain <= -stop), None)
+    def first_confirmed(predicate):
+        for index in range(required_observations - 1, len(ordered)):
+            window = ordered[index - required_observations + 1:index + 1]
+            if all(predicate(gain) for _, gain in window) and (window[-1][0] - window[0][0]).total_seconds() <= 180:
+                return window[-1][0]
+        return None
+    first_target = first_confirmed(lambda gain: gain >= .4)
+    first_stop = first_confirmed(lambda gain: gain <= -stop)
     return {
         "clean": first_target is not None and (first_stop is None or first_target < first_stop),
         "peak40": any(gain >= .4 for _, gain in ordered),
+        "confirmed40": first_target is not None,
         "peak100": any(gain >= 1 for _, gain in ordered),
         "stop_first": first_stop is not None and (first_target is None or first_stop <= first_target),
         "peak": max(gain for _, gain in ordered),
@@ -55,8 +63,9 @@ def flags(row):
     flow = metrics.get("options_persistent_20m")
     return {
         "intraday_reversal": setup == "INTRADAY_REVERSAL",
+        "general_reversal": setup in {"REVERSAL", "INTRADAY_REVERSAL"},
         "one_dte": row["dte"] == 1,
-        "against_open": trend is not None and trend < 0 and setup != "REVERSAL",
+        "against_open": trend is not None and trend < 0 and setup not in {"REVERSAL", "INTRADAY_REVERSAL"},
         "rvol_below_0_8": rv is not None and rv < .8,
         "pace_climax": pace is not None and pace > 1.015,
         "tier_a_proposal": trend is not None and trend >= .4 and vwap is not None and vwap >= .3 and rv is not None and rv >= .8,
@@ -69,13 +78,29 @@ def aggregate(rows):
     n = len(rows)
     if not n:
         return {"n": 0}
-    return {
+    result = {
         "n": n,
         "clean28": round(sum(r["grade28"]["clean"] for r in rows) / n, 4),
         "clean35": round(sum(r["grade35"]["clean"] for r in rows) / n, 4),
         "peak40": round(sum(r["grade28"]["peak40"] for r in rows) / n, 4),
         "peak100": round(sum(r["grade28"]["peak100"] for r in rows) / n, 4),
     }
+    for key in ("grade28_sustained", "grade28_plus2"):
+        observed = [r[key] for r in rows if r.get(key) is not None]
+        result[key] = {"n": len(observed),
+                       "clean": round(sum(r["clean"] for r in observed) / len(observed), 4) if observed else None}
+    return result
+
+
+def plus_two_entry(quotes, alert_at):
+    """First fresh observed ask 2–4 minutes after the alert; no future quote backfill."""
+    start = alert_at + timedelta(minutes=2)
+    end = alert_at + timedelta(minutes=4)
+    for observed_at, quote_time, _bid, ask in quotes:
+        observed, quoted = dt(observed_at), dt(quote_time)
+        if start <= observed <= end and ask and ask > 0 and 0 <= (observed - quoted).total_seconds() <= 90:
+            return observed, ask
+    return None
 
 
 def run(db):
@@ -100,12 +125,15 @@ def run(db):
             continue
         features = json.loads(candidate["features"])
         at = dt(alert["at"])
-        path = con.execute("""SELECT at,quote_time,bid FROM quote_paths
+        path = con.execute("""SELECT at,quote_time,bid,ask FROM quote_paths
             WHERE contract=? AND day=? AND at>=? AND at<=? ORDER BY at""",
             (alert["contract"], alert["day"], alert["at"],
-             (at + timedelta(minutes=30)).isoformat())).fetchall()
+             (at + timedelta(minutes=34)).isoformat())).fetchall()
         g28 = grade(path, at, ask, .28)
         g35 = grade(path, at, ask, .35)
+        sustained = grade(path, at, ask, .28, required_observations=2)
+        late_entry = plus_two_entry(path, at)
+        late = grade(path, late_entry[0], late_entry[1], .28) if late_entry else None
         if g28 is None or g35 is None:
             missing_path += 1
             continue
@@ -115,10 +143,11 @@ def run(db):
         row = {"day": alert["day"], "symbol": alert["symbol"], "contract": alert["contract"],
                "at": alert["at"], "setup": setup,
                "metrics": features.get("metrics") or {}, "dte": (expiry - day).days,
-               "grade28": g28, "grade35": g35}
+               "grade28": g28, "grade35": g35,
+               "grade28_sustained": sustained, "grade28_plus2": late}
         row["flags"] = flags(row)
         all_rows.append(row)
-    summary = {"definition": "sent ACTIVE alerts, ask at alert, fresh sampled bids in next 30m",
+    summary = {"definition": "sent ACTIVE alerts; sampled bids within 30m of each entry; sustained requires two consecutive fresh observations within 3m; +2m entry uses first fresh ask observed 2–4m after alert",
                "n": len(all_rows), "missing_candidate": missing_candidate,
                "missing_quote_path": missing_path,
                "all": aggregate(all_rows), "by_day": {}, "by_half": {}, "filters": {}}
@@ -128,7 +157,7 @@ def run(db):
               "H2": [r for r in all_rows if r["day"] >= "2026-10-09"]}
     for half, rows in halves.items():
         summary["by_half"][half] = aggregate(rows)
-    for name in ("intraday_reversal", "one_dte", "against_open", "rvol_below_0_8", "pace_climax"):
+    for name in ("intraday_reversal", "general_reversal", "one_dte", "against_open", "rvol_below_0_8", "pace_climax"):
         selected = [r for r in all_rows if r["flags"][name]]
         kept = [r for r in all_rows if not r["flags"][name]]
         summary["filters"][name] = {
@@ -153,6 +182,10 @@ def run(db):
             "removed": aggregate(removed), "kept": aggregate(kept),
             "removed_plus100": sum(r["grade28"]["peak100"] for r in removed),
             "removed_clean28": sum(r["grade28"]["clean"] for r in removed),
+            "by_day": {day: {
+                "removed": aggregate([r for r in removed if r["day"] == day]),
+                "kept": aggregate([r for r in kept if r["day"] == day]),
+            } for day in sorted({r["day"] for r in all_rows})},
             "by_half": {half: {
                 "removed": aggregate([r for r in rows if any(r["flags"][c] for c in components)]),
                 "kept": aggregate([r for r in rows if not any(r["flags"][c] for c in components)]),

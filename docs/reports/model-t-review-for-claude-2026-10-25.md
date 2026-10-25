@@ -1,125 +1,39 @@
-# Model T review for Claude and Andre — Oct 25, 2026
+# Model T review for Andre and Claude — corrected Oct 25, 2026
 
-**Status:** research branch only. No Model T production code, flag, deployment,
-or alert behavior was changed. Source spec:
-`/Users/owner/Downloads/MODEL-T-SPEC-2026-10-25.md` rev 1.1.
+**Status:** research branch only. No Model T production logic or Railway setting changed in this review. The current Railway `lotto-alerts` deployment is ACTIVE and contains the earlier stock-first lane. No `LOTTO_STOCK_FIRST_*` override is set, so the code defaults to `enabled=true, mode=send`. Sunday logs show zero observed symbols, which is expected outside a trading session; they do not establish that Monday's alerts will work. Model S still controls the legacy priced lane. Model T is not live.
 
-## Decision
+## Decisions from Claude's response
 
-Keep Model T's architecture: discover stock setups first, merge independent
-option-flow discoveries, rank the **stock** move, and attach a contract last.
-Do **not** ship the rev 1.1 hard-veto list or A/B cut points unchanged. The
-spec itself says those tiers did not separate clean winners in H1. My
-independent alert-cohort replay finds the proposed pace-climax veto would
-remove many large winners.
+1. Withdraw the pace-persistence hard veto. On 340 sent ACTIVE alerts from Oct 7–16, the 117 it would remove had 30.8% clean +40-before-28 versus 29.1% kept and included 15 contracts that later doubled within 30 minutes. Its removed group was also stronger on the +2-minute ask entry check (30.2% versus 23.8%). This is not a useful blanket filter.
+2. Keep the four-rule stack *without* pace as a **demote-to-research candidate**, not a live delete. It kept 227/340 sends at 36.1% clean and removed 113 at 16.8%, while losing 5/47 doubling paths. Under two-consecutive-bid confirmation, kept was 33.0%, removed 13.3%; at a +2-minute ask, kept was 30.4%, removed 17.0%. These are overlapping, in-sample sent-alert comparisons, not an expected live hit rate.
+3. Do not declare the stack stable. Its day-level direction reverses on Oct 8 (removed 21%, kept 10%) and Oct 13 (removed 4%, kept 0%); Oct 14 has only one removed alert. H1 is **Oct 7–8 only**, not a broad first half. Rotate held-out days on the full candidate universe before setting tier cut points.
+4. `REVERSAL` and `INTRADAY_REVERSAL` both occur in the archive. The against-open exception now covers both. The corrected standalone against-open rule removes only 7 sent alerts, none clean at -28 and none with a +100% path; n=7 cannot justify a universal veto.
+5. The sent-alert sample is selected by the current option gates, so it cannot test whether sustained options flow rescues otherwise blocked ideas. Flow remains a candidate feature for the full replay.
+6. Andre's latest decision is **directional A/B only**, with a specific Fashionably Late scalp exception. Both legacy `REVERSAL` labels leave the proposed A/B lane. In this sent cohort that removes 36 alerts (22.2% clean versus 30.6% on 304 other alerts) but also removes three contracts that doubled: IWM Oct 8, GOOGL Oct 9 and MU Oct 12. Those losses are visible, not hidden. The Fashionably Late source audit is in `docs/reports/model-t-fashionably-late-source-audit-2026-10-25.md`: the long is a quick turn from a **low** into an upward 9 EMA/VWAP cross, the short mirrors from a **high**, and Grok's v3.15 code reverses those phase anchors. The original PDF's confirmed cross and Grok's pre-cross variant require separate replay. The ordinary reversal label cannot qualify an A/B idea by itself. This changes the proposed model, not today's live Model S behavior.
 
-## Reproducible stop-first check
+## What the corrected stock-event check can and cannot say
 
-`scripts/model_t_set_a_replay.py` ran read-only against the local archived
-`audit.sqlite3`. It found 340 sent ACTIVE alerts from Oct 7–16 with a matching
-candidate feature row and 30-minute quote path. Entry is the alert ask;
-subsequent sampled bids must be fresh, with +40% occurring before -28% or
--35%. This is a **sent-alert subset**, not Claude's 1,217 deduplicated
-opportunities or a replay of newly discovered stock events. H1 has 71 alerts,
-H2 has 269. The complete machine-readable result is in
-`docs/reports/model-t-set-a-alert-cohort-2026-10-25.json`.
+The local stock-path archive has 179 tracked symbol-days across Sep 25–Oct 16, not the full 60–106-name universe. **96** first appear after 09:32 ET, many at 09:35–09:40. For these, the replay suppresses all session-open, range-extreme and ORB features; it still evaluates prior-day and premarket level crossings. This is stricter than Claude's estimate of 26 late starts because even a 09:35 first row cannot establish the actual opening price or first three-minute range. META Oct 16 starts at 09:55 and must never be treated as an opening observation.
 
-| Rule removed from sends | Removed | Removed clean +40 before -28 | +100% paths removed | Kept clean rate |
-|---|---:|---:|---:|---:|
-| Intraday reversal | 11 | 1 | 0 | 30.4% |
-| Against open, excluding REVERSAL | 17 | 1 | 0 | 31.0% |
-| 1DTE | 89 | 16 | 3 | 33.9% |
-| Local RVOL < 0.8 | 19 | 3 | 2 | 30.5% |
-| **Pace persistence > 1.015** | **117** | **36** | **15** | **29.1%** |
+The script now reports the original +0.25/-0.15 daily-ATR stop-first grade, symmetric +0.25/-0.25 and +0.50/-0.50 daily-ATR grades, and a symmetric threshold using only prior observed one-minute volatility. It compares each event to a deterministic random minute on the same symbol/day/side and 30-minute clock bucket, excluding the event's five-minute neighborhood. These controls are descriptive: a random minute in a trend may fall *before* the breakout and is not a causal counterfactual. The event and control denominators differ where no matched minute or intraday-volatility history exists.
 
-Baseline is 340 alerts, 29.7% clean before -28%, 34.4% clean before -35%,
-and 47 contract paths reaching +100% at any point within 30 minutes.
-The pace-climax removed group was **30.8% clean** versus **29.1% kept**;
-it contains a META +176%, PLTR +232%, AMD +200%, and 12 other +100%
-paths. A blanket pace veto moves in the wrong direction on this cohort.
+| Event | N | +0.25/-0.25 ATR clean | Matched random minute |
+|---|---:|---:|---:|
+| Prior-day cross | 124 | 21.8% | 22.0% (n=123) |
+| Premarket cross | 183 | 20.8% | 25.4% (n=181) |
+| ORB3 cross | 115 | 16.5% | 25.2% |
+| ORB5 cross | 105 | 14.3% | 22.9% |
+| PUSH | 284 | 18.3% | 43.3% |
+| BASE_BREAK | 100 | 10.0% | 15.0% |
 
-The proposed five-veto stack keeps 139 alerts at 39.6% clean, but removes
-**18** +100% paths and **46** clean winners. Removing the pace veto from that
-stack keeps 227 alerts at 36.1% clean while losing only **5** +100% paths.
-That is a much better winner-preservation trade-off, but it is still an
-in-sample filter on existing alerts and cannot establish Model T's full
-performance. The reversal/against-open pair removes 18 alerts, loses no
-+100% paths, and removes one clean winner; the sample is too small to make
-either a universal veto without the full opportunity replay.
+These numbers **do not disqualify** base breaks, ORBs, or stock-first coverage. They show that scoring the instant of a raw cross as a priced entry is a poor proxy for a trade that waits for acceptance or the first pullback. Intraday-volatility grading changes the base-break rate to 36% (n=100), still below the matched control's 47%; the direction varies with how entry and stop are defined. We must grade the two timestamps separately: an immediate **STOCK THESIS**, then a later **ACTIVE TRADE IDEA** if acceptance or pullback produces a quoted entry. Never assign a hindsight option return to the thesis timestamp.
 
-The spec's A rule (trend >=0.4 ATR, VWAP distance >=0.3 ATR, RVOL >=0.8)
-graded 25.0% clean in H1 (n=20) and 38.1% in H2 (n=113). The proposed B
-rule had n=7 and n=13. These are not stable tier cut points. Sustained
-20-minute option activity in this **sent-alert subset** did not add clean
-separation to A in H1 (25% versus 25%); Claude's larger blocked-study
-comparison remains a separate hypothesis and should be reconciled row by row.
+## Build and replay order
 
-## Stock-event sanity check
+1. Make a read-only four-session snapshot replay for Oct 16/19/20/23. First reproduce real Model S alert IDs and timestamps per day. Count raw stock triggers, unique symbol/side/level setups, entries with a fresh option ask, and actual sends separately. Verify universe coverage by hour on Oct 16, including late-start names.
+2. Score full as-of levels: prior-day high/low, premarket high/low, ORB3/5, current day high/low, daily-range position and 15/30/60-minute bases. Compare immediate break, accepted break and first-pullback entries. Test opening variants O1–O4 separately. A missing bar may lower confidence, but should not erase an observable stock move.
+3. Test each contract-selection rule independently, including event-time and +2-minute ask, fresh single-bid versus two-observation bid, +40% before -28%/-35%, +100%/+300%, and 5/10/15/30/60-minute horizons. Preserve a list of every doubling path demoted by each rule and inspect Friday's 15 high-score losers row by row.
+4. Sweep event re-arm by price distance and new level rather than a fixed cooldown. Measure fetch-on-trigger against a warm strike ladder for actual entry delay and Schwab request load. No fixed sends/day cap.
+5. Fit directional A/B cut points on three days and grade the fourth, rotating all four. Separately reconstruct the actual Fashionably Late phase sequence from complete five-minute bars, then test its pre-cross, confirmed-cross and retest entries independently. Its illustrated 10:00–13:30 ET preferred window is **not** a “late-day” definition. Options flow can promote a qualified stock setup; a bad option quote cannot erase a stock thesis. Only the held-out stop-first and winner-retention results determine whether a priced A/B lane replaces Model S. Until then, the four-rule stack is shadow/demotion research.
 
-`scripts/model_t_stock_replay.py` independently parsed 63,263 archived
-stock-path rows from Sep 25–Oct 16. Twelve sessions had enough observations
-to grade an event. It used as-of prior-day, premarket, 3-minute ORB,
-5-minute ORB, fresh session extreme, and base-break levels. Dedupe is by
-symbol/side/setup/0.05-ATR level. The **stock-only** outcome is +0.25 ATR
-before -0.15 ATR within 30 minutes. This is deliberately **not** an option
-win-rate estimate, and it does not include Oct 19/20/23.
-
-| Raw stock event | Events | Further +0.25 ATR before -0.15 ATR |
-|---|---:|---:|
-| PUSH | 550 | 21.5% |
-| Prior-day level cross | 124 | 21.0% |
-| Premarket level cross | 183 | 20.8% |
-| ORB3 cross | 117 | 18.0% |
-| ORB5 cross | 107 | 14.0% |
-| Base break | 207 | 9.7% |
-
-These raw trigger rates show why **level touch/break alone cannot become an
-ACTIVE alert**. They also show that the current 0.25-ATR PUSH and 15-minute
-base rule are coverage generators, not complete quality rules. The next
-test must add as-of acceptance, range location, displacement, and market
-context one at a time, while naming every big mover each addition loses.
-Machine-readable details: `docs/reports/model-t-stock-events-2026-10-25.json`.
-
-Exploratory splits on these **overlapping stock events** further caution
-against copying intuitive weights into Model T. A 15-minute push >=0.25 ATR
-had 21.9% clean further +0.25 ATR versus 14.7% below it. Local RVOL >=0.8
-was 19.3% versus 14.0%. But being near the session range edge was 18.1%
-versus 22.7% elsewhere; VWAP on the trade side was 17.8% versus 29.0%; and
-five-minute market alignment was 16.1% versus 24.5%. Those latter comparison
-groups are small, overlap setup types, and include unknown values, so these
-are **not** evidence that opposing SPY or VWAP is good. They are evidence
-that neither should receive an automatic positive weight or become a veto
-without event-specific held-out testing. A level break is meaningful only in
-the context of where the stock is in its session move and what it does next.
-
-## Changes to the build spec before code promotion
-
-1. Make `STOCK THESIS` and `ACTIVE TRADE IDEA` distinct timestamps. A stock
-   level break can create a thesis without a contract. An ACTIVE card needs
-   measured stock continuation/acceptance and a current quote; its option
-   outcome begins at its own ask. An option defect cannot erase the thesis.
-2. Use prior-day high/low, premarket high/low, ORB3/5, current day high/low,
-   daily-range position, and 15/30/60-minute bases **as-of each bar**.
-   The current live `stock_first.py` does not consume all these levels.
-3. Treat reversal, 1DTE, low RVOL, and pace as candidate features/labels,
-   not production vetoes. In particular, reject the blanket pace-climax
-   veto pending a setup-specific, held-out result. Keep the stock thesis
-   visible even when a priced option is poor.
-4. Tier A/B must be fitted on stop-first outcomes and held-out days.
-   Do not copy the 91/81 Hybrid score or the rev 1.1 provisional stock
-   thresholds into production. Options flow may add confluence **after**
-   stock qualification; its weight needs the full study, not this subset.
-5. No fixed cooldown and no hard alerts/day cap. Dedupe the same event and
-   level; a new level or post-pullback leg may alert immediately.
-
-## Required proof before live switch
-
-Replay the four full-snapshot sessions Oct 16/19/20/23 for Model S, Hybrid
-replica, broad stock events, PUSH+BASE, and Model T. Grade the selected
-contract's event-time ask and +2-minute ask against fresh bids at
-5/10/15/30/60 minutes and close, +40% before -28%/-35%, and +100%/+300%.
-Show first eligible minute, sends/day, every +100% winner lost, and the
-Oct 23 PANW/CRWD/NET paths. Select cut points on three days and score the
-fourth; rotate. The test must count an unpriced stock watch separately from
-a priced ACTIVE idea. Only then should the model run in shadow alongside
-live Model S before a production switch.
+The local export ends before the full Oct 19/20/23 snapshots. They remain in the Railway database. A read-only export or remote replay is the next data dependency; do not imply this local diagnostic is the requested four-session proof.

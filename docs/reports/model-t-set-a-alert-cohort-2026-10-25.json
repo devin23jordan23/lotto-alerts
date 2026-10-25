@@ -1,5 +1,5 @@
 {
-  "definition": "sent ACTIVE alerts, ask at alert, fresh sampled bids in next 30m",
+  "definition": "sent ACTIVE alerts; sampled bids within 30m of each entry; sustained requires two consecutive fresh observations within 3m; +2m entry uses first fresh ask observed 2\u20134m after alert",
   "n": 340,
   "missing_candidate": 0,
   "missing_quote_path": 0,
@@ -8,7 +8,15 @@
     "clean28": 0.2971,
     "clean35": 0.3441,
     "peak40": 0.3853,
-    "peak100": 0.1382
+    "peak100": 0.1382,
+    "grade28_sustained": {
+      "n": 340,
+      "clean": 0.2647
+    },
+    "grade28_plus2": {
+      "n": 339,
+      "clean": 0.2596
+    }
   },
   "by_day": {
     "2026-10-07": {
@@ -16,56 +24,120 @@
       "clean28": 0.2857,
       "clean35": 0.3929,
       "peak40": 0.4643,
-      "peak100": 0.1429
+      "peak100": 0.1429,
+      "grade28_sustained": {
+        "n": 28,
+        "clean": 0.3214
+      },
+      "grade28_plus2": {
+        "n": 28,
+        "clean": 0.1786
+      }
     },
     "2026-10-08": {
       "n": 43,
       "clean28": 0.186,
       "clean35": 0.2326,
       "peak40": 0.2558,
-      "peak100": 0.093
+      "peak100": 0.093,
+      "grade28_sustained": {
+        "n": 43,
+        "clean": 0.1628
+      },
+      "grade28_plus2": {
+        "n": 43,
+        "clean": 0.2326
+      }
     },
     "2026-10-09": {
       "n": 35,
       "clean28": 0.2571,
       "clean35": 0.3143,
       "peak40": 0.3714,
-      "peak100": 0.2286
+      "peak100": 0.2286,
+      "grade28_sustained": {
+        "n": 35,
+        "clean": 0.2286
+      },
+      "grade28_plus2": {
+        "n": 35,
+        "clean": 0.1714
+      }
     },
     "2026-10-12": {
       "n": 18,
       "clean28": 0.2222,
       "clean35": 0.2778,
       "peak40": 0.3889,
-      "peak100": 0.0556
+      "peak100": 0.0556,
+      "grade28_sustained": {
+        "n": 18,
+        "clean": 0.1111
+      },
+      "grade28_plus2": {
+        "n": 18,
+        "clean": 0.2222
+      }
     },
     "2026-10-13": {
       "n": 29,
       "clean28": 0.0345,
       "clean35": 0.0345,
       "peak40": 0.069,
-      "peak100": 0.0
+      "peak100": 0.0,
+      "grade28_sustained": {
+        "n": 29,
+        "clean": 0.0345
+      },
+      "grade28_plus2": {
+        "n": 29,
+        "clean": 0.0345
+      }
     },
     "2026-10-14": {
       "n": 61,
       "clean28": 0.2951,
       "clean35": 0.3607,
       "peak40": 0.4262,
-      "peak100": 0.082
+      "peak100": 0.082,
+      "grade28_sustained": {
+        "n": 61,
+        "clean": 0.2787
+      },
+      "grade28_plus2": {
+        "n": 61,
+        "clean": 0.3279
+      }
     },
     "2026-10-15": {
       "n": 54,
       "clean28": 0.2778,
       "clean35": 0.2778,
       "peak40": 0.2778,
-      "peak100": 0.1111
+      "peak100": 0.1111,
+      "grade28_sustained": {
+        "n": 54,
+        "clean": 0.2222
+      },
+      "grade28_plus2": {
+        "n": 54,
+        "clean": 0.2407
+      }
     },
     "2026-10-16": {
       "n": 72,
       "clean28": 0.5278,
       "clean35": 0.5833,
       "peak40": 0.6111,
-      "peak100": 0.2639
+      "peak100": 0.2639,
+      "grade28_sustained": {
+        "n": 72,
+        "clean": 0.4722
+      },
+      "grade28_plus2": {
+        "n": 71,
+        "clean": 0.4085
+      }
     }
   },
   "by_half": {
@@ -74,14 +146,30 @@
       "clean28": 0.2254,
       "clean35": 0.2958,
       "peak40": 0.338,
-      "peak100": 0.1127
+      "peak100": 0.1127,
+      "grade28_sustained": {
+        "n": 71,
+        "clean": 0.2254
+      },
+      "grade28_plus2": {
+        "n": 71,
+        "clean": 0.2113
+      }
     },
     "H2": {
       "n": 269,
       "clean28": 0.316,
       "clean35": 0.3569,
       "peak40": 0.3978,
-      "peak100": 0.145
+      "peak100": 0.145,
+      "grade28_sustained": {
+        "n": 269,
+        "clean": 0.2751
+      },
+      "grade28_plus2": {
+        "n": 268,
+        "clean": 0.2724
+      }
     }
   },
   "filters": {
@@ -91,14 +179,30 @@
         "clean28": 0.0909,
         "clean35": 0.0909,
         "peak40": 0.0909,
-        "peak100": 0.0
+        "peak100": 0.0,
+        "grade28_sustained": {
+          "n": 11,
+          "clean": 0.0909
+        },
+        "grade28_plus2": {
+          "n": 11,
+          "clean": 0.0909
+        }
       },
       "kept": {
         "n": 329,
         "clean28": 0.304,
         "clean35": 0.3526,
         "peak40": 0.3951,
-        "peak100": 0.1429
+        "peak100": 0.1429,
+        "grade28_sustained": {
+          "n": 329,
+          "clean": 0.2705
+        },
+        "grade28_plus2": {
+          "n": 328,
+          "clean": 0.2652
+        }
       },
       "removed_winners": [],
       "by_half": {
@@ -108,14 +212,30 @@
             "clean28": 0.0,
             "clean35": 0.0,
             "peak40": 0.0,
-            "peak100": 0.0
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 5,
+              "clean": 0.0
+            },
+            "grade28_plus2": {
+              "n": 5,
+              "clean": 0.0
+            }
           },
           "kept": {
             "n": 66,
             "clean28": 0.2424,
             "clean35": 0.3182,
             "peak40": 0.3636,
-            "peak100": 0.1212
+            "peak100": 0.1212,
+            "grade28_sustained": {
+              "n": 66,
+              "clean": 0.2424
+            },
+            "grade28_plus2": {
+              "n": 66,
+              "clean": 0.2273
+            }
           }
         },
         "H2": {
@@ -124,14 +244,154 @@
             "clean28": 0.1667,
             "clean35": 0.1667,
             "peak40": 0.1667,
-            "peak100": 0.0
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 6,
+              "clean": 0.1667
+            },
+            "grade28_plus2": {
+              "n": 6,
+              "clean": 0.1667
+            }
           },
           "kept": {
             "n": 263,
             "clean28": 0.3194,
             "clean35": 0.3612,
             "peak40": 0.403,
-            "peak100": 0.1483
+            "peak100": 0.1483,
+            "grade28_sustained": {
+              "n": 263,
+              "clean": 0.2776
+            },
+            "grade28_plus2": {
+              "n": 262,
+              "clean": 0.2748
+            }
+          }
+        }
+      }
+    },
+    "general_reversal": {
+      "removed": {
+        "n": 36,
+        "clean28": 0.2222,
+        "clean35": 0.2778,
+        "peak40": 0.3333,
+        "peak100": 0.0833,
+        "grade28_sustained": {
+          "n": 36,
+          "clean": 0.2222
+        },
+        "grade28_plus2": {
+          "n": 36,
+          "clean": 0.1389
+        }
+      },
+      "kept": {
+        "n": 304,
+        "clean28": 0.3059,
+        "clean35": 0.352,
+        "peak40": 0.3914,
+        "peak100": 0.1447,
+        "grade28_sustained": {
+          "n": 304,
+          "clean": 0.2697
+        },
+        "grade28_plus2": {
+          "n": 303,
+          "clean": 0.2739
+        }
+      },
+      "removed_winners": [
+        {
+          "day": "2026-10-08",
+          "symbol": "IWM",
+          "at": "2026-10-08T16:56:26.947423+00:00",
+          "contract": "IWM   261008C00277000",
+          "clean28": false,
+          "peak_pct": 150
+        },
+        {
+          "day": "2026-10-09",
+          "symbol": "GOOGL",
+          "at": "2026-10-09T15:40:39.709013+00:00",
+          "contract": "GOOGL 261009C00352500",
+          "clean28": true,
+          "peak_pct": 187
+        },
+        {
+          "day": "2026-10-12",
+          "symbol": "MU",
+          "at": "2026-10-12T15:26:46.989510+00:00",
+          "contract": "MU    261012C01000000",
+          "clean28": true,
+          "peak_pct": 202
+        }
+      ],
+      "by_half": {
+        "H1": {
+          "removed": {
+            "n": 11,
+            "clean28": 0.0909,
+            "clean35": 0.1818,
+            "peak40": 0.2727,
+            "peak100": 0.0909,
+            "grade28_sustained": {
+              "n": 11,
+              "clean": 0.1818
+            },
+            "grade28_plus2": {
+              "n": 11,
+              "clean": 0.0909
+            }
+          },
+          "kept": {
+            "n": 60,
+            "clean28": 0.25,
+            "clean35": 0.3167,
+            "peak40": 0.35,
+            "peak100": 0.1167,
+            "grade28_sustained": {
+              "n": 60,
+              "clean": 0.2333
+            },
+            "grade28_plus2": {
+              "n": 60,
+              "clean": 0.2333
+            }
+          }
+        },
+        "H2": {
+          "removed": {
+            "n": 25,
+            "clean28": 0.28,
+            "clean35": 0.32,
+            "peak40": 0.36,
+            "peak100": 0.08,
+            "grade28_sustained": {
+              "n": 25,
+              "clean": 0.24
+            },
+            "grade28_plus2": {
+              "n": 25,
+              "clean": 0.16
+            }
+          },
+          "kept": {
+            "n": 244,
+            "clean28": 0.3197,
+            "clean35": 0.3607,
+            "peak40": 0.4016,
+            "peak100": 0.1516,
+            "grade28_sustained": {
+              "n": 244,
+              "clean": 0.2787
+            },
+            "grade28_plus2": {
+              "n": 243,
+              "clean": 0.284
+            }
           }
         }
       }
@@ -142,14 +402,30 @@
         "clean28": 0.1798,
         "clean35": 0.1798,
         "peak40": 0.1798,
-        "peak100": 0.0337
+        "peak100": 0.0337,
+        "grade28_sustained": {
+          "n": 89,
+          "clean": 0.1236
+        },
+        "grade28_plus2": {
+          "n": 89,
+          "clean": 0.1685
+        }
       },
       "kept": {
         "n": 251,
         "clean28": 0.3386,
         "clean35": 0.4024,
         "peak40": 0.4582,
-        "peak100": 0.1753
+        "peak100": 0.1753,
+        "grade28_sustained": {
+          "n": 251,
+          "clean": 0.3147
+        },
+        "grade28_plus2": {
+          "n": 250,
+          "clean": 0.292
+        }
       },
       "removed_winners": [
         {
@@ -184,14 +460,30 @@
             "clean28": 0.2121,
             "clean35": 0.2121,
             "peak40": 0.2121,
-            "peak100": 0.0606
+            "peak100": 0.0606,
+            "grade28_sustained": {
+              "n": 33,
+              "clean": 0.1212
+            },
+            "grade28_plus2": {
+              "n": 33,
+              "clean": 0.2121
+            }
           },
           "kept": {
             "n": 38,
             "clean28": 0.2368,
             "clean35": 0.3684,
             "peak40": 0.4474,
-            "peak100": 0.1579
+            "peak100": 0.1579,
+            "grade28_sustained": {
+              "n": 38,
+              "clean": 0.3158
+            },
+            "grade28_plus2": {
+              "n": 38,
+              "clean": 0.2105
+            }
           }
         },
         "H2": {
@@ -200,65 +492,129 @@
             "clean28": 0.1607,
             "clean35": 0.1607,
             "peak40": 0.1607,
-            "peak100": 0.0179
+            "peak100": 0.0179,
+            "grade28_sustained": {
+              "n": 56,
+              "clean": 0.125
+            },
+            "grade28_plus2": {
+              "n": 56,
+              "clean": 0.1429
+            }
           },
           "kept": {
             "n": 213,
             "clean28": 0.3568,
             "clean35": 0.4085,
             "peak40": 0.4601,
-            "peak100": 0.1784
+            "peak100": 0.1784,
+            "grade28_sustained": {
+              "n": 213,
+              "clean": 0.3146
+            },
+            "grade28_plus2": {
+              "n": 212,
+              "clean": 0.3066
+            }
           }
         }
       }
     },
     "against_open": {
       "removed": {
-        "n": 17,
-        "clean28": 0.0588,
-        "clean35": 0.1176,
-        "peak40": 0.1176,
-        "peak100": 0.0
+        "n": 7,
+        "clean28": 0.0,
+        "clean35": 0.1429,
+        "peak40": 0.1429,
+        "peak100": 0.0,
+        "grade28_sustained": {
+          "n": 7,
+          "clean": 0.1429
+        },
+        "grade28_plus2": {
+          "n": 6,
+          "clean": 0.0
+        }
       },
       "kept": {
-        "n": 323,
-        "clean28": 0.3096,
-        "clean35": 0.356,
-        "peak40": 0.3994,
-        "peak100": 0.1455
+        "n": 333,
+        "clean28": 0.3033,
+        "clean35": 0.3483,
+        "peak40": 0.3904,
+        "peak100": 0.1411,
+        "grade28_sustained": {
+          "n": 333,
+          "clean": 0.2673
+        },
+        "grade28_plus2": {
+          "n": 333,
+          "clean": 0.2643
+        }
       },
       "removed_winners": [],
       "by_half": {
         "H1": {
           "removed": {
-            "n": 6,
+            "n": 1,
             "clean28": 0.0,
-            "clean35": 0.1667,
-            "peak40": 0.1667,
-            "peak100": 0.0
+            "clean35": 1.0,
+            "peak40": 1.0,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 1,
+              "clean": 1.0
+            },
+            "grade28_plus2": {
+              "n": 1,
+              "clean": 0.0
+            }
           },
           "kept": {
-            "n": 65,
-            "clean28": 0.2462,
-            "clean35": 0.3077,
-            "peak40": 0.3538,
-            "peak100": 0.1231
+            "n": 70,
+            "clean28": 0.2286,
+            "clean35": 0.2857,
+            "peak40": 0.3286,
+            "peak100": 0.1143,
+            "grade28_sustained": {
+              "n": 70,
+              "clean": 0.2143
+            },
+            "grade28_plus2": {
+              "n": 70,
+              "clean": 0.2143
+            }
           }
         },
         "H2": {
           "removed": {
-            "n": 11,
-            "clean28": 0.0909,
-            "clean35": 0.0909,
-            "peak40": 0.0909,
-            "peak100": 0.0
+            "n": 6,
+            "clean28": 0.0,
+            "clean35": 0.0,
+            "peak40": 0.0,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 6,
+              "clean": 0.0
+            },
+            "grade28_plus2": {
+              "n": 5,
+              "clean": 0.0
+            }
           },
           "kept": {
-            "n": 258,
-            "clean28": 0.3256,
-            "clean35": 0.3682,
-            "peak40": 0.4109,
-            "peak100": 0.1512
+            "n": 263,
+            "clean28": 0.3232,
+            "clean35": 0.365,
+            "peak40": 0.4068,
+            "peak100": 0.1483,
+            "grade28_sustained": {
+              "n": 263,
+              "clean": 0.2814
+            },
+            "grade28_plus2": {
+              "n": 263,
+              "clean": 0.2776
+            }
           }
         }
       }
@@ -269,14 +625,30 @@
         "clean28": 0.1579,
         "clean35": 0.2105,
         "peak40": 0.2632,
-        "peak100": 0.1053
+        "peak100": 0.1053,
+        "grade28_sustained": {
+          "n": 19,
+          "clean": 0.1053
+        },
+        "grade28_plus2": {
+          "n": 19,
+          "clean": 0.2105
+        }
       },
       "kept": {
         "n": 321,
         "clean28": 0.3053,
         "clean35": 0.352,
         "peak40": 0.3925,
-        "peak100": 0.1402
+        "peak100": 0.1402,
+        "grade28_sustained": {
+          "n": 321,
+          "clean": 0.2741
+        },
+        "grade28_plus2": {
+          "n": 320,
+          "clean": 0.2625
+        }
       },
       "removed_winners": [
         {
@@ -303,14 +675,30 @@
             "clean28": 0.0,
             "clean35": 0.0,
             "peak40": 0.0,
-            "peak100": 0.0
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 3,
+              "clean": 0.0
+            },
+            "grade28_plus2": {
+              "n": 3,
+              "clean": 0.0
+            }
           },
           "kept": {
             "n": 68,
             "clean28": 0.2353,
             "clean35": 0.3088,
             "peak40": 0.3529,
-            "peak100": 0.1176
+            "peak100": 0.1176,
+            "grade28_sustained": {
+              "n": 68,
+              "clean": 0.2353
+            },
+            "grade28_plus2": {
+              "n": 68,
+              "clean": 0.2206
+            }
           }
         },
         "H2": {
@@ -319,14 +707,30 @@
             "clean28": 0.1875,
             "clean35": 0.25,
             "peak40": 0.3125,
-            "peak100": 0.125
+            "peak100": 0.125,
+            "grade28_sustained": {
+              "n": 16,
+              "clean": 0.125
+            },
+            "grade28_plus2": {
+              "n": 16,
+              "clean": 0.25
+            }
           },
           "kept": {
             "n": 253,
             "clean28": 0.3241,
             "clean35": 0.3636,
             "peak40": 0.4032,
-            "peak100": 0.1462
+            "peak100": 0.1462,
+            "grade28_sustained": {
+              "n": 253,
+              "clean": 0.2846
+            },
+            "grade28_plus2": {
+              "n": 252,
+              "clean": 0.2738
+            }
           }
         }
       }
@@ -337,14 +741,30 @@
         "clean28": 0.3077,
         "clean35": 0.359,
         "peak40": 0.3932,
-        "peak100": 0.1282
+        "peak100": 0.1282,
+        "grade28_sustained": {
+          "n": 117,
+          "clean": 0.2735
+        },
+        "grade28_plus2": {
+          "n": 116,
+          "clean": 0.3017
+        }
       },
       "kept": {
         "n": 223,
         "clean28": 0.2915,
         "clean35": 0.3363,
         "peak40": 0.3812,
-        "peak100": 0.1435
+        "peak100": 0.1435,
+        "grade28_sustained": {
+          "n": 223,
+          "clean": 0.2601
+        },
+        "grade28_plus2": {
+          "n": 223,
+          "clean": 0.2377
+        }
       },
       "removed_winners": [
         {
@@ -475,14 +895,30 @@
             "clean28": 0.3235,
             "clean35": 0.4118,
             "peak40": 0.4412,
-            "peak100": 0.1471
+            "peak100": 0.1471,
+            "grade28_sustained": {
+              "n": 34,
+              "clean": 0.2941
+            },
+            "grade28_plus2": {
+              "n": 34,
+              "clean": 0.2647
+            }
           },
           "kept": {
             "n": 37,
             "clean28": 0.1351,
             "clean35": 0.1892,
             "peak40": 0.2432,
-            "peak100": 0.0811
+            "peak100": 0.0811,
+            "grade28_sustained": {
+              "n": 37,
+              "clean": 0.1622
+            },
+            "grade28_plus2": {
+              "n": 37,
+              "clean": 0.1622
+            }
           }
         },
         "H2": {
@@ -491,14 +927,30 @@
             "clean28": 0.3012,
             "clean35": 0.3373,
             "peak40": 0.3735,
-            "peak100": 0.1205
+            "peak100": 0.1205,
+            "grade28_sustained": {
+              "n": 83,
+              "clean": 0.2651
+            },
+            "grade28_plus2": {
+              "n": 82,
+              "clean": 0.3171
+            }
           },
           "kept": {
             "n": 186,
             "clean28": 0.3226,
             "clean35": 0.3656,
             "peak40": 0.4086,
-            "peak100": 0.1559
+            "peak100": 0.1559,
+            "grade28_sustained": {
+              "n": 186,
+              "clean": 0.2796
+            },
+            "grade28_plus2": {
+              "n": 186,
+              "clean": 0.2527
+            }
           }
         }
       }
@@ -516,17 +968,291 @@
         "clean28": 0.2289,
         "clean35": 0.2687,
         "peak40": 0.2935,
-        "peak100": 0.0896
+        "peak100": 0.0896,
+        "grade28_sustained": {
+          "n": 201,
+          "clean": 0.204
+        },
+        "grade28_plus2": {
+          "n": 200,
+          "clean": 0.235
+        }
       },
       "kept": {
         "n": 139,
         "clean28": 0.3957,
         "clean35": 0.4532,
         "peak40": 0.518,
-        "peak100": 0.2086
+        "peak100": 0.2086,
+        "grade28_sustained": {
+          "n": 139,
+          "clean": 0.3525
+        },
+        "grade28_plus2": {
+          "n": 139,
+          "clean": 0.295
+        }
       },
       "removed_plus100": 18,
       "removed_clean28": 46,
+      "by_day": {
+        "2026-10-07": {
+          "removed": {
+            "n": 12,
+            "clean28": 0.25,
+            "clean35": 0.4167,
+            "peak40": 0.4167,
+            "peak100": 0.0833,
+            "grade28_sustained": {
+              "n": 12,
+              "clean": 0.3333
+            },
+            "grade28_plus2": {
+              "n": 12,
+              "clean": 0.0833
+            }
+          },
+          "kept": {
+            "n": 16,
+            "clean28": 0.3125,
+            "clean35": 0.375,
+            "peak40": 0.5,
+            "peak100": 0.1875,
+            "grade28_sustained": {
+              "n": 16,
+              "clean": 0.3125
+            },
+            "grade28_plus2": {
+              "n": 16,
+              "clean": 0.25
+            }
+          }
+        },
+        "2026-10-08": {
+          "removed": {
+            "n": 41,
+            "clean28": 0.1951,
+            "clean35": 0.2439,
+            "peak40": 0.2683,
+            "peak100": 0.0976,
+            "grade28_sustained": {
+              "n": 41,
+              "clean": 0.1707
+            },
+            "grade28_plus2": {
+              "n": 41,
+              "clean": 0.2439
+            }
+          },
+          "kept": {
+            "n": 2,
+            "clean28": 0.0,
+            "clean35": 0.0,
+            "peak40": 0.0,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 2,
+              "clean": 0.0
+            },
+            "grade28_plus2": {
+              "n": 2,
+              "clean": 0.0
+            }
+          }
+        },
+        "2026-10-09": {
+          "removed": {
+            "n": 17,
+            "clean28": 0.1765,
+            "clean35": 0.1765,
+            "peak40": 0.2353,
+            "peak100": 0.0588,
+            "grade28_sustained": {
+              "n": 17,
+              "clean": 0.1176
+            },
+            "grade28_plus2": {
+              "n": 17,
+              "clean": 0.1176
+            }
+          },
+          "kept": {
+            "n": 18,
+            "clean28": 0.3333,
+            "clean35": 0.4444,
+            "peak40": 0.5,
+            "peak100": 0.3889,
+            "grade28_sustained": {
+              "n": 18,
+              "clean": 0.3333
+            },
+            "grade28_plus2": {
+              "n": 18,
+              "clean": 0.2222
+            }
+          }
+        },
+        "2026-10-12": {
+          "removed": {
+            "n": 13,
+            "clean28": 0.1538,
+            "clean35": 0.2308,
+            "peak40": 0.3077,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 13,
+              "clean": 0.0769
+            },
+            "grade28_plus2": {
+              "n": 13,
+              "clean": 0.2308
+            }
+          },
+          "kept": {
+            "n": 5,
+            "clean28": 0.4,
+            "clean35": 0.4,
+            "peak40": 0.6,
+            "peak100": 0.2,
+            "grade28_sustained": {
+              "n": 5,
+              "clean": 0.2
+            },
+            "grade28_plus2": {
+              "n": 5,
+              "clean": 0.2
+            }
+          }
+        },
+        "2026-10-13": {
+          "removed": {
+            "n": 25,
+            "clean28": 0.04,
+            "clean35": 0.04,
+            "peak40": 0.04,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 25,
+              "clean": 0.04
+            },
+            "grade28_plus2": {
+              "n": 25,
+              "clean": 0.04
+            }
+          },
+          "kept": {
+            "n": 4,
+            "clean28": 0.0,
+            "clean35": 0.0,
+            "peak40": 0.25,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 4,
+              "clean": 0.0
+            },
+            "grade28_plus2": {
+              "n": 4,
+              "clean": 0.0
+            }
+          }
+        },
+        "2026-10-14": {
+          "removed": {
+            "n": 25,
+            "clean28": 0.24,
+            "clean35": 0.28,
+            "peak40": 0.32,
+            "peak100": 0.04,
+            "grade28_sustained": {
+              "n": 25,
+              "clean": 0.2
+            },
+            "grade28_plus2": {
+              "n": 25,
+              "clean": 0.32
+            }
+          },
+          "kept": {
+            "n": 36,
+            "clean28": 0.3333,
+            "clean35": 0.4167,
+            "peak40": 0.5,
+            "peak100": 0.1111,
+            "grade28_sustained": {
+              "n": 36,
+              "clean": 0.3333
+            },
+            "grade28_plus2": {
+              "n": 36,
+              "clean": 0.3333
+            }
+          }
+        },
+        "2026-10-15": {
+          "removed": {
+            "n": 43,
+            "clean28": 0.2093,
+            "clean35": 0.2093,
+            "peak40": 0.2093,
+            "peak100": 0.0465,
+            "grade28_sustained": {
+              "n": 43,
+              "clean": 0.1628
+            },
+            "grade28_plus2": {
+              "n": 43,
+              "clean": 0.186
+            }
+          },
+          "kept": {
+            "n": 11,
+            "clean28": 0.5455,
+            "clean35": 0.5455,
+            "peak40": 0.5455,
+            "peak100": 0.3636,
+            "grade28_sustained": {
+              "n": 11,
+              "clean": 0.4545
+            },
+            "grade28_plus2": {
+              "n": 11,
+              "clean": 0.4545
+            }
+          }
+        },
+        "2026-10-16": {
+          "removed": {
+            "n": 25,
+            "clean28": 0.56,
+            "clean35": 0.64,
+            "peak40": 0.68,
+            "peak100": 0.36,
+            "grade28_sustained": {
+              "n": 25,
+              "clean": 0.56
+            },
+            "grade28_plus2": {
+              "n": 24,
+              "clean": 0.5833
+            }
+          },
+          "kept": {
+            "n": 47,
+            "clean28": 0.5106,
+            "clean35": 0.5532,
+            "peak40": 0.5745,
+            "peak100": 0.2128,
+            "grade28_sustained": {
+              "n": 47,
+              "clean": 0.4255
+            },
+            "grade28_plus2": {
+              "n": 47,
+              "clean": 0.3191
+            }
+          }
+        }
+      },
       "by_half": {
         "H1": {
           "removed": {
@@ -534,14 +1260,30 @@
             "clean28": 0.2075,
             "clean35": 0.283,
             "peak40": 0.3019,
-            "peak100": 0.0943
+            "peak100": 0.0943,
+            "grade28_sustained": {
+              "n": 53,
+              "clean": 0.2075
+            },
+            "grade28_plus2": {
+              "n": 53,
+              "clean": 0.2075
+            }
           },
           "kept": {
             "n": 18,
             "clean28": 0.2778,
             "clean35": 0.3333,
             "peak40": 0.4444,
-            "peak100": 0.1667
+            "peak100": 0.1667,
+            "grade28_sustained": {
+              "n": 18,
+              "clean": 0.2778
+            },
+            "grade28_plus2": {
+              "n": 18,
+              "clean": 0.2222
+            }
           }
         },
         "H2": {
@@ -550,14 +1292,30 @@
             "clean28": 0.2365,
             "clean35": 0.2635,
             "peak40": 0.2905,
-            "peak100": 0.0878
+            "peak100": 0.0878,
+            "grade28_sustained": {
+              "n": 148,
+              "clean": 0.2027
+            },
+            "grade28_plus2": {
+              "n": 147,
+              "clean": 0.2449
+            }
           },
           "kept": {
             "n": 121,
             "clean28": 0.4132,
             "clean35": 0.4711,
             "peak40": 0.5289,
-            "peak100": 0.2149
+            "peak100": 0.2149,
+            "grade28_sustained": {
+              "n": 121,
+              "clean": 0.3636
+            },
+            "grade28_plus2": {
+              "n": 121,
+              "clean": 0.3058
+            }
           }
         }
       }
@@ -574,17 +1332,291 @@
         "clean28": 0.1681,
         "clean35": 0.1858,
         "peak40": 0.1947,
-        "peak100": 0.0442
+        "peak100": 0.0442,
+        "grade28_sustained": {
+          "n": 113,
+          "clean": 0.1327
+        },
+        "grade28_plus2": {
+          "n": 112,
+          "clean": 0.1696
+        }
       },
       "kept": {
         "n": 227,
         "clean28": 0.3612,
         "clean35": 0.4229,
         "peak40": 0.4802,
-        "peak100": 0.185
+        "peak100": 0.185,
+        "grade28_sustained": {
+          "n": 227,
+          "clean": 0.3304
+        },
+        "grade28_plus2": {
+          "n": 227,
+          "clean": 0.304
+        }
       },
       "removed_plus100": 5,
       "removed_clean28": 19,
+      "by_day": {
+        "2026-10-07": {
+          "removed": {
+            "n": 5,
+            "clean28": 0.0,
+            "clean35": 0.2,
+            "peak40": 0.2,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 5,
+              "clean": 0.2
+            },
+            "grade28_plus2": {
+              "n": 5,
+              "clean": 0.0
+            }
+          },
+          "kept": {
+            "n": 23,
+            "clean28": 0.3478,
+            "clean35": 0.4348,
+            "peak40": 0.5217,
+            "peak100": 0.1739,
+            "grade28_sustained": {
+              "n": 23,
+              "clean": 0.3478
+            },
+            "grade28_plus2": {
+              "n": 23,
+              "clean": 0.2174
+            }
+          }
+        },
+        "2026-10-08": {
+          "removed": {
+            "n": 33,
+            "clean28": 0.2121,
+            "clean35": 0.2121,
+            "peak40": 0.2121,
+            "peak100": 0.0606,
+            "grade28_sustained": {
+              "n": 33,
+              "clean": 0.1212
+            },
+            "grade28_plus2": {
+              "n": 33,
+              "clean": 0.2121
+            }
+          },
+          "kept": {
+            "n": 10,
+            "clean28": 0.1,
+            "clean35": 0.3,
+            "peak40": 0.4,
+            "peak100": 0.2,
+            "grade28_sustained": {
+              "n": 10,
+              "clean": 0.3
+            },
+            "grade28_plus2": {
+              "n": 10,
+              "clean": 0.3
+            }
+          }
+        },
+        "2026-10-09": {
+          "removed": {
+            "n": 2,
+            "clean28": 0.0,
+            "clean35": 0.0,
+            "peak40": 0.0,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 2,
+              "clean": 0.0
+            },
+            "grade28_plus2": {
+              "n": 2,
+              "clean": 0.0
+            }
+          },
+          "kept": {
+            "n": 33,
+            "clean28": 0.2727,
+            "clean35": 0.3333,
+            "peak40": 0.3939,
+            "peak100": 0.2424,
+            "grade28_sustained": {
+              "n": 33,
+              "clean": 0.2424
+            },
+            "grade28_plus2": {
+              "n": 33,
+              "clean": 0.1818
+            }
+          }
+        },
+        "2026-10-12": {
+          "removed": {
+            "n": 5,
+            "clean28": 0.0,
+            "clean35": 0.2,
+            "peak40": 0.4,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 5,
+              "clean": 0.0
+            },
+            "grade28_plus2": {
+              "n": 5,
+              "clean": 0.2
+            }
+          },
+          "kept": {
+            "n": 13,
+            "clean28": 0.3077,
+            "clean35": 0.3077,
+            "peak40": 0.3846,
+            "peak100": 0.0769,
+            "grade28_sustained": {
+              "n": 13,
+              "clean": 0.1538
+            },
+            "grade28_plus2": {
+              "n": 13,
+              "clean": 0.2308
+            }
+          }
+        },
+        "2026-10-13": {
+          "removed": {
+            "n": 23,
+            "clean28": 0.0435,
+            "clean35": 0.0435,
+            "peak40": 0.0435,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 23,
+              "clean": 0.0435
+            },
+            "grade28_plus2": {
+              "n": 23,
+              "clean": 0.0435
+            }
+          },
+          "kept": {
+            "n": 6,
+            "clean28": 0.0,
+            "clean35": 0.0,
+            "peak40": 0.1667,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 6,
+              "clean": 0.0
+            },
+            "grade28_plus2": {
+              "n": 6,
+              "clean": 0.0
+            }
+          }
+        },
+        "2026-10-14": {
+          "removed": {
+            "n": 1,
+            "clean28": 1.0,
+            "clean35": 1.0,
+            "peak40": 1.0,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 1,
+              "clean": 1.0
+            },
+            "grade28_plus2": {
+              "n": 1,
+              "clean": 1.0
+            }
+          },
+          "kept": {
+            "n": 60,
+            "clean28": 0.2833,
+            "clean35": 0.35,
+            "peak40": 0.4167,
+            "peak100": 0.0833,
+            "grade28_sustained": {
+              "n": 60,
+              "clean": 0.2667
+            },
+            "grade28_plus2": {
+              "n": 60,
+              "clean": 0.3167
+            }
+          }
+        },
+        "2026-10-15": {
+          "removed": {
+            "n": 40,
+            "clean28": 0.2,
+            "clean35": 0.2,
+            "peak40": 0.2,
+            "peak100": 0.025,
+            "grade28_sustained": {
+              "n": 40,
+              "clean": 0.15
+            },
+            "grade28_plus2": {
+              "n": 40,
+              "clean": 0.175
+            }
+          },
+          "kept": {
+            "n": 14,
+            "clean28": 0.5,
+            "clean35": 0.5,
+            "peak40": 0.5,
+            "peak100": 0.3571,
+            "grade28_sustained": {
+              "n": 14,
+              "clean": 0.4286
+            },
+            "grade28_plus2": {
+              "n": 14,
+              "clean": 0.4286
+            }
+          }
+        },
+        "2026-10-16": {
+          "removed": {
+            "n": 4,
+            "clean28": 0.5,
+            "clean35": 0.5,
+            "peak40": 0.5,
+            "peak100": 0.5,
+            "grade28_sustained": {
+              "n": 4,
+              "clean": 0.5
+            },
+            "grade28_plus2": {
+              "n": 3,
+              "clean": 0.6667
+            }
+          },
+          "kept": {
+            "n": 68,
+            "clean28": 0.5294,
+            "clean35": 0.5882,
+            "peak40": 0.6176,
+            "peak100": 0.25,
+            "grade28_sustained": {
+              "n": 68,
+              "clean": 0.4706
+            },
+            "grade28_plus2": {
+              "n": 68,
+              "clean": 0.3971
+            }
+          }
+        }
+      },
       "by_half": {
         "H1": {
           "removed": {
@@ -592,14 +1624,30 @@
             "clean28": 0.1842,
             "clean35": 0.2105,
             "peak40": 0.2105,
-            "peak100": 0.0526
+            "peak100": 0.0526,
+            "grade28_sustained": {
+              "n": 38,
+              "clean": 0.1316
+            },
+            "grade28_plus2": {
+              "n": 38,
+              "clean": 0.1842
+            }
           },
           "kept": {
             "n": 33,
             "clean28": 0.2727,
             "clean35": 0.3939,
             "peak40": 0.4848,
-            "peak100": 0.1818
+            "peak100": 0.1818,
+            "grade28_sustained": {
+              "n": 33,
+              "clean": 0.3333
+            },
+            "grade28_plus2": {
+              "n": 33,
+              "clean": 0.2424
+            }
           }
         },
         "H2": {
@@ -608,14 +1656,30 @@
             "clean28": 0.16,
             "clean35": 0.1733,
             "peak40": 0.1867,
-            "peak100": 0.04
+            "peak100": 0.04,
+            "grade28_sustained": {
+              "n": 75,
+              "clean": 0.1333
+            },
+            "grade28_plus2": {
+              "n": 74,
+              "clean": 0.1622
+            }
           },
           "kept": {
             "n": 194,
             "clean28": 0.3763,
             "clean35": 0.4278,
             "peak40": 0.4794,
-            "peak100": 0.1856
+            "peak100": 0.1856,
+            "grade28_sustained": {
+              "n": 194,
+              "clean": 0.3299
+            },
+            "grade28_plus2": {
+              "n": 194,
+              "clean": 0.3144
+            }
           }
         }
       }
@@ -630,17 +1694,279 @@
         "clean28": 0.0556,
         "clean35": 0.1111,
         "peak40": 0.1111,
-        "peak100": 0.0
+        "peak100": 0.0,
+        "grade28_sustained": {
+          "n": 18,
+          "clean": 0.1111
+        },
+        "grade28_plus2": {
+          "n": 17,
+          "clean": 0.0588
+        }
       },
       "kept": {
         "n": 322,
         "clean28": 0.3106,
         "clean35": 0.3571,
         "peak40": 0.4006,
-        "peak100": 0.146
+        "peak100": 0.146,
+        "grade28_sustained": {
+          "n": 322,
+          "clean": 0.2733
+        },
+        "grade28_plus2": {
+          "n": 322,
+          "clean": 0.2702
+        }
       },
       "removed_plus100": 0,
       "removed_clean28": 1,
+      "by_day": {
+        "2026-10-07": {
+          "removed": {
+            "n": 2,
+            "clean28": 0.0,
+            "clean35": 0.5,
+            "peak40": 0.5,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 2,
+              "clean": 0.5
+            },
+            "grade28_plus2": {
+              "n": 2,
+              "clean": 0.0
+            }
+          },
+          "kept": {
+            "n": 26,
+            "clean28": 0.3077,
+            "clean35": 0.3846,
+            "peak40": 0.4615,
+            "peak100": 0.1538,
+            "grade28_sustained": {
+              "n": 26,
+              "clean": 0.3077
+            },
+            "grade28_plus2": {
+              "n": 26,
+              "clean": 0.1923
+            }
+          }
+        },
+        "2026-10-08": {
+          "removed": {
+            "n": 4,
+            "clean28": 0.0,
+            "clean35": 0.0,
+            "peak40": 0.0,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 4,
+              "clean": 0.0
+            },
+            "grade28_plus2": {
+              "n": 4,
+              "clean": 0.0
+            }
+          },
+          "kept": {
+            "n": 39,
+            "clean28": 0.2051,
+            "clean35": 0.2564,
+            "peak40": 0.2821,
+            "peak100": 0.1026,
+            "grade28_sustained": {
+              "n": 39,
+              "clean": 0.1795
+            },
+            "grade28_plus2": {
+              "n": 39,
+              "clean": 0.2564
+            }
+          }
+        },
+        "2026-10-09": {
+          "removed": {
+            "n": 1,
+            "clean28": 0.0,
+            "clean35": 0.0,
+            "peak40": 0.0,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 1,
+              "clean": 0.0
+            },
+            "grade28_plus2": {
+              "n": 1,
+              "clean": 0.0
+            }
+          },
+          "kept": {
+            "n": 34,
+            "clean28": 0.2647,
+            "clean35": 0.3235,
+            "peak40": 0.3824,
+            "peak100": 0.2353,
+            "grade28_sustained": {
+              "n": 34,
+              "clean": 0.2353
+            },
+            "grade28_plus2": {
+              "n": 34,
+              "clean": 0.1765
+            }
+          }
+        },
+        "2026-10-12": {
+          "removed": {
+            "n": 0
+          },
+          "kept": {
+            "n": 18,
+            "clean28": 0.2222,
+            "clean35": 0.2778,
+            "peak40": 0.3889,
+            "peak100": 0.0556,
+            "grade28_sustained": {
+              "n": 18,
+              "clean": 0.1111
+            },
+            "grade28_plus2": {
+              "n": 18,
+              "clean": 0.2222
+            }
+          }
+        },
+        "2026-10-13": {
+          "removed": {
+            "n": 3,
+            "clean28": 0.0,
+            "clean35": 0.0,
+            "peak40": 0.0,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 3,
+              "clean": 0.0
+            },
+            "grade28_plus2": {
+              "n": 3,
+              "clean": 0.0
+            }
+          },
+          "kept": {
+            "n": 26,
+            "clean28": 0.0385,
+            "clean35": 0.0385,
+            "peak40": 0.0769,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 26,
+              "clean": 0.0385
+            },
+            "grade28_plus2": {
+              "n": 26,
+              "clean": 0.0385
+            }
+          }
+        },
+        "2026-10-14": {
+          "removed": {
+            "n": 1,
+            "clean28": 1.0,
+            "clean35": 1.0,
+            "peak40": 1.0,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 1,
+              "clean": 1.0
+            },
+            "grade28_plus2": {
+              "n": 1,
+              "clean": 1.0
+            }
+          },
+          "kept": {
+            "n": 60,
+            "clean28": 0.2833,
+            "clean35": 0.35,
+            "peak40": 0.4167,
+            "peak100": 0.0833,
+            "grade28_sustained": {
+              "n": 60,
+              "clean": 0.2667
+            },
+            "grade28_plus2": {
+              "n": 60,
+              "clean": 0.3167
+            }
+          }
+        },
+        "2026-10-15": {
+          "removed": {
+            "n": 5,
+            "clean28": 0.0,
+            "clean35": 0.0,
+            "peak40": 0.0,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 5,
+              "clean": 0.0
+            },
+            "grade28_plus2": {
+              "n": 5,
+              "clean": 0.0
+            }
+          },
+          "kept": {
+            "n": 49,
+            "clean28": 0.3061,
+            "clean35": 0.3061,
+            "peak40": 0.3061,
+            "peak100": 0.1224,
+            "grade28_sustained": {
+              "n": 49,
+              "clean": 0.2449
+            },
+            "grade28_plus2": {
+              "n": 49,
+              "clean": 0.2653
+            }
+          }
+        },
+        "2026-10-16": {
+          "removed": {
+            "n": 2,
+            "clean28": 0.0,
+            "clean35": 0.0,
+            "peak40": 0.0,
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 2,
+              "clean": 0.0
+            },
+            "grade28_plus2": {
+              "n": 1,
+              "clean": 0.0
+            }
+          },
+          "kept": {
+            "n": 70,
+            "clean28": 0.5429,
+            "clean35": 0.6,
+            "peak40": 0.6286,
+            "peak100": 0.2714,
+            "grade28_sustained": {
+              "n": 70,
+              "clean": 0.4857
+            },
+            "grade28_plus2": {
+              "n": 70,
+              "clean": 0.4143
+            }
+          }
+        }
+      },
       "by_half": {
         "H1": {
           "removed": {
@@ -648,14 +1974,30 @@
             "clean28": 0.0,
             "clean35": 0.1667,
             "peak40": 0.1667,
-            "peak100": 0.0
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 6,
+              "clean": 0.1667
+            },
+            "grade28_plus2": {
+              "n": 6,
+              "clean": 0.0
+            }
           },
           "kept": {
             "n": 65,
             "clean28": 0.2462,
             "clean35": 0.3077,
             "peak40": 0.3538,
-            "peak100": 0.1231
+            "peak100": 0.1231,
+            "grade28_sustained": {
+              "n": 65,
+              "clean": 0.2308
+            },
+            "grade28_plus2": {
+              "n": 65,
+              "clean": 0.2308
+            }
           }
         },
         "H2": {
@@ -664,14 +2006,30 @@
             "clean28": 0.0833,
             "clean35": 0.0833,
             "peak40": 0.0833,
-            "peak100": 0.0
+            "peak100": 0.0,
+            "grade28_sustained": {
+              "n": 12,
+              "clean": 0.0833
+            },
+            "grade28_plus2": {
+              "n": 11,
+              "clean": 0.0909
+            }
           },
           "kept": {
             "n": 257,
             "clean28": 0.3268,
             "clean35": 0.3696,
             "peak40": 0.4125,
-            "peak100": 0.1518
+            "peak100": 0.1518,
+            "grade28_sustained": {
+              "n": 257,
+              "clean": 0.284
+            },
+            "grade28_plus2": {
+              "n": 257,
+              "clean": 0.2802
+            }
           }
         }
       }
@@ -683,14 +2041,30 @@
       "clean28": 0.25,
       "clean35": 0.35,
       "peak40": 0.35,
-      "peak100": 0.15
+      "peak100": 0.15,
+      "grade28_sustained": {
+        "n": 20,
+        "clean": 0.25
+      },
+      "grade28_plus2": {
+        "n": 20,
+        "clean": 0.15
+      }
     },
     "H2": {
       "n": 113,
       "clean28": 0.3805,
       "clean35": 0.4248,
       "peak40": 0.469,
-      "peak100": 0.1593
+      "peak100": 0.1593,
+      "grade28_sustained": {
+        "n": 113,
+        "clean": 0.3628
+      },
+      "grade28_plus2": {
+        "n": 113,
+        "clean": 0.3451
+      }
     }
   },
   "tier_a_proposal_with_flow": {
@@ -699,14 +2073,30 @@
       "clean28": 0.25,
       "clean35": 0.3125,
       "peak40": 0.3125,
-      "peak100": 0.0625
+      "peak100": 0.0625,
+      "grade28_sustained": {
+        "n": 16,
+        "clean": 0.1875
+      },
+      "grade28_plus2": {
+        "n": 16,
+        "clean": 0.0
+      }
     },
     "H2": {
       "n": 90,
       "clean28": 0.3889,
       "clean35": 0.4333,
       "peak40": 0.4667,
-      "peak100": 0.1889
+      "peak100": 0.1889,
+      "grade28_sustained": {
+        "n": 90,
+        "clean": 0.3667
+      },
+      "grade28_plus2": {
+        "n": 90,
+        "clean": 0.3333
+      }
     }
   },
   "tier_b_proposal": {
@@ -715,14 +2105,30 @@
       "clean28": 0.2857,
       "clean35": 0.2857,
       "peak40": 0.5714,
-      "peak100": 0.2857
+      "peak100": 0.2857,
+      "grade28_sustained": {
+        "n": 7,
+        "clean": 0.4286
+      },
+      "grade28_plus2": {
+        "n": 7,
+        "clean": 0.5714
+      }
     },
     "H2": {
       "n": 13,
       "clean28": 0.1538,
       "clean35": 0.2308,
       "peak40": 0.2308,
-      "peak100": 0.0769
+      "peak100": 0.0769,
+      "grade28_sustained": {
+        "n": 13,
+        "clean": 0.1538
+      },
+      "grade28_plus2": {
+        "n": 13,
+        "clean": 0.0769
+      }
     }
   },
   "tier_b_proposal_with_flow": {
@@ -731,14 +2137,30 @@
       "clean28": 0.0,
       "clean35": 0.0,
       "peak40": 1.0,
-      "peak100": 1.0
+      "peak100": 1.0,
+      "grade28_sustained": {
+        "n": 1,
+        "clean": 0.0
+      },
+      "grade28_plus2": {
+        "n": 1,
+        "clean": 0.0
+      }
     },
     "H2": {
       "n": 10,
       "clean28": 0.2,
       "clean35": 0.3,
       "peak40": 0.3,
-      "peak100": 0.1
+      "peak100": 0.1,
+      "grade28_sustained": {
+        "n": 10,
+        "clean": 0.2
+      },
+      "grade28_plus2": {
+        "n": 10,
+        "clean": 0.1
+      }
     }
   }
 }
