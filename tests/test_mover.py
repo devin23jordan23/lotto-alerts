@@ -112,3 +112,42 @@ class BaseBreakTests(unittest.TestCase):
     def test_default_base_break_settings(self):
         s = Settings()
         self.assertEqual((s.mover_base_break, s.mover_base_minutes, s.mover_base_open_atr), (1, 15, .50))
+
+
+class BypassTests(unittest.TestCase):
+    def setUp(self):
+        self.m = MoverTests('test_default_settings_change_nothing'); self.m.setUp()
+        self.store = self.m.store
+
+    def _snap(self):
+        prices = [100 + .02 * i for i in range(30)] + [100.6 + .12 * i for i in range(20)]
+        spy = self.m.snap("SPY", [500 + .05 * i for i in range(50)], 6)
+        snap = self.m.snap("PANW", prices, 5)
+        return spy, replace(snap, options=(self.m.option(snap.at, 103, .90, 1.05),))
+
+    def test_mover_sends_under_hybrid_ab(self):
+        settings = replace(Settings(), mover_enabled=1, hybrid=1, soft_blocks=1, min_score=60)
+        engine = Engine(self.store, settings)
+        spy, snap = self._snap()
+        engine.spy_bars[spy.day] = spy.bars
+        alerts = engine.process([snap])
+        self.assertEqual(len(alerts), 1)
+        row = self.store.db.execute("select delivery from alerts").fetchone()
+        self.assertNotEqual(row[0], "internal")
+
+    def test_mover_silent_when_option_lane_already_alerted_this_move(self):
+        settings = replace(Settings(), mover_enabled=1)
+        spy, snap = self._snap()
+        first = Engine(self.store, settings); first.spy_bars[spy.day] = spy.bars
+        self.assertEqual(len(first.process([snap])), 1)       # an ACTIVE alert now exists for PANW calls
+        second = Engine(self.store, settings); second.spy_bars[spy.day] = spy.bars
+        self.assertEqual(mover_candidates(second, snap, settings), [])
+
+    def test_hybrid_reversal_goes_to_tier_c(self):
+        from lotto.engine import hybrid_tier
+        from lotto.patterns import Setup
+        policy = type("P", (), {"reasons": ()})()
+        for name, want in (("REVERSAL", "C"), ("INTRADAY_REVERSAL", "C"), ("CONTINUATION", "A")):
+            c = type("C", (), {})()
+            c.score, c.metrics, c.setup = 99, {}, Setup(name, 1, 0)
+            self.assertEqual(hybrid_tier(c, policy, Settings()), want, name)

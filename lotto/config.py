@@ -15,6 +15,7 @@ class Settings:
     tier_b: float = 81
     send_tiers: str = "AB"
     send_requote: int = 0
+    hybrid_reversal_c: int = 1  # Hybrid only: reversal setups go to tier C (not sent).
     min_pace_rvol: float = 2.0
     min_local_rvol: float = 1.2
     min_local_acceleration: float = 1.2

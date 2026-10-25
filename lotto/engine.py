@@ -20,6 +20,9 @@ def hybrid_tier(candidate, policy, settings):
         blend -= 25
     blend += 5 if candidate.metrics.get("hourly_break") else 0
     tier = "A" if blend >= settings.tier_a else "B" if blend >= settings.tier_b else "C"
+    if (settings.hybrid_reversal_c and candidate.setup is not None
+            and candidate.setup.name in ("INTRADAY_REVERSAL", "REVERSAL")):
+        tier = "C"  # Directional A/B lane only (Andre, Oct 25); reversals stored and graded, not sent.
     candidate.metrics.update({"tier": tier, "tier_blend": round(blend, 2),
                               "tier_v2": None, "score_v2": None,
                               "s_rules": sorted(rules)})
@@ -283,7 +286,8 @@ class Engine:
             tier = candidate.metrics.get("tier") if cfg.hybrid else None
             ident = self.store.queue(candidate, payload, self.dry_run, phase, parent_id,
                                      quality=policy, tier=tier,
-                                     sendable=not cfg.hybrid or tier in cfg.send_tiers)
+                                     sendable=(not cfg.hybrid or candidate.metrics.get("lane") == "MOVER"
+                                               or (tier is not None and tier in cfg.send_tiers)))
             self.rearmed.discard((snap.day, snap.symbol))
             self.store.decision(snap, candidate.state, f"{phase.lower()} alert {ident}", candidate)
             alerts.append({"id": ident, "phase": phase, "parent_id": parent_id, "payload": payload})

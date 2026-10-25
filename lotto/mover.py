@@ -15,12 +15,16 @@ LOTTO-MOVERS-REVERSE-ENGINEER-2026-10-24); SPY's last 15 minutes must not be aga
               without one, AND the stock is >= 0.50 ATR from the open. This is the grind-day
               re-entry: a stock trending all day in steps (META 10/16, CRWD 10/23) rarely moves
               0.25 ATR in 15 minutes but keeps basing and breaking to new extremes.
+Role: a BYPASS for strong stock moves the option-led lane (Hybrid A/B or Model S) misses.
+If the option-led lane already alerted the same side during the move, this lane stays silent.
+Thresholds are env-tunable (LOTTO_MOVER_R15_ATR, LOTTO_MOVER_OPEN_ATR, LOTTO_MOVER_BASE_BREAK,
+LOTTO_MOVER_BASE_OPEN_ATR) and are set from the replay, targeting only PANW/CRWD/NET-class moves.
 Re-alert rule: the trigger condition is checked every minute. One alert when it turns on;
 while it stays on, or comes back within 15 minutes of the last minute it was on, it is the
 same move and does not re-alert. It is not a time cooldown and not a 'stock stopped' test.
 All inputs are completed bars at or before snap.at.
 """
-from datetime import time, timedelta
+from datetime import datetime, time, timedelta
 from math import isfinite
 
 from .features import Candidate, quote_ok
@@ -144,10 +148,22 @@ def mover_candidates(engine, snap, settings):
         sent = getattr(engine, "mover_sent", None)
         if sent is None:
             sent = engine.mover_sent = {}
+        starts = getattr(engine, "mover_start", None)
+        if starts is None:
+            starts = engine.mover_start = {}
         if previous is None or last.end - previous >= timedelta(minutes=settings.mover_gap_minutes):
             sent[key] = False          # a new move starts
+            starts[key] = last.end
         if sent.get(key):
             continue                   # same move already alerted: one alert per move
+        # Bypass lane only: if the option-led lane already alerted this side during this move,
+        # the move is covered and the MOVER lane stays silent.
+        side_name = "CALL" if direction == 1 else "PUT"
+        prior = engine.store.last_alert(snap.day, snap.symbol, "ACTIVE", side=side_name)
+        if prior is not None and datetime.fromisoformat(prior["at"]) >= starts[key] - timedelta(minutes=settings.mover_gap_minutes):
+            sent[key] = True
+            engine.store.decision(snap, "MOVER", "mover: move already alerted by the option-led lane")
+            continue
         option = pick_contract(snap, direction, settings)
         if option is None:
             engine.store.decision(snap, "MOVER", "mover: no tradable contract (fresh, two-sided, ask>=0.15, spread<=35%) - not posted")
