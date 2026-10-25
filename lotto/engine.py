@@ -79,6 +79,9 @@ class Engine:
         self.cool_since = {}
         self.last_cooling = {}
         self.rearmed = set()
+        self.spy_bars = {}
+        self.mover_last = {}
+        self.mover_sent = {}
 
     def process(self, snapshots: list[Snapshot]) -> list[dict]:
         ready = []
@@ -94,6 +97,11 @@ class Engine:
                 continue
             self.store.record(snap)
             self.store.track(snap, cfg)
+            if snap.symbol == "SPY" and snap.bars:
+                self.spy_bars[snap.day] = snap.bars
+            if cfg.mover_enabled:
+                from .mover import mover_candidates
+                ready.extend(mover_candidates(self, snap, cfg))
             local = snap.at.astimezone(ET)
             early_opening_warmup = (local.hour == 9 and 33 <= local.minute < 35
                                     and cfg.min_opening_bars <= 5)
@@ -141,7 +149,7 @@ class Engine:
             best = max(valid, key=lambda c: c.score)
             if self.quality.mode != 'off':
                 phase = 'POTENTIAL' if best.setup and best.setup.building else 'ACTIVE'
-                policy = evaluate(best, disabled=self.quality.disabled_rules)
+                policy = evaluate(best, self.quality.policy, disabled=self.quality.disabled_rules)
                 quality_decisions[(snap.symbol,snap.at,best.option.symbol)] = policy
                 self.store.quality_shadow(best,policy,phase)
                 if self.quality.shadow_extra:
@@ -235,11 +243,23 @@ class Engine:
                     self.store.decision(snap, "RESEARCH", reason, best)
                     continue
             # A renewed thesis or a materially new price leg can alert again.
+            if cfg.keep_gate and best.setup is not None and not best.setup.building:
+                from .mover import keep_reason
+                keep = keep_reason(self, best, cfg)
+                if keep:
+                    self.store.research_candidate(best, keep)
+                    self.store.decision(snap, "RESEARCH", keep, best)
+                    continue
             ready.append(best)
         alerts = []
         # Rank the whole scan cycle. Zero-valued count settings impose no budget.
+        cycle_keys = set()
         for candidate in sorted(ready, key=lambda c: (-(c.score + 2*min(8, max(-8, c.score_change))), -c.score, c.snapshot.symbol)):
             snap = candidate.snapshot
+            cycle_key = (snap.day, snap.symbol, candidate.option.side)
+            if cycle_key in cycle_keys:
+                continue
+            cycle_keys.add(cycle_key)
             if ((cfg.max_alerts_per_cycle and len(alerts) >= cfg.max_alerts_per_cycle)
                     or (cfg.max_alerts_per_day and self.store.count(snap.day) >= cfg.max_alerts_per_day)
                     or (cfg.max_alerts_per_ticker and self.store.count(snap.day, snap.symbol) >= cfg.max_alerts_per_ticker)):
@@ -253,6 +273,13 @@ class Engine:
             if cfg.send_requote:
                 candidate.metrics["send_requote"] = 1
             payload = alert_payload(candidate, phase, parent_id, quality=policy)
+            if (self.quality.policy == "S2" and candidate.metrics.get("lane") != "MOVER"
+                    and (candidate.metrics.get("move_from_open_atr") or 0) >= .4
+                    and candidate.metrics.get("options_persistent_20m") == 1):
+                payload["embeds"][0]["title"] = "A+ · " + payload["embeds"][0]["title"]
+            if candidate.metrics.get("lane") == "MOVER":
+                from .mover import decorate
+                decorate(payload, candidate)
             tier = candidate.metrics.get("tier") if cfg.hybrid else None
             ident = self.store.queue(candidate, payload, self.dry_run, phase, parent_id,
                                      quality=policy, tier=tier,

@@ -7,6 +7,9 @@ import os
 from .models import ET
 
 S_RULES = frozenset(('WF', 'LATE', 'OPEN', 'EXHQ', 'W1DTE', 'PREM'))
+# Model S2: S plus four stop-first-tested demotions (MODEL-U spec section 10).
+S2_RULES = frozenset(('REV', 'DTE1', 'AGAINST_OPEN', 'LOWRVOL'))
+S2_RESEARCH = frozenset(('WF', 'LATE')) | S2_RULES
 STACK8_RULES = frozenset(('WF', 'LATE', 'OPEN', 'EXHQ', 'IREV', 'REVRED', 'LRSPY', 'CONTSTALL'))
 DESCRIPTIONS = {
     'WF': 'Weak modeled contract response and recent stock progress',
@@ -15,6 +18,10 @@ DESCRIPTIONS = {
     'EXHQ': 'Elevated volume without strong price acceleration',
     'W1DTE': 'Next-day contract outside a level reclaim',
     'PREM': 'Higher premium without trend confirmation',
+    'REV': 'Reversal setup (directional lane only)',
+    'DTE1': 'Next-day contract',
+    'AGAINST_OPEN': 'Option side against the move from the open',
+    'LOWRVOL': 'Local five-minute RVOL below 0.8',
 }
 
 
@@ -33,11 +40,11 @@ class QualityConfig:
     def __post_init__(self):
         if self.mode not in ('off', 'shadow', 'enforce'):
             raise ValueError('LOTTO_QUALITY_MODE must be off, shadow, or enforce')
-        if self.policy != 'S':
-            raise ValueError('LOTTO_QUALITY_POLICY must be S; Stack 8 is comparison-only')
+        if self.policy not in ('S', 'S2'):
+            raise ValueError('LOTTO_QUALITY_POLICY must be S or S2; Stack 8 is comparison-only')
         if self.shadow_extra not in ('', 'stack8'):
             raise ValueError('LOTTO_QUALITY_SHADOW_EXTRA must be stack8 or empty')
-        if self.disabled_rules - (S_RULES | STACK8_RULES):
+        if self.disabled_rules - (S_RULES | S2_RULES | STACK8_RULES):
             raise ValueError('LOTTO_QUALITY_DISABLED_RULES contains an unknown rule')
 
     @classmethod
@@ -58,7 +65,7 @@ class QualityDecision:
 
 
 def evaluate(candidate, policy='S', disabled=frozenset()):
-    if policy not in ('S', 'stack8'):
+    if policy not in ('S', 'S2', 'stack8'):
         raise ValueError('Unknown quality policy')
     m, snap, opt = candidate.metrics, candidate.snapshot, candidate.option
     setup = candidate.setup.name if candidate.setup else ''
@@ -101,9 +108,20 @@ def evaluate(candidate, policy='S', disabled=frozenset()):
         labels.append(f'{label} {"aligned" if direction*market > 0 else "opposing" if direction*market < 0 else "flat"}')
         if setup == 'LEVEL_RECLAIM' and direction*market < 0:
             rules.append('LRSPY')  # Historical rule name; benchmark is explicitly labeled.
-    allowed = S_RULES if policy == 'S' else STACK8_RULES
+    if policy == 'S2':
+        if setup in ('INTRADAY_REVERSAL', 'REVERSAL'):
+            rules.append('REV')
+        if (opt.expiry - local.date()).days == 1:
+            rules.append('DTE1')
+        if extension is not None and extension < 0 and setup not in ('INTRADAY_REVERSAL', 'REVERSAL'):
+            rules.append('AGAINST_OPEN')
+        if rv is not None and rv < .8:
+            rules.append('LOWRVOL')
+    allowed = (S_RULES | S2_RULES) if policy == 'S2' else S_RULES if policy == 'S' else STACK8_RULES
     reasons = tuple(r for r in rules if r in allowed and r not in disabled)
-    tier = ('RESEARCH' if policy == 'S' and any(r in reasons for r in ('WF', 'LATE'))
+    research = S2_RESEARCH if policy == 'S2' else frozenset(('WF', 'LATE')) if policy == 'S' else frozenset()
+    tier = ('RESEARCH' if any(r in research for r in reasons)
             else 'SECONDARY' if reasons else 'MAIN')
-    version = 'S-2026-10-19-open0935' if policy == 'S' else 'stack8-2026-10-19'
+    version = ('S2-2026-10-26' if policy == 'S2' else 'S-2026-10-19-open0935' if policy == 'S'
+               else 'stack8-2026-10-19')
     return QualityDecision(version, tier, reasons, tuple(labels), escape)

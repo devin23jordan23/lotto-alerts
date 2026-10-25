@@ -45,6 +45,19 @@ class Settings:
     min_opening_bars: int = 3
     active_quality_gate: int = 1  # Keep excluded ideas in candidate/decision history.
 
+    # Stock-led MOVER lane (off by default). See lotto/mover.py.
+    mover_enabled: int = 0
+    mover_r15_atr: float = .25
+    mover_open_atr: float = .25
+    mover_gap_minutes: int = 15
+    mover_base_break: int = 1
+    mover_base_minutes: int = 15
+    mover_base_open_atr: float = .50
+    # KEEP gate: hold legacy ACTIVE ideas as research when the stock is not moving.
+    keep_gate: int = 0
+    keep_r15_atr: float = .15
+    keep_open_atr: float = .40
+
     def __post_init__(self):
         if any(not isfinite(value) for value in vars(self).values() if isinstance(value, (int, float))):
             raise ValueError("Settings must be finite")

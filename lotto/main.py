@@ -109,7 +109,7 @@ def main():
     engine = Engine(store, env_settings(), dry_run=not live_delivery)
     stock_first = StockFirst(store,
         enabled=os.getenv("LOTTO_STOCK_FIRST_ENABLED", "true").lower() == "true",
-        mode=os.getenv("LOTTO_STOCK_FIRST_MODE", "send").lower(),
+        mode=os.getenv("LOTTO_STOCK_FIRST_MODE", "shadow").lower(),
         max_quote_age=engine.settings.max_quote_age_seconds)
     health_monitor = HealthMonitor(store, webhook)
     if args.mode in {"demo", "replay"}:
