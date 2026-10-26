@@ -46,10 +46,11 @@ class ModelVTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=False):
             for name in ("LOTTO_MODEL", "LOTTO_MIN_SCORE", "LOTTO_SCORE_MODE", "LOTTO_PRESET",
                          "LOTTO_STANDBY_NAMES", "LOTTO_HANDOFF_MODEL_PATH",
-                         "LOTTO_STRENGTH_DISTRIBUTION_PATH"):
+                         "LOTTO_STRENGTH_DISTRIBUTION_PATH", "LOTTO_ATR_DAYS"):
                 os.environ.pop(name, None)
             live = env_settings()
         self.assertEqual(live.model, "V")
+        self.assertEqual(live.atr_days, 21)
         self.assertEqual(live.min_score, 60)
         self.assertEqual(live.fallback_rule, "log")
         self.assertEqual((live.fb_rvol_min, live.fb_push_atr_min, live.fb_max_spread_pct), (0.78, 0.5, 30))
@@ -58,6 +59,13 @@ class ModelVTests(unittest.TestCase):
         self.assertEqual(live.standby_names, 0)
         self.assertEqual(live.pwin_normal_0dte, 0.43157386)
         self.assertEqual(live.pwin_normal_1dte, 0.47114974)
+        with patch.dict(os.environ, {"LOTTO_MODEL": "V", "LOTTO_ATR_DAYS": "14"}, clear=False):
+            rolled = env_settings()
+        self.assertEqual(rolled.atr_days, 14)
+        self.assertEqual(rolled.pwin_normal_0dte, live.pwin_normal_0dte)
+        self.assertEqual(rolled.pwin_decile, live.pwin_decile)
+        self.assertEqual(rolled.strength_quintile, live.strength_quintile)
+        self.assertEqual(rolled.strength_decile, live.strength_decile)
         self.assertEqual(live.pwin_quintile_0dte, 0.28822075)
         self.assertEqual(live.pwin_decile, 0.17760635)
         self.assertEqual(live.pwin_decile_1dte, 0.18333891)
@@ -65,6 +73,7 @@ class ModelVTests(unittest.TestCase):
         self.assertEqual(live.handoff_model_path, live.strength_distribution_path)
         self.assertEqual(live.handoff_model_path, HANDOFF_SPEC_PATH)
         self.assertNotIn("PLACEHOLDER", live.preset_note)
+        self.assertEqual(model_v_settings().atr_days, 21)
         self.assertEqual((live.post_combined_0dte, live.post_combined_1dte), (40, 61))
         self.assertEqual(live.stock_max_share, 0.40)
         self.assertEqual((live.post_v2_option_0dte, live.post_v2_option_1dte), (40, 61))
@@ -406,8 +415,12 @@ class ModelVTests(unittest.TestCase):
 
     def test_spec_vectors_match_fitted_probability_and_strength(self):
         spec = json.loads(Path(HANDOFF_SPEC_PATH).read_text())
-        live = model_v_settings()
-        s11 = model_v_settings(preset="S11")
+        # These rows are the shipped ATR14 fit. Score them on LOTTO_ATR_DAYS=14.
+        # Do not rebuild the vectors from 21-day ranges.
+        live = model_v_settings(atr_days=14)
+        s11 = model_v_settings(preset="S11", atr_days=14)
+        self.assertEqual(model_v_settings().atr_days, 21)
+        self.assertEqual(model_v_settings().pwin_decile, live.pwin_decile)
         self.assertEqual(live.pwin_decile, 0.17760635)
         self.assertEqual(live.pwin_decile_1dte, 0.18333891)
         self.assertEqual(s11.pwin_decile_1dte, 0.24061730)
@@ -447,8 +460,9 @@ class ModelVTests(unittest.TestCase):
     def test_vince_lane_vectors(self):
         root = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
         cases = (
-            ("TEST-VECTORS-C1_S12_default.csv", model_v_settings()),
-            ("TEST-VECTORS-fallback_S11_default.csv", model_v_settings(preset="S11")),
+            # ATR14 fixtures. The pass/fail columns stay the shipped floors.
+            ("TEST-VECTORS-C1_S12_default.csv", model_v_settings(atr_days=14)),
+            ("TEST-VECTORS-fallback_S11_default.csv", model_v_settings(preset="S11", atr_days=14)),
         )
         for name, settings in cases:
             with (root / name).open() as handle:
@@ -459,7 +473,7 @@ class ModelVTests(unittest.TestCase):
                 passed = lane_decision(
                     row["lane"], int(float(row["cdte"])), v2, float(row["pF"]), float(row["ss"]), settings)
                 self.assertEqual(passed, bool(int(row["pass"])), (name, row["cid"], row["lane"]))
-        s12 = model_v_settings()
+        s12 = model_v_settings(atr_days=14)
         # A runner name stays on the normal floor. 0.20 clears the S12 top-decile floor and misses 0.4316.
         self.assertTrue(lane_decision("handoff", 0, None, 0.20, 0.95, s12, a_bar=False))
         self.assertFalse(lane_decision("handoff", 0, None, 0.20, 0.95, s12, a_bar=True))
@@ -586,6 +600,38 @@ def _fallback_snap(bars, side="CALL", options=None, level=100.0, base=1600, sess
     object.__setattr__(snap, "fallback_rvol_sessions", sessions)
     object.__setattr__(snap, "fallback_rvol_base", base)
     return snap
+
+
+class AtrWindowTests(unittest.TestCase):
+    def test_prior_atr_drives_mo_atr_and_the_floors_stay_shipped(self):
+        from lotto.patterns import path_features
+        shipped = model_v_settings()
+        fourteen = model_v_settings(atr_days=14)
+        self.assertEqual(shipped.atr_days, 21)
+        for name in ("pwin_normal_0dte", "pwin_normal_1dte", "pwin_quintile_0dte",
+                     "pwin_quintile_1dte", "pwin_decile", "pwin_decile_1dte",
+                     "strength_quintile", "strength_decile"):
+            self.assertEqual(getattr(shipped, name), getattr(fourteen, name))
+        with self.assertRaises(ValueError):
+            model_v_settings(atr_days=7)
+        start = datetime(2026, 10, 26, 9, 30, tzinfo=ET)
+        bars = _bars(start, 8, lambda minute: 100 + minute * 0.5)
+        option = _contract(bars[-1].end, 105)
+        move = bars[-1].close - bars[0].open
+        common = dict(spot=bars[-1].close, spot_time=bars[-1].end, prior_close=100,
+                      bars=bars, options=(option,))
+        snap14 = Snapshot("DEMO", bars[-1].end, prior_atr=2, **common)
+        snap21 = Snapshot("DEMO", bars[-1].end, prior_atr=4, **common)
+        missing = Snapshot("DEMO", bars[-1].end, prior_atr=None, **common)
+        self.assertAlmostEqual(build_handoff_features(snap14, option, [], 1)["mo_atr"], move / 2)
+        self.assertAlmostEqual(build_handoff_features(snap21, option, [], 1)["mo_atr"], move / 4)
+        self.assertAlmostEqual(path_features(snap21, 1)["move_from_open_atr"], move / 4)
+        self.assertEqual(path_features(missing, 1)["atr_available"], 0)
+        self.assertEqual(path_features(missing, 1)["move_from_open_atr"], 0)
+        self.assertIsNone(build_handoff_features(missing, option, [], 1)["mo_atr"])
+        filled = fill_strength_inputs(
+            {"mo_atr": None, "rvol": 1, "pm_brk": 1, "pd_brk": 1, "newx5": 1}, {})
+        self.assertAlmostEqual(filled["mo_atr"], 0.5380223785056588)
 
 
 class FallbackRuleTests(unittest.TestCase):

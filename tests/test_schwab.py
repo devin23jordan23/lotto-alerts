@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import tempfile
 import threading
 import time
@@ -164,6 +165,28 @@ class AdapterTests(unittest.TestCase):
         self.client.baseline("TEST", today)
         self.assertEqual(self.client.atrs[("TEST", today.date())], 1)
         self.assertAlmostEqual(self.client.atrs21[("TEST", today.date())], (3 * 7 + 1 * 14) / 21)
+
+    def test_atr_days_writes_prior_atr_and_does_not_borrow_the_14_day_average(self):
+        today = datetime(2026, 10, 26, 10, 0, tzinfo=ET)
+        day = today.date()
+        self.client.candles = Mock(return_value={"candles": self._daily_candles(today, [4] * 14)})
+        self.client.baseline("TEST", today)
+        self.assertEqual(self.client.prior_atr_for("TEST", day, 14), 4)
+        self.assertIsNone(self.client.prior_atr_for("TEST", day, 21))
+        ranges = [50] + [3] * 7 + [1] * 14
+        atr21 = (3 * 7 + 1 * 14) / 21
+        self.client.baselines = {}
+        self.client.candles = Mock(return_value={"candles": self._daily_candles(today, ranges)})
+        self.client.baseline("TEST", today)
+        self.assertEqual(self.client.atrs[("TEST", day)], 1)
+        self.assertAlmostEqual(self.client.prior_atr_for("TEST", day, 14), 1)
+        self.assertAlmostEqual(self.client.prior_atr_for("TEST", day, 21), atr21)
+        with patch.dict(os.environ, {"LOTTO_ATR_DAYS": "21"}):
+            self.assertAlmostEqual(self.client.prior_atr_for("TEST", day), atr21)
+        with patch.dict(os.environ, {"LOTTO_ATR_DAYS": "14"}):
+            self.assertEqual(self.client.prior_atr_for("TEST", day), 1)
+        # The fallback series stays the 21-day mean either way.
+        self.assertAlmostEqual(self.client.atrs21[("TEST", day)], atr21)
 
     def test_fallback_rvol_needs_ten_sessions_and_does_not_use_the_handoff_floor(self):
         today = datetime(2026, 10, 26, 10, 0, tzinfo=ET)

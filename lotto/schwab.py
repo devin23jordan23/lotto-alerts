@@ -274,6 +274,8 @@ class Schwab:
             previous = rows[-1]["close"]
         if not hasattr(self, "atrs"):
             self.atrs = {}
+        # Both windows stay on the client. prior_atr_for picks one for prior_atr.
+        # The fallback keeps atrs21 even when the live window is 14.
         self.atrs[key] = sum(ranges[-14:])/14 if len(ranges) >= 14 else None
         if not hasattr(self, "atrs21"):
             self.atrs21 = {}
@@ -369,6 +371,21 @@ class Schwab:
             LOG.warning("%s has fewer than ten usable historical sessions; no alerts until baseline is available", symbol)
         self.baselines[key] = baseline
         return baseline
+
+    def prior_atr_for(self, symbol: str, day, days=None):
+        """Value written to prior_atr. 21 by default; 14 restores the old average.
+
+        ATR21 is the mean of the prior daily true ranges, today already excluded,
+        and it needs at least 15 ranges. Fewer than that returns None. The 14-day
+        average is not substituted.
+        """
+        if days is None:
+            raw = os.getenv("LOTTO_ATR_DAYS", "21").strip()
+            days = 14 if raw == "14" else 21
+        key = (symbol, day)
+        if int(days) == 14:
+            return self.atrs.get(key) if hasattr(self, "atrs") else None
+        return getattr(self, "atrs21", {}).get(key)
 
     def bars(self, symbol: str, now: datetime, with_baseline=True) -> tuple[Bar, ...]:
         opening = now.astimezone(ET).replace(hour=9, minute=30, second=0, microsecond=0)
@@ -576,6 +593,9 @@ class Schwab:
             return []
         benchmarks = {benchmark_for(s) for s in symbols} | {"SPY", "QQQ", "SMH"}
         standby = set(standby)
+        atr_days = getattr(in_play_settings, "atr_days", None) if in_play_settings is not None else None
+        if atr_days not in (14, 21):
+            atr_days = None
         batch = getattr(in_play_settings, "quote_batch", 180) if in_play_settings is not None else 180
         quote_every = getattr(in_play_settings, "standby_quote_minutes", 1) if in_play_settings is not None else 1
         from .model_v import quote_universe
@@ -599,7 +619,7 @@ class Schwab:
                 "open":number(q.get("openPrice")), "volume":number(q.get("totalVolume")),
                 "high":number(q.get("highPrice")), "low":number(q.get("lowPrice")),
                 "at":epoch(q.get("tradeTime") or q.get("quoteTime")),
-                "prior_atr": self.atrs.get((symbol, now.astimezone(ET).date())) if hasattr(self, "atrs") else None,
+                "prior_atr": self.prior_atr_for(symbol, now.astimezone(ET).date(), atr_days),
             }
         if "SPX" in parsed:
             parsed["SPX"]["volume"] = parsed.get("SPY", {}).get("volume")
@@ -746,7 +766,7 @@ class Schwab:
                 snap = Snapshot(symbol, at, spot, spot_time, previous, bars, tuple(options),
                                        context, context_time, benchmark, "schwab", session[1],
                                        volume_source="SPY" if symbol == "SPX" else symbol,
-                                       prior_atr=self.atrs.get((symbol, now.astimezone(ET).date())),
+                                       prior_atr=self.prior_atr_for(symbol, now.astimezone(ET).date(), atr_days),
                                        market_return_5m=market_return, market_time=market_time, market_label=market,
                                        market_return_from_open=market_from_open, market_vwap_side=market_vwap_side,
                                        peer_return_5m=peer_return, peer_time=min((p[2] for p in peers), default=None),

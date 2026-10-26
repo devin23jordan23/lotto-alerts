@@ -78,6 +78,17 @@ class StockFirstTests(unittest.TestCase):
             scanner.process([row], dry_run=False)
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM stock_ideas").fetchone()[0], 0)
 
+    def test_a_wider_atr_drops_the_handoff_trigger(self):
+        # Same prices clear 0.25 ATR at 10 and miss it at 20. The live quote's
+        # prior_atr is whichever window LOTTO_ATR_DAYS selected.
+        scanner = StockFirst(self.store, enabled=True, mode="send")
+        ideas = []
+        for minute, price in enumerate([370, 370.1, 370.2, 370.4, 370.8, 371.8, 372.7, 373.6]):
+            row = self.row(minute, price)
+            row["prior_atr"] = 20.0
+            ideas.extend(scanner.process([row], dry_run=False))
+        self.assertEqual(ideas, [])
+
     def test_atr_scaled_opening_runner_alerts(self):
         scanner = StockFirst(self.store, enabled=True, mode="send")
         ideas = []

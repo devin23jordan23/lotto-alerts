@@ -80,7 +80,9 @@ Stock volume can qualify through either high cumulative same-time pace or a
 local five-minute volume burst accompanied by ATR expansion. A quieter-day
 recovery may instead qualify through improving local stock volume, directional
 progress and stronger multi-strike option acceleration. Baselines use prior
-sessions only. ATR uses 14 prior true ranges. Thresholds remain uncalibrated
+sessions only. ATR uses LOTTO_ATR_DAYS prior true ranges (21 by default, at least
+15; set 14 to restore the previous average). A name with fewer than 15 ranges
+gets an empty prior_atr on the 21-day window, not the 14-day average. Thresholds remain uncalibrated
 research defaults; the historical case study is not proof of an edge.
 
 During the first 45 completed bars, a triggered opening drive, opening break,
