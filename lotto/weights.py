@@ -69,11 +69,19 @@ def _whole(value, default: int) -> int:
         return int(default)
 
 
+# Old LOTTO_PROFILE values. Numbers come from the named block.
+PROFILE_ALIASES = {
+    "loose": "aggressive",
+    "moderate": "conservative",
+}
+
+
 def active_profile(book: dict | None = None, name: str | None = None) -> dict:
     """The profile LOTTO_PROFILE selected.
 
     post_threshold is used as written. A value above 60 stays. Negative
-    thresholds clamp to 0. An unknown name logs a warning and uses moderate.
+    thresholds clamp to 0. loose selects aggressive and moderate selects
+    conservative. An unknown name logs a warning and uses moderate (90).
     Missing keys use the moderate preset: 90 / 40 / 0 / 10.
     """
     if book is None:
@@ -82,14 +90,16 @@ def active_profile(book: dict | None = None, name: str | None = None) -> dict:
     if not isinstance(profiles, dict):
         profiles = {}
     requested = str(name or "moderate").strip().lower() or "moderate"
-    if requested not in profiles:
+    canonical = PROFILE_ALIASES.get(requested, requested)
+    if canonical not in profiles:
         LOG.warning(
             "Unknown LOTTO_PROFILE %r; using moderate. "
-            "Expected loose, moderate, or conservative.",
+            "Expected aggressive, middle, or conservative.",
             requested,
         )
         requested = "moderate"
-    raw = profiles.get(requested)
+        canonical = PROFILE_ALIASES["moderate"]
+    raw = profiles.get(canonical)
     if not isinstance(raw, dict):
         raw = {}
     bolt = raw.get("bolt_min_features", raw.get("bolt_min_positive_features", 10))

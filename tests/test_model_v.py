@@ -1744,21 +1744,21 @@ class ReviewFixTests(unittest.TestCase):
 
     def test_profile_selection_and_an_uncapped_post_line(self):
         book = load_weights()
-        self.assertEqual(set(book["profiles"]), {"loose", "moderate", "conservative"})
+        self.assertEqual(set(book["profiles"]), {"aggressive", "middle", "conservative"})
         self.assertEqual(active_profile(book, "loose")["post_threshold"], 5)
         self.assertEqual(active_profile(book, "moderate")["min_positive_features"], 0)
         self.assertEqual(active_profile(book, "moderate")["strong_feature_min"], 10)
         conservative = active_profile(book, "conservative")
-        self.assertEqual(conservative["post_threshold"], 95)
+        self.assertEqual(conservative["post_threshold"], 90)
         self.assertEqual(conservative["min_positive_features"], 0)
         self.assertEqual(conservative["strong_feature_min"], 10)
         self.assertNotIn("conservative_alt_confluence", book["profiles"])
         clamped = active_profile({
-            "profiles": {"moderate": {
+            "profiles": {"conservative": {
                 "post_threshold": -5, "bypass_threshold": -1, "min_positive_features": -3,
                 "bolt_min_features": -2,
             }},
-        }, "moderate")
+        }, "conservative")
         self.assertEqual((clamped["post_threshold"], clamped["bypass_threshold"],
                           clamped["min_positive_features"], clamped["strong_feature_min"]), (0, 0, 0, 0))
         with self.assertLogs("lotto.weights", level="WARNING") as unknown:
@@ -1780,7 +1780,7 @@ class ReviewFixTests(unittest.TestCase):
             os.environ["LOTTO_PROFILE"] = "conservative"
             strict = env_settings()
             self.assertEqual(strict.profile, "conservative")
-            self.assertEqual(strict.post_threshold, 95)
+            self.assertEqual(strict.post_threshold, 90)
             self.assertEqual(strict.min_positive_features, 0)
             self.assertEqual(strict.strong_feature_min, 10)
             os.environ["LOTTO_PROFILE"] = "moderate"
@@ -1799,14 +1799,14 @@ class ReviewFixTests(unittest.TestCase):
 
         high = active_profile({
             "profiles": {
-                "moderate": {
+                "middle": {
                     "post_threshold": 75,
                     "bypass_threshold": 40,
                     "min_positive_features": 0,
                     "bolt_min_positive_features": 10,
                 },
             },
-        }, "moderate")
+        }, "middle")
         self.assertEqual(high["post_threshold"], 75)
         settings = model_v_settings(
             profile="moderate", post_threshold=75, bypass_threshold=40,
@@ -2077,9 +2077,9 @@ class ReviewFixTests(unittest.TestCase):
         }.items():
             self.assertEqual(book["weights"][name], {"call": weight, "put": weight})
         for name, line in {
-            "loose": (5, 40, 0, 10),
-            "moderate": (90, 40, 0, 10),
-            "conservative": (95, 40, 0, 10),
+            "aggressive": (5, 40, 0, 10),
+            "middle": (75, 40, 0, 10),
+            "conservative": (90, 40, 0, 10),
         }.items():
             row = book["profiles"][name]
             self.assertEqual(
@@ -2100,8 +2100,34 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(zero_score, 0)
         self.assertEqual(zero_positive, 0)
 
+    def test_named_profiles_and_aliases_resolve_their_lines(self):
+        book = load_weights()
+        lines = {
+            "aggressive": (5, 40, 0, 10),
+            "middle": (75, 40, 0, 10),
+            "conservative": (90, 40, 0, 10),
+            "loose": (5, 40, 0, 10),
+            "moderate": (90, 40, 0, 10),
+        }
+        for name, line in lines.items():
+            chosen = active_profile(book, name)
+            self.assertEqual(chosen["profile"], name)
+            self.assertEqual(
+                (chosen["post_threshold"], chosen["bypass_threshold"],
+                 chosen["min_positive_features"], chosen["strong_feature_min"]),
+                line,
+            )
+        with self.assertLogs("lotto.weights", level="WARNING") as unknown:
+            fallback = active_profile(book, "no-such-profile")
+        self.assertEqual(fallback["post_threshold"], 90)
+        self.assertEqual(
+            (fallback["bypass_threshold"], fallback["min_positive_features"], fallback["strong_feature_min"]),
+            (40, 0, 10),
+        )
+        self.assertIn("Unknown LOTTO_PROFILE", "\n".join(unknown.output))
+
     def test_missing_profile_key_defaults_to_moderate_90(self):
-        chosen = active_profile({"profiles": {"moderate": {}}}, "moderate")
+        chosen = active_profile({"profiles": {"conservative": {}}}, "conservative")
         self.assertEqual(
             (chosen["post_threshold"], chosen["bypass_threshold"],
              chosen["min_positive_features"], chosen["strong_feature_min"]),
