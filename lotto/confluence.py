@@ -35,11 +35,17 @@ Consolidation and bounce use the same bar and ATR bands. A tight window
 that breaks in the trade direction, or a tag of VWAP that holds, earns a
 partial match when the tag or the window is only partway into the band.
 
-Points are tier weight times the match. These detectors are not a separate
-bypass rule. The bypass posts when the tiered sum clears bypass_confluence_min,
-the data-derived entry filters pass, and the base/blocker table allows it.
-A pattern is a stock trigger only on the bar its match first reaches
-pattern_trigger_min.
+Points come from the weights book: weight for the side times the 0-1 match.
+A row with requires_min_other_positive stays at 0 until that many other
+positive features are already on the card. A row with requires_min_conf stays
+at 0 until that many of {level break, RVOL >= 1.5, SPY with the trade,
+option volume >= 200} are on. A pattern is a stock trigger only on the bar
+its match first reaches pattern_trigger_min.
+
+v4c EMA rows are always measured and logged. The book sets most of them to
+weight 0 so they stay available for shadow grading. The 2-minute 21 EMA
+dip-and-reclaim and the 5/10-minute put dip-and-reclaim are the rows with
+a shipped weight, and only after their gates.
 """
 from math import floor, isfinite
 
@@ -51,6 +57,22 @@ from .models import ET
 PATTERN_FEATURES = (
     "ema9_pullback", "flag", "w_pattern", "m_pattern", "fashionably_late",
 )
+
+# v4c feature names. Weights stay in the book; these are only the keys.
+DRC_EMA21_2M = "drc_ema21_2m_dip_reclaim"
+DRP_510 = "drp_510_dip_reclaim"
+E1_EMA9_2M_PRE10 = "e1_ema9_2m_pullin_pre10"
+EMA21_PULLIN_2M = "ema21_pullin_2m"
+EMA21_PULLIN_5M = "ema21_pullin_5m"
+EMA21_PULLIN_10M = "ema21_pullin_10m"
+EMA9_2M_DIP = "ema9_2m_dip_reclaim"
+DIP_RECLAIM_5_10_CALLS = "dip_reclaim_5_10m_calls"
+SHADOW_EMA_FEATURES = (
+    E1_EMA9_2M_PRE10, EMA21_PULLIN_2M, EMA21_PULLIN_5M, EMA21_PULLIN_10M,
+    EMA9_2M_DIP, DIP_RECLAIM_5_10_CALLS,
+)
+# Freshness of a dip-and-reclaim, in minutes, by chart frame.
+_DIP_FRESH_MINUTES = {2: 10, 5: 15, 10: 20}
 
 
 def tier_weight(settings: Settings, tier: str) -> float:
@@ -92,48 +114,55 @@ def pattern_match(flags: dict) -> float:
     return max((match_value(flags.get(name)) for name in PATTERN_FEATURES), default=0.0)
 
 
-def card_gate(side, volume, spread, flags: dict, points: float, settings: Settings) -> dict:
-    """Base items, blockers, and overrides. Direction is never overridden.
+def card_gate(side, volume, spread, settings: Settings, bid=None, option_volume_5m=None) -> dict:
+    """Direction, stock volume, spread, bid, and 5-minute option volume.
 
-    Missing volume is lifted only when the tiered score clears
-    base_override_points. A slightly wide spread is lifted by that score
-    or by PM break + RVOL + volume together.
+    Nothing in the score lifts a miss. Spread is (ask-bid)/ask. Exactly the
+    spread cap passes. A bid at the floor blocks. Exactly the volume floor passes.
     """
     base = {
         "direction": int(side in {"CALL", "PUT"}),
         "volume": int(volume is not None and volume >= settings.base_volume_min),
     }
-    overrides = []
     missing = [name for name, ok in base.items() if not ok]
-    if "volume" in missing and points >= settings.base_override_points:
-        missing.remove("volume")
-        overrides.append("volume")
     blockers = []
-    if spread is not None and spread > settings.blocker_spread:
+    if spread is None or not isinstance(spread, (int, float)) or not isfinite(spread) or spread > settings.blocker_spread:
         blockers.append("wide_spread")
-        strong = bool(flags.get("pm_break") and flags.get("rvol") and base["volume"])
-        if points >= settings.blocker_spread_override_points or strong:
-            overrides.append("wide_spread")
-    blocking = [name for name in blockers if name not in overrides]
-    blocked_by = list(missing) + blocking
+    if bid is None or not isinstance(bid, (int, float)) or not isfinite(bid) or bid <= settings.blocker_bid:
+        blockers.append("low_bid")
+    if (option_volume_5m is None or not isinstance(option_volume_5m, (int, float))
+            or not isfinite(option_volume_5m) or option_volume_5m < settings.blocker_option_volume_5m):
+        blockers.append("option_volume")
+    blocked_by = list(missing) + blockers
     return {
         "base": base,
         "blockers": blockers,
-        "overrides": overrides,
+        "overrides": [],
         "blocked_by": blocked_by,
         "post_ok": not blocked_by,
     }
 
 
-def primary_strength_marker(score, minimum: float) -> str | None:
-    """⚡ when the model score clears LOTTO_STRONG_SCORE.
+def primary_strength_marker(positive_features, minimum: float, score=None, min_score: float = 20) -> str | None:
+    """⚡ when the score clears min_score and enough features are positive.
 
-    `minimum` is the hook. A later fitted cut replaces it. 🔥 stays the
-    extreme title and is not this marker.
+    Pass score=None to check the count only. 🔥 stays the extreme title and
+    is not this marker.
     """
-    if score is None or not isinstance(score, (int, float)) or not isfinite(score):
+    if score is not None:
+        try:
+            scored = float(score)
+        except (TypeError, ValueError):
+            return None
+        if not isfinite(scored) or scored < float(min_score):
+            return None
+    try:
+        count = float(positive_features)
+    except (TypeError, ValueError):
         return None
-    if score >= minimum:
+    if not isfinite(count):
+        return None
+    if count >= minimum:
         return "⚡"
     return None
 
@@ -274,14 +303,20 @@ def _clip(score: float) -> float:
     return round(max(0.0, min(1.0, score)), 4)
 
 
-def detect_ema_pullback(bars, minutes, direction: int, atr: float | None, settings: Settings) -> float:
-    """Best 0-1 pullback to the 9 EMA across the configured ranges."""
+def detect_ema_pullback(bars, minutes, direction: int, atr: float | None, settings: Settings,
+                        period: int | None = None, frames: list[int] | None = None) -> float:
+    """Best 0-1 pullback to an EMA across the configured ranges.
+
+    `period` defaults to the 9 EMA. `frames` defaults to the minutes argument
+    or the configured timeframes.
+    """
     if atr is None or atr <= 0 or direction not in (1, -1):
         return 0.0
     best = 0.0
-    period = int(settings.ema_pullback_period)
+    period = int(period or settings.ema_pullback_period)
     window = max(int(settings.pattern_bars_outer_max), 1)
-    for frame in _frames(minutes, settings):
+    chosen = list(frames) if frames is not None else _frames(minutes, settings)
+    for frame in chosen:
         framed = timeframe_bars(bars, frame)
         if len(framed) < period + 1:
             continue
@@ -325,6 +360,143 @@ def detect_ema_pullback(bars, minutes, direction: int, atr: float | None, settin
             extended = best_gap / settings.ema_tag_core
         best = max(best, min(move, bars_s, depth_s, tag, hold, extended))
     return _clip(best)
+
+
+def _before_ten(bars) -> bool:
+    """The latest bar ends before 10:00 ET."""
+    if not bars:
+        return False
+    local = bars[-1].end.astimezone(ET)
+    return (local.hour, local.minute, local.second, local.microsecond) < (10, 0, 0, 0)
+
+
+def detect_ema9_2m_before_10(bars, direction: int, atr: float | None, settings: Settings) -> float:
+    """2-minute 9 EMA pull-in. 0 once the bar is 10:00 ET or later."""
+    if not _before_ten(bars):
+        return 0.0
+    return detect_ema_pullback(bars, 2, direction, atr, settings, period=9, frames=[2])
+
+
+def detect_ema21_pullin(bars, direction: int, atr: float | None, settings: Settings) -> float:
+    """21 EMA pull-in. Best 0-1 match on the 2-, 5-, and 10-minute frames."""
+    return detect_ema_pullback(bars, None, direction, atr, settings, period=21, frames=[2, 5, 10])
+
+
+def _nia_trend(framed, emas, index: int, direction: int) -> bool:
+    """EMA with the trade versus 3 bars ago, and 60% of the prior 8 closes with it."""
+    if index < 8:
+        return False
+    if direction * (emas[index] - emas[index - 3]) <= 0:
+        return False
+    held = 0
+    for prior in range(index - 8, index):
+        if direction * (framed[prior]["close"] - emas[prior]) > 0:
+            held += 1
+    return held / 8 >= 0.6
+
+
+def _nia_beyond(bar, ema: float, direction: int, atr: float) -> bool:
+    """Low (calls) or high (puts) sits 0.05-0.5 ATR past the EMA."""
+    if direction == 1:
+        depth = (ema - bar["low"]) / atr
+    else:
+        depth = (bar["high"] - ema) / atr
+    return 0.05 <= depth <= 0.5
+
+
+def _nia_reclaim(framed, emas, index: int, direction: int) -> bool:
+    """Close back across the EMA and beyond the prior bar's close."""
+    if index < 1:
+        return False
+    close = framed[index]["close"]
+    if direction * (close - emas[index]) <= 0:
+        return False
+    return direction * (close - framed[index - 1]["close"]) > 0
+
+
+def nia_dip_reclaim(bars, frame: int, direction: int, atr: float | None, period: int) -> float:
+    """1 inside Nia's dip-and-reclaim spec on this frame, else 0.
+
+    The dip is 0.05-0.5 ATR past the EMA. The close comes back across the EMA,
+    and past the prior close, within 1-4 bars. A same-bar wick counts as 1.
+    The reclaim is fresh for 10 minutes on a 2-minute frame, 15 on 5-minute,
+    and 20 on 10-minute. Only completed bars are read. The latest bar can be
+    the reclaim.
+    """
+    if atr is None or atr <= 0 or direction not in (1, -1) or not bars:
+        return 0.0
+    framed = timeframe_bars(bars, int(frame))
+    if len(framed) < 9:
+        return 0.0
+    closes = [bar["close"] for bar in framed]
+    emas = _ema(closes, int(period))
+    last = len(framed) - 1
+    fresh = _DIP_FRESH_MINUTES.get(int(frame), int(frame) * 5)
+    for reclaim_i in range(last, 7, -1):
+        if (last - reclaim_i) * int(frame) > fresh:
+            break
+        if not _nia_trend(framed, emas, reclaim_i, direction):
+            continue
+        if not _nia_reclaim(framed, emas, reclaim_i, direction):
+            continue
+        for dip_i in range(reclaim_i, reclaim_i - 4, -1):
+            if dip_i < 0:
+                break
+            if _nia_beyond(framed[dip_i], emas[dip_i], direction, float(atr)):
+                return 1.0
+    return 0.0
+
+
+def detect_drc_ema21_2m(bars, direction: int, atr: float | None) -> float:
+    """2-minute 21 EMA dip-and-reclaim. Calls only."""
+    if direction != 1:
+        return 0.0
+    return nia_dip_reclaim(bars, 2, 1, atr, 21)
+
+
+def detect_drp_510(bars, direction: int, atr: float | None) -> float:
+    """5- or 10-minute dip-and-reclaim on the 9 or 21 EMA. Puts only."""
+    if direction != -1:
+        return 0.0
+    best = 0.0
+    for frame in (5, 10):
+        for period in (9, 21):
+            best = max(best, nia_dip_reclaim(bars, frame, -1, atr, period))
+    return best
+
+
+def detect_ema9_2m_dip(bars, direction: int, atr: float | None) -> float:
+    """2-minute 9 EMA dip-and-reclaim. Both sides, for the shadow row."""
+    if direction not in (1, -1):
+        return 0.0
+    return nia_dip_reclaim(bars, 2, direction, atr, 9)
+
+
+def detect_dip_reclaim_5_10_calls(bars, direction: int, atr: float | None) -> float:
+    """5- or 10-minute dip-and-reclaim on the 9 or 21 EMA. Calls only."""
+    if direction != 1:
+        return 0.0
+    best = 0.0
+    for frame in (5, 10):
+        for period in (9, 21):
+            best = max(best, nia_dip_reclaim(bars, frame, 1, atr, period))
+    return best
+
+
+def detect_ema_dip_reclaim(bars, direction: int, atr: float | None, settings: Settings) -> float:
+    """Best Nia dip-and-reclaim on the 9 and 21 EMA, 2-, 5-, and 10-minute.
+
+    Calls dip below the EMA and close back above it. Puts pop above and close
+    back below. `settings` is unused; the spec is fixed.
+    """
+    del settings
+    if atr is None or atr <= 0 or direction not in (1, -1) or not bars:
+        return 0.0
+    best = 0.0
+    for period in (9, 21):
+        for frame in (2, 5, 10):
+            best = max(best, nia_dip_reclaim(bars, frame, direction, atr, period))
+    return best
 
 
 def detect_flag(bars, minutes, direction: int, atr: float | None, settings: Settings) -> float:
@@ -567,11 +739,7 @@ def confluence_flags(snap, option, metrics: dict | None = None) -> dict:
         beyond = close > prior_extreme if direction == 1 else close < prior_extreme
         minute = _session_minute(bars[-1])
         flags["hod_break"] = int(bool(beyond and minute is not None and minute >= 15))
-    rvol = max(metrics.get("pace_rvol") or 0, metrics.get("local_rvol_5m") or 0)
-    fallback_base = getattr(snap, "fallback_rvol_base", None)
-    sessions = getattr(snap, "fallback_rvol_sessions", None)
-    if sessions is not None and sessions >= 10 and fallback_base not in (None, 0):
-        rvol = max(rvol, sum(bar.volume for bar in bars) / fallback_base)
+    rvol = _curve_rvol(snap, bars) or 0
     moved = direction * (close - bars[0].open) > 0
     floor = metrics.get("_conf_rvol_min", 1)
     flags["rvol"] = int(bool(moved and rvol >= floor))
@@ -602,7 +770,7 @@ def confluence_flags(snap, option, metrics: dict | None = None) -> dict:
     move = metrics.get("move_from_open_atr")
     if move is None and atr:
         move = direction * (close - bars[0].open) / atr
-    flags["atr_move"] = int(bool(isinstance(move, (int, float)) and move >= 0.25))
+    flags["atr_move"] = 0
     box_high = getattr(snap, "box5_high", None)
     box_low = getattr(snap, "box5_low", None)
     box = box_high if direction == 1 else box_low
@@ -668,20 +836,158 @@ def confluence_flags_for(snap, option, metrics, settings: Settings) -> dict:
     direction = -1 if option is not None and option.side == "PUT" else 1
     bars = list(snap.bars)
     if bars:
-        rvol = max(metrics.get("pace_rvol") or 0, metrics.get("local_rvol_5m") or 0)
-        sessions = getattr(snap, "fallback_rvol_sessions", None)
-        base = getattr(snap, "fallback_rvol_base", None)
-        if sessions is not None and sessions >= 10 and base not in (None, 0):
-            rvol = max(rvol, sum(bar.volume for bar in bars) / base)
+        rvol = _curve_rvol(snap, bars) or 0
         moved = direction * (bars[-1].close - bars[0].open) > 0
         flags["rvol"] = int(bool(moved and rvol >= settings.fb_rvol_min))
         flags["volume"] = int(bars[-1].volume >= settings.base_volume_min)
-        move = metrics.get("move_from_open_atr")
-        atr = _atr(snap)
-        if move is None and atr:
-            move = direction * (bars[-1].close - bars[0].open) / atr
-        flags["atr_move"] = int(bool(isinstance(move, (int, float)) and move >= settings.conf_atr_min))
+        flags["atr_move"] = 0
     return flags
+
+
+def _curve_rvol(snap, bars) -> float | None:
+    """Cumulative volume over the mean curve of the prior 10 full days.
+
+    The handoff curve and the fallback curve are the same series. Fewer than
+    10 full days leaves this empty. A zero mean is RVOL 0.
+    """
+    if not bars:
+        return None
+    days = getattr(snap, "prior_full_days", None)
+    base = getattr(snap, "rvol_base", None)
+    if days is not None and days >= 10 and base and base > 0:
+        return sum(bar.volume for bar in bars) / float(base)
+    sessions = getattr(snap, "fallback_rvol_sessions", None)
+    fallback = getattr(snap, "fallback_rvol_base", None)
+    if sessions is None or sessions < 10:
+        return None
+    if fallback in (None, 0):
+        return 0.0 if fallback == 0 else None
+    return sum(bar.volume for bar in bars) / float(fallback)
+
+
+def _on(value) -> float:
+    return 1.0 if value else 0.0
+
+
+def _level_break(snap, bars, direction: int) -> float:
+    """1 when price has traded through PM or prior-day level, including a gap."""
+    if not bars or direction not in (1, -1):
+        return 0.0
+    if direction == 1:
+        levels = (getattr(snap, "premarket_high", None), getattr(snap, "prior_high", None))
+    else:
+        levels = (getattr(snap, "premarket_low", None), getattr(snap, "prior_low", None))
+    for level in levels:
+        if level is None or not isinstance(level, (int, float)) or not isfinite(level):
+            continue
+        if direction * (bars[0].open - level) > 0:
+            return 1.0
+        if any(direction * (bar.close - level) > 0 for bar in bars):
+            return 1.0
+    return 0.0
+
+
+def additive_features(snap, option, settings: Settings, metrics=None, history=None, setup=None) -> dict:
+    """0-1 values for the weights book. Unlisted names still get measured.
+
+    The book decides the points. EMA rows are logged even at weight 0.
+    """
+    metrics = dict(metrics or {})
+    bars = list(snap.bars)
+    side = option.side if option is not None and option.side == "PUT" else "CALL"
+    direction = -1 if side == "PUT" else 1
+    atr = _atr(snap)
+    minute = _session_minute(bars[-1]) if bars else None
+    room = push = None
+    indexed = {}
+    if bars:
+        from .model_v import _minute_index, fallback_push, room_from_open
+        for bar in bars:
+            index = _minute_index(bar)
+            if index is not None:
+                indexed[index] = bar
+        if indexed:
+            minute = max(indexed)
+            room = room_from_open(indexed, minute, side, atr)
+            push = fallback_push(indexed, minute, side, atr)
+    rvol = _curve_rvol(snap, bars)
+    vol5 = None
+    if option is not None:
+        from .model_v import option_volume_5m
+        vol5 = option_volume_5m(option, history, snap)
+    ask = option.ask if option is not None else None
+    bid = option.bid if option is not None else None
+    sp5 = 0.0
+    if ask and bid is not None and ask > 0:
+        mid = (ask + bid) / 2
+        if mid > 0:
+            sp5 = _on((ask - bid) / mid <= 0.05)
+    setup_name = setup.name if setup is not None else ""
+    vwap_pb = 0.0
+    vwap = metrics.get("vwap")
+    if vwap is not None and atr and bars:
+        vwap_pb = _bounce_score(bars, direction, vwap, atr, settings)
+    if setup_name in {"REVERSAL", "INTRADAY_REVERSAL"}:
+        bounce = 1.0
+    else:
+        bounce = vwap_pb
+    spy_open = snap.market_return_from_open
+    spy_5 = snap.market_return_5m
+    spy_with = spy_vs = 0.0
+    if spy_open is not None and spy_5 is not None:
+        spy_with = _on(direction * spy_open > 0 and direction * spy_5 > 0)
+        spy_vs = _on(direction * spy_open < 0 and direction * spy_5 < 0)
+    pull2 = detect_ema_pullback(bars, 2, direction, atr, settings, period=9, frames=[2]) if bars else 0.0
+    pull5 = detect_ema_pullback(bars, 5, direction, atr, settings, period=9, frames=[5]) if bars else 0.0
+    w_score = detect_w(bars, None, direction, atr, settings) if bars else 0.0
+    m_score = detect_m(bars, None, direction, atr, settings) if bars else 0.0
+    gap = 0.0
+    if bars and atr and snap.prior_close:
+        gap = _on(direction * (bars[0].open - snap.prior_close) / atr >= 0.5)
+    dte = None
+    if option is not None:
+        dte = (option.expiry - snap.at.astimezone(ET).date()).days
+    return {
+        "flow85": _on(vol5 is not None and vol5 >= 85),
+        "flow200": _on(vol5 is not None and vol5 >= 200),
+        "sp5": sp5,
+        "ask_mid": _on(ask is not None and 0.50 <= ask <= 1.75),
+        "bounce": bounce,
+        "spy10": 0.0,
+        "spy_with": spy_with,
+        "vwap_pb": vwap_pb,
+        "reclaim": _on(setup_name == "LEVEL_RECLAIM"),
+        "a_drive": 0.0,
+        "a_flushpop": 0.0,
+        "a_open_reclaim": 0.0,
+        "a_pmx_reclaim": 0.0,
+        "a_vwap_slap": 0.0,
+        "a_wm": w_score if direction == 1 else m_score,
+        "a_spike_rev": 0.0,
+        "e1_ema9_2m_pullin_x_rvol15": pull2 if rvol is not None and rvol >= 1.5 else 0.0,
+        "e2_ema9_5m_pullin": pull5,
+        "ema50_touch": 0.0,
+        "rvol_06_08": _on(rvol is not None and 0.6 <= rvol < 0.8),
+        "late": _on(minute is not None and minute >= 300),
+        "gap": gap,
+        "room_hi": _on(room is not None and room > settings.fb_room_atr_max),
+        "spy_vs": spy_vs,
+        "room_used_le_1atr": _on(room is not None and room <= settings.fb_room_atr_max),
+        "push30_ge_0.75atr": _on(push is not None and push >= settings.fb_push_atr_min),
+        "w_bottom_ace": w_score if direction == 1 else 0.0,
+        "dte1": _on(dte == 1),
+        "rvol15": _on(rvol is not None and rvol >= 1.5),
+        "level_break": _level_break(snap, bars, direction),
+        DRC_EMA21_2M: detect_drc_ema21_2m(bars, direction, atr) if bars else 0.0,
+        DRP_510: detect_drp_510(bars, direction, atr) if bars else 0.0,
+        E1_EMA9_2M_PRE10: detect_ema9_2m_before_10(bars, direction, atr, settings) if bars else 0.0,
+        EMA21_PULLIN_2M: detect_ema_pullback(bars, 2, direction, atr, settings, period=21, frames=[2]) if bars else 0.0,
+        EMA21_PULLIN_5M: detect_ema_pullback(bars, 5, direction, atr, settings, period=21, frames=[5]) if bars else 0.0,
+        EMA21_PULLIN_10M: detect_ema_pullback(bars, 10, direction, atr, settings, period=21, frames=[10]) if bars else 0.0,
+        EMA9_2M_DIP: detect_ema9_2m_dip(bars, direction, atr) if bars else 0.0,
+        DIP_RECLAIM_5_10_CALLS: detect_dip_reclaim_5_10_calls(bars, direction, atr) if bars else 0.0,
+        "_vol5": vol5,
+    }
 
 
 def spread_fraction(option) -> float | None:
@@ -690,18 +996,39 @@ def spread_fraction(option) -> float | None:
     return (option.ask - option.bid) / option.ask
 
 
-def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: float) -> bool:
-    """Log tiers, base, blockers, freshness, and the ⚡ marker.
+def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: float, history=None) -> bool:
+    """Score the weights book, roll a failing contract, and set the ⚡ marker.
 
-    S12 already decided `s12_ok` from its own score. Confluence does not
-    change that decision. The base/blocker table can still hold the post.
-    The returned qualifying flag is what the scanner posts.
+    S12 still has to clear. The additive score has to clear post_threshold.
+    Blockers run on the contract that would post. A stale quote subtracts
+    points and does not block by itself.
     """
+    from .model_v import choose_fallback_contract
+    from .weights import load_weights, score_path
+
     snap, option = candidate.snapshot, candidate.option
-    flags = confluence_flags_for(snap, option, candidate.metrics, settings)
-    points, score, count = tiered_points(flags, settings)
     volume = snap.bars[-1].volume if snap.bars else 0
-    gate = card_gate(option.side, volume, spread_fraction(option), flags, score, settings)
+    features = additive_features(snap, option, settings, candidate.metrics, history, candidate.setup)
+    vol5 = features.get("_vol5")
+    gate = card_gate(
+        option.side, volume, spread_fraction(option), settings,
+        bid=getattr(option, "bid", None), option_volume_5m=vol5,
+    )
+    if any(name in gate["blocked_by"] for name in ("wide_spread", "low_bid", "option_volume")):
+        rolled = choose_fallback_contract(snap, option.side, settings)
+        rolled_option = rolled.get("option")
+        if rolled_option is not None and rolled_option is not option:
+            option = rolled_option
+            candidate.option = option
+            features = additive_features(snap, option, settings, candidate.metrics, history, candidate.setup)
+            vol5 = features.get("_vol5")
+            gate = card_gate(
+                option.side, volume, spread_fraction(option), settings,
+                bid=option.bid, option_volume_5m=vol5,
+            )
+    features.pop("_vol5", None)
+    book = load_weights(settings.weights_path)
+    points, score, positive = score_path(features, option.side, book, "primary")
     trigger = None
     if candidate.setup is not None:
         trigger = candidate.setup.trigger
@@ -710,16 +1037,17 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     ages = card_freshness(snap, option, trigger)
     stale = ages["quote_age_s"] is not None and ages["quote_age_s"] > settings.stale_quote_seconds
     penalty = float(settings.stale_quote_penalty) if stale else 0.0
-    marked = model_score - penalty
-    card_score = round(marked + score, 2)
-    post_ok = bool(s12_ok) and gate["post_ok"]
+    marked = score - penalty
+    card_score = round(marked, 2)
+    post_ok = bool(s12_ok) and gate["post_ok"] and marked >= settings.post_threshold
     metrics = candidate.metrics
     metrics.update(ages)
-    metrics["confluence_flags"] = flags
+    metrics["confluence_flags"] = features
     metrics["confluence_points"] = points
     metrics["confluence_score"] = score
-    metrics["confluence_count"] = count
-    metrics["confluence_total"] = len(CONFLUENCE_TABLE)
+    metrics["confluence_count"] = positive
+    metrics["positive_features"] = positive
+    metrics["confluence_total"] = len(points)
     metrics["base"] = gate["base"]
     metrics["blockers"] = gate["blockers"]
     metrics["overrides"] = gate["overrides"]
@@ -733,10 +1061,12 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
         if "stale quote" not in candidate.reasons:
             candidate.reasons = list(candidate.reasons) + ["stale quote"]
         candidate.parts["stale_quote"] = round(-penalty, 2)
-    if post_ok:
-        marker = primary_strength_marker(marked, settings.strong_score)
-        if marker:
-            metrics["strength_marker"] = marker
+    marker = primary_strength_marker(
+        positive, settings.strong_feature_min, marked, settings.bolt_min_score)
+    if post_ok and marker:
+        metrics["strength_marker"] = marker
+    else:
+        metrics.pop("strength_marker", None)
     for name, value in points.items():
         candidate.parts[f"conf_{name}"] = value
     candidate.parts["confluence"] = score

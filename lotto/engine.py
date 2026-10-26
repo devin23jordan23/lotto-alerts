@@ -429,7 +429,7 @@ class Engine:
                 scored.append(match)
             match.metrics["path"] = "stock_override"
             match.metrics["score_mode"] = "combined"
-            match.qualifying = True
+            match.qualifying = bool(match.metrics.get("gate_post", 1))
 
     def _log_missing(self, snap, reason: str) -> None:
         from .model_v import missing_v2
@@ -508,17 +508,18 @@ class Engine:
         return False
 
     def _post_fallback(self, snap, record, ready) -> None:
-        from .model_v import apply_v2, quote_spread_fail, thin_candidate
+        from .model_v import apply_v2, thin_candidate
         from .patterns import Setup
         option = record.get("_option")
         if option is None or record["dedupe_flag"] or record["skip_flag"]:
             return
         if self._primary_ready(snap, ready):
             return
+        if not record.get("gate_post"):
+            return
         base = record.get("base") or {}
         if not base.get("direction") or not base.get("volume"):
-            if "volume" not in (record.get("overrides") or []):
-                return
+            return
         level = record["level_value"] if isinstance(record["level_value"], (int, float)) else snap.spot
         setup = Setup("STOCK_BYPASS", float(level), float(level))
         candidate = thin_candidate(snap, option, self.settings, setup)
@@ -526,25 +527,23 @@ class Engine:
                  a_bar=snap.symbol in self.runner_names)
         if candidate.metrics.get("score_v2") is None:
             candidate.metrics["score_v2"] = candidate.score
-        fail, _pct, _mid = quote_spread_fail(record.get("fire_bid"), record.get("fire_ask"),
-                                              self.settings.fb_max_spread_pct)
-        flag = None
-        if fail:
-            bid = record.get("fire_bid")
-            flag = "zero bid" if bid is None or bid <= 0 else "spread over 30%"
         candidate.setup = setup
         candidate.qualifying = True
         candidate.state = "IGNITION"
         candidate.metrics["path"] = "bypass"
-        candidate.metrics.pop("strength_marker", None)
+        candidate.metrics["card_score"] = record.get("bypass_score", candidate.metrics.get("card_score"))
+        candidate.score = record.get("bypass_score", candidate.score)
+        positive = record.get("positive_features") or 0
+        bypass_score = record.get("bypass_score")
+        if (positive >= self.settings.strong_feature_min
+                and bypass_score is not None and bypass_score >= self.settings.bolt_min_score):
+            candidate.metrics["strength_marker"] = "⚡"
+        else:
+            candidate.metrics.pop("strength_marker", None)
         candidate.metrics["fallback_reason"] = record["card_reason"]
         candidate.metrics["bypass_reason"] = record["card_reason"]
         if record["card_reason"] not in candidate.reasons:
             candidate.reasons = list(candidate.reasons) + [record["card_reason"]]
-        if flag:
-            candidate.metrics["spread_flag"] = flag
-            if flag not in candidate.reasons:
-                candidate.reasons = list(candidate.reasons) + [flag]
         for key in ("quote_age_s", "bar_age_s", "min_since_trigger"):
             if key in record and key not in candidate.metrics:
                 candidate.metrics[key] = record[key]

@@ -11,13 +11,16 @@ from lotto.config import CONFLUENCE_TABLE, HANDOFF_SPEC_PATH, Settings, model_v_
 from lotto.demo import demo_frames
 from lotto.discord import deliver_stock_pending
 from lotto.engine import Engine
-from lotto.confluence import (band_score, card_gate, detect_ema_pullback, detect_fashionably_late,
-                              detect_flag, detect_m, detect_w, pattern_match, primary_strength_marker,
-                              tiered_points)
+from lotto.confluence import (DRC_EMA21_2M, DRP_510, SHADOW_EMA_FEATURES, band_score, card_gate,
+                              detect_drc_ema21_2m, detect_drp_510, detect_ema9_2m_before_10,
+                              detect_ema_pullback, detect_fashionably_late, detect_flag, detect_m, detect_w,
+                              nia_dip_reclaim, pattern_match, primary_strength_marker, tiered_points)
+from lotto.weights import load_weights, score_path
 from lotto.features import Candidate
 from lotto.discord import alert_payload
-from lotto.main import env_settings, fallback_rule_status, handoff_fallback_status, standby_symbols
-from lotto.model_v import (apply_v2, atr21_value, build_handoff_features, cap_stock,
+from lotto.main import (env_settings, fallback_rule_status, freshness_status, handoff_fallback_status,
+                         standby_symbols, strong_score_status)
+from lotto.model_v import (apply_v2, atr21_value, build_handoff_features, cap_stock, stock_terms,
                            choose_fallback_contract, classify_runner, due_standby,
                            evaluate_fallback, exceptional_stock, fallback_push, fallback_rvol_value,
                            features_from_spec_raw, fill_model_features, fill_strength_inputs,
@@ -58,8 +61,17 @@ class ModelVTests(unittest.TestCase):
         self.assertEqual(live.min_score, 60)
         self.assertEqual(live.fallback_rule, "post")
         self.assertEqual((live.fb_rvol_min, live.fb_push_atr_min, live.fb_room_atr_max, live.fb_max_spread_pct),
-                         (0.78, 0.75, 1.0, 30))
+                         (0, 0.75, 1.0, 15))
+        self.assertEqual(live.post_threshold, 60)
+        self.assertEqual(model_v_settings(post_threshold=45).post_threshold, 45)
+        self.assertEqual(live.bypass_threshold, 40)
+        self.assertEqual(live.strong_feature_min, 10)
+        self.assertEqual(live.bolt_min_score, 20)
         self.assertEqual(live.strong_score, 57)
+        self.assertEqual((live.blocker_spread, live.blocker_bid, live.blocker_option_volume_5m), (0.15, 0.05, 50))
+        self.assertEqual(live.fb_min_minutes, 0)
+        self.assertTrue(live.weights_path.endswith("vince_additive_weights_v4c.json"))
+        self.assertEqual(load_weights()["version"], "v4c")
         self.assertEqual((live.stale_quote_seconds, live.stale_quote_penalty), (5, 4))
         self.assertEqual(live.bypass_confluence_min, 9)
         self.assertEqual(live.score_mode, "s12")
@@ -205,10 +217,11 @@ class ModelVTests(unittest.TestCase):
     def test_no_path_suppresses_a_card_at_or_above_the_bar(self):
         store = Store(":memory:")
         self.addCleanup(store.db.close)
-        settings = model_v_settings(max_alerts_per_day=1, max_alerts_per_cycle=1, max_alerts_per_ticker=1)
+        settings = model_v_settings(max_alerts_per_day=1, max_alerts_per_cycle=1, max_alerts_per_ticker=1,
+                                    fallback_rule="off")
         engine = Engine(store, settings, dry_run=False)
-        base = list(demo_frames())[20][0]
-        wide = replace(base.options[0], bid=0.05, ask=0.40)
+        base = _liquid(list(demo_frames())[20][0])
+        wide = base.options[0]
 
         def fake(snap, history, cfg):
             option = replace(wide, symbol=snap.symbol + "C", quote_time=snap.at, expiry=snap.at.astimezone(ET).date())
@@ -238,9 +251,12 @@ class ModelVTests(unittest.TestCase):
     def test_repeats_are_not_penalized_and_only_the_same_event_is_deduped(self):
         store = Store(":memory:")
         self.addCleanup(store.db.close)
-        engine = Engine(store, model_v_settings(), dry_run=True)
-        base = list(demo_frames())[20][0]
-        option = replace(base.options[0], symbol="SAME", quote_time=base.at, expiry=base.at.astimezone(ET).date())
+        engine = Engine(store, model_v_settings(fallback_rule="off"), dry_run=True)
+        # ATR stays under 40 so a 10-point trigger move is a new event. The
+        # liquid quote still clears the post line.
+        base = replace(_liquid(list(demo_frames())[20][0]), prior_atr=8)
+        option = replace(base.options[0], symbol="SAME", quote_time=base.at, expiry=base.at.astimezone(ET).date(),
+                         bid=1.0, ask=1.05)
 
         def fake(snap, history, cfg, trigger):
             contract = replace(option, quote_time=snap.at)
@@ -253,8 +269,9 @@ class ModelVTests(unittest.TestCase):
             prev = snap.bars[-1]
             bar = Bar(end, prev.close, max(prev.high, prev.close), min(prev.low, prev.close), prev.close,
                       prev.volume, prev.expected_cumulative_volume)
-            return replace(snap, at=end, spot_time=end, bars=snap.bars + (bar,),
-                           options=(replace(option, quote_time=end),))
+            current = snap.options[0]
+            contract = replace(current, quote_time=end, volume=current.volume + 250, bid=1.0, ask=1.05)
+            return replace(snap, at=end, spot_time=end, bars=snap.bars + (bar,), options=(contract,))
 
         first_snap = replace(base, options=(option,))
         second_snap = advance(first_snap, 2)
@@ -278,11 +295,11 @@ class ModelVTests(unittest.TestCase):
     def test_handoff_posts_only_through_the_option_score(self):
         store = Store(":memory:")
         self.addCleanup(store.db.close)
-        base = list(demo_frames())[30][0]
+        base = _liquid(list(demo_frames())[30][0])
         idea = StockIdea("DEMO", base.day, base.at - timedelta(minutes=1), "CALL", base.spot,
                          base.spot - 0.5, base.spot - 1, "INTRADAY_BREAK", "A", {})
         quiet = model_v_settings(score_mode="combined", post_combined_0dte=500, post_v2_stock_0dte=500,
-                                 post_v2_option_0dte=500)
+                                 post_v2_option_0dte=500, fallback_rule="off")
         engine = Engine(store, quiet, dry_run=False)
         engine.remember_stock_events([idea])
         with patch("lotto.engine.candidates", return_value=[]):
@@ -296,7 +313,8 @@ class ModelVTests(unittest.TestCase):
         decisions = store.db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
         self.assertGreater(logged + decisions, 0)
         loud = Engine(Store(":memory:"), model_v_settings(score_mode="combined", post_combined_0dte=1,
-                                                          post_v2_stock_0dte=1, post_v2_option_0dte=1), dry_run=False)
+                                                          post_v2_stock_0dte=1, post_v2_option_0dte=1,
+                                                          fallback_rule="off"), dry_run=False)
         self.addCleanup(loud.store.db.close)
         loud.remember_stock_events([idea])
         with patch("lotto.engine.candidates", return_value=[]):
@@ -402,7 +420,8 @@ class ModelVTests(unittest.TestCase):
         idea = StockIdea("DEMO", base.day, base.at - timedelta(minutes=1), "CALL", base.spot,
                          base.spot - 0.5, base.spot - 1, "INTRADAY_BREAK", "A", {})
         rare = model_v_settings(score_mode="combined", post_combined_0dte=500, override_move_atr=0.01,
-                                override_rvol=0.01, override_vwap_share=0, override_fresh_seconds=120)
+                                override_rvol=0.01, override_vwap_share=0, override_fresh_seconds=120,
+                                fallback_rule="off")
         engine = Engine(store, rare, dry_run=False)
         engine.remember_stock_events([idea])
         with patch("lotto.engine.candidates", return_value=[]):
@@ -462,7 +481,9 @@ class ModelVTests(unittest.TestCase):
         self.assertEqual(features["rvol"], 0.0)
         self.assertIsNone(features["pm_brk"])
         self.assertIsNone(features["pd_brk"])
-        loud = replace(snap, prior_full_days=6, rvol_base=100.0)
+        short = replace(snap, prior_full_days=6, rvol_base=100.0)
+        self.assertEqual(build_handoff_features(short, short.options[0], [], 1)["rvol"], 0.0)
+        loud = replace(snap, prior_full_days=10, rvol_base=100.0)
         self.assertGreater(build_handoff_features(loud, loud.options[0], [], 1)["rvol"], 0)
 
     def test_vince_lane_vectors(self):
@@ -549,9 +570,10 @@ class ModelVTests(unittest.TestCase):
             "price": 110.0, "open": 100.0, "previous": 100.0,
             "high": 110.0, "low": 100.0, "volume": 200000,
         }], dry_run=False), [])
-        snap = list(demo_frames())[12][0]
+        snap = _liquid(list(demo_frames())[12][0])
         engine = Engine(Store(":memory:"), model_v_settings(
             score_mode="combined", post_combined_0dte=1, post_v2_option_0dte=1, post_v2_stock_0dte=1,
+            fallback_rule="off",
         ), dry_run=False)
         self.addCleanup(engine.store.db.close)
         engine.remember_stock_events(ideas)
@@ -570,6 +592,14 @@ class ModelVTests(unittest.TestCase):
         posted_log = "\n".join(on.output)
         self.assertIn("Handoff fallback state: posting", posted_log)
         self.assertIn("Stock-only cards never post", posted_log)
+
+
+def _liquid(snap):
+    """Tight quote and a quiet gap so the additive line can clear on a demo tape."""
+    options = tuple(replace(option, bid=1.0, ask=1.05) for option in snap.options)
+    opening = snap.bars[0].open if snap.bars else snap.prior_close
+    atr = snap.prior_atr if snap.prior_atr and snap.prior_atr >= 20 else 50
+    return replace(snap, options=options, prior_close=opening, prior_atr=atr)
 
 
 def _contract(at, strike, side="CALL", bid=1.0, ask=1.1, dte=0):
@@ -663,15 +693,18 @@ class FallbackRuleTests(unittest.TestCase):
                                    q_false_since=False, candidate=True, side="CALL"))
 
         settings = model_v_settings(fallback_rule="log")
-        # Nothing fires before 15 minutes after the open.
-        self.assertIsNone(evaluate_fallback(
-            _fallback_snap(_session([100, 101, 102], volume=600)), "CALL", settings, new_fallback_state()))
+        # A 3-bar push with a level break clears the bypass line. One bar does not.
+        opened = evaluate_fallback(
+            _fallback_snap(_session([100, 101, 102], volume=600)), "CALL", settings, new_fallback_state())
+        self.assertEqual((opened["why"], opened["m"]), ("first", 2))
+        self.assertGreaterEqual(opened["bypass_score"], settings.bypass_threshold)
         self.assertIsNone(evaluate_fallback(
             _fallback_snap(_session([100, 102], volume=2000)), "CALL", settings, new_fallback_state()))
         early = evaluate_fallback(
             _fallback_snap(_session([100] * 12 + [100, 101, 102], volume=200)),
             "CALL", settings, new_fallback_state())
-        self.assertIsNone(early)
+        self.assertEqual(early["m"], 14)
+        self.assertGreaterEqual(early["bypass_score"], settings.bypass_threshold)
         state = new_fallback_state()
         held = _session([100] * 14 + [101, 102])
         fired = evaluate_fallback(_fallback_snap(held), "CALL", settings, state)
@@ -680,12 +713,19 @@ class FallbackRuleTests(unittest.TestCase):
         self.assertAlmostEqual(fired["rvol"], 0.78)
         quiet = _fallback_snap(_session([100] * 14 + [101, 102, 102], volume=1), base=10_000)
         self.assertIsNone(evaluate_fallback(quiet, "CALL", settings, state))
-        self.assertTrue(state["q_false_since"])
+        self.assertFalse(state["q_false_since"])
+        dead_state = new_fallback_state()
+        self.assertIsNotNone(evaluate_fallback(_fallback_snap(held), "CALL", settings, dead_state))
+        dead = _fallback_snap(_session([100] * 14 + [101, 102, 102], volume=0), base=10_000)
+        self.assertIsNone(evaluate_fallback(dead, "CALL", settings, dead_state))
+        self.assertTrue(dead_state["q_false_since"])
         still = _fallback_snap(_session([100] * 14 + [101, 102, 102, 102]))
         self.assertIsNone(evaluate_fallback(still, "CALL", settings, state))
         short = _fallback_snap(held, sessions=9)
         empty = new_fallback_state()
-        self.assertIsNone(evaluate_fallback(short, "CALL", settings, empty))
+        short_fire = evaluate_fallback(short, "CALL", settings, empty)
+        self.assertIsNotNone(short_fire)
+        self.assertIsNone(short_fire["rvol"])
 
         high_early = [100] * 16
         pads = [(99, 200)] + [(99, 100.2)] * 15
@@ -721,18 +761,19 @@ class FallbackRuleTests(unittest.TestCase):
         tight = _contract(at, 102, bid=1.0, ask=1.1)
         snap = Snapshot("DEMO", at, 100, at, 100, (), (wide, tight), source="replay")
         chosen = choose_fallback_contract(snap, "CALL")
-        self.assertEqual(chosen["strike"], 101)
+        self.assertEqual(chosen["strike"], 102)
         self.assertEqual(quote_spread_fail(wide.bid, wide.ask, 30)[0], 1)
         no_ask = _contract(at, 105, bid=0, ask=0)
         later = _contract(at, 106, bid=1, ask=1.1, dte=1)
         deferred = choose_fallback_contract(
             Snapshot("DEMO", at, 100, at, 100, (), (no_ask, later), source="replay"), "CALL")
-        self.assertEqual(deferred["dte"], 1)
+        self.assertIsNone(deferred["dte"])
+        self.assertIsNone(deferred["option"])
         live = _contract(at, 104, bid=0.2, ask=0.4)
         preferred = choose_fallback_contract(
             Snapshot("DEMO", at, 100, at, 100, (), (live, later), source="replay"), "CALL")
-        self.assertEqual(preferred["dte"], 0)
-        self.assertEqual(preferred["atm_strike"], 104)
+        self.assertIsNone(preferred["option"])
+        self.assertIsNone(preferred["dte"])
 
         record = {"date": "2026-10-26", "ts_fire": at.isoformat(), "tk": "DEMO", "side": "CALL",
                   "skip_flag": False, "same_move_before_min": 15, "same_move_after_min": 5}
@@ -748,9 +789,16 @@ class FallbackRuleTests(unittest.TestCase):
         frames = [closes[:index] for index in (16, 17, 18)]
         with self.assertLogs("lotto.main", level="WARNING") as caught:
             self.assertEqual(fallback_rule_status(model_v_settings()), "post")
+            strong_score_status(model_v_settings())
+            freshness_status(model_v_settings())
+        logged = "\n".join(caught.output)
         self.assertIn(
-            "Fallback rule: post rvol>=0.78 push>=0.75 atr=21 room<=1.0 min_after_open=15m spread<=30% contract=atm confluence>=9",
-            "\n".join(caught.output))
+            "Fallback rule: post post>=60 bypass>=40 atr=21 contract=roll spread<=15% bid>0.05 opt_vol>=50",
+            logged)
+        self.assertIn("Strong score: ⚡ on cards with score>=20 and >= 10 positive features", logged)
+        self.assertIn(
+            "Freshness: quote_age_s bar_age_s min_since_trigger logged; stale quote >5s is a flag and -4, not a gate",
+            logged)
 
         def run(mode, directory):
             store = Store(":memory:")
@@ -929,72 +977,86 @@ class FallbackRuleTests(unittest.TestCase):
 
 
 class ConfluenceGateTests(unittest.TestCase):
-    def test_score_is_monotonic_and_a_weak_stack_stays_under_the_line(self):
+    def test_score_uses_side_weights_and_a_penalty_lowers_it(self):
         settings = model_v_settings()
-        flags = {name: 0 for name, _tier in CONFLUENCE_TABLE}
-        previous = -1
-        for name, _tier in CONFLUENCE_TABLE:
-            flags[name] = 1
-            _points, score, count = tiered_points(flags, settings)
-            self.assertGreater(score, previous)
-            self.assertEqual(count, sum(flags.values()))
-            previous = score
-        full = previous
-        for name, tier in CONFLUENCE_TABLE:
-            dropped = dict(flags)
-            dropped[name] = 0
-            weight = {"primary": settings.tier_weight_primary, "secondary": settings.tier_weight_secondary,
-                      "tertiary": settings.tier_weight_tertiary}[tier]
-            _points, score, _count = tiered_points(dropped, settings)
-            self.assertEqual(score, full - weight)
-            self.assertGreater(score, 0)
-        only_pullback = {name: 0 for name, _tier in CONFLUENCE_TABLE}
-        only_pullback["w_pattern"] = 1
-        _points, weak, _count = tiered_points(only_pullback, settings)
-        self.assertLess(weak, settings.bypass_confluence_min)
+        book = load_weights()
         partial_flags = {name: 0 for name, _tier in CONFLUENCE_TABLE}
         partial_flags["flag"] = 0.5
-        partial_points, partial, partial_count = tiered_points(partial_flags, settings)
-        self.assertAlmostEqual(partial_points["flag"], 0.5 * settings.tier_weight_primary)
-        self.assertAlmostEqual(partial, 0.5 * settings.tier_weight_primary)
+        _partial_points, partial, partial_count = tiered_points(partial_flags, settings)
         self.assertEqual(partial_count, 1)
-        partial_flags["flag"] = 1
-        _full_points, full, _full_count = tiered_points(partial_flags, settings)
-        self.assertGreater(full, partial)
-        partial_flags["flag"] = 1.4
-        _clamped, clamped, _clamped_count = tiered_points(partial_flags, settings)
-        self.assertAlmostEqual(clamped, full)
+        self.assertGreater(tiered_points({**partial_flags, "flag": 1}, settings)[1], partial)
+        self.assertAlmostEqual(tiered_points({**partial_flags, "flag": 1.4}, settings)[1],
+                               tiered_points({**partial_flags, "flag": 1}, settings)[1])
         self.assertEqual(band_score(4, 1, 3, 8, 16), 1)
         self.assertAlmostEqual(band_score(2, 1, 3, 8, 16), 0.5)
         self.assertEqual(band_score(0, 1, 3, 8, 16), 0)
         self.assertEqual(band_score(20, 1, 3, 8, 16), 0)
-        self.assertEqual(primary_strength_marker(57, settings.strong_score), "⚡")
-        self.assertIsNone(primary_strength_marker(56.9, settings.strong_score))
-        self.assertNotEqual(primary_strength_marker(92, settings.strong_score), "🔥")
+        self.assertEqual(primary_strength_marker(10, settings.strong_feature_min), "⚡")
+        self.assertIsNone(primary_strength_marker(9, settings.strong_feature_min))
+        self.assertNotEqual(primary_strength_marker(92, settings.strong_feature_min), "🔥")
+        self.assertIsNone(primary_strength_marker(10, settings.strong_feature_min, 19, settings.bolt_min_score))
+        self.assertEqual(primary_strength_marker(10, settings.strong_feature_min, 20, settings.bolt_min_score), "⚡")
+        self.assertIsNone(primary_strength_marker(9, settings.strong_feature_min, 60, settings.bolt_min_score))
+
+        room = score_path({"room_used_le_1atr": 1}, "CALL", book, "bypass")[1]
+        spent = score_path({"room_hi": 1}, "CALL", book, "primary")[1]
+        self.assertEqual(room, 32)
+        self.assertEqual(spent, -6)
+        self.assertLess(spent, room)
+        bare, bare_score, _count = score_path({"e2_ema9_5m_pullin": 1}, "CALL", book, "bypass")
+        self.assertEqual(bare.get("e2_ema9_5m_pullin", 0), 0)
+        self.assertEqual(bare_score, 0)
+        four = {
+            "e2_ema9_5m_pullin": 1,
+            "room_used_le_1atr": 1,
+            "push30_ge_0.75atr": 1,
+            "w_bottom_ace": 1,
+            "flow85": 1,
+        }
+        points, score, _count = score_path(four, "CALL", book, "bypass")
+        self.assertEqual(points["e2_ema9_5m_pullin"], 9)
+        self.assertEqual(score, 32 + 13 + 2 + 9)
+        three = dict(four)
+        three.pop("flow85")
+        self.assertEqual(score_path(three, "CALL", book, "bypass")[0]["e2_ema9_5m_pullin"], 0)
+        self.assertEqual(score_path(four, "PUT", book, "bypass")[0]["e2_ema9_5m_pullin"], 0)
+        half = dict(four)
+        half["e2_ema9_5m_pullin"] = 0.5
+        self.assertAlmostEqual(score_path(half, "CALL", book, "bypass")[0]["e2_ema9_5m_pullin"], 4.5)
+        primary = score_path(four, "CALL", book, "primary")[0]
+        self.assertEqual(primary.get("e2_ema9_5m_pullin", 0), 0)
+        for name in SHADOW_EMA_FEATURES:
+            shadowed = {name: 1, "level_break": 1, "rvol15": 1, **four}
+            self.assertEqual(score_path(shadowed, "CALL", book, "primary")[0].get(name, 0), 0)
+        snap = list(demo_frames())[8][0]
+        small = stock_terms(snap, 1, {"move_from_open_atr": 0.5}, settings, False)[0]["move_atr"]
+        large = stock_terms(snap, 1, {"move_from_open_atr": 1.5}, settings, False)[0]["move_atr"]
+        self.assertLess(large, small)
+        self.assertLess(large, 0)
 
     def test_missing_volume_does_not_post_unless_the_override_clears(self):
         settings = model_v_settings()
-        flags = {name: 0 for name, _tier in CONFLUENCE_TABLE}
-        blocked = card_gate("CALL", 0, 0.05, flags, points=1, settings=settings)
+        blocked = card_gate("CALL", 0, 0.05, settings, bid=1.0, option_volume_5m=50)
         self.assertFalse(blocked["post_ok"])
         self.assertIn("volume", blocked["blocked_by"])
-        lifted = card_gate("CALL", 0, 0.05, flags, points=settings.base_override_points, settings=settings)
-        self.assertTrue(lifted["post_ok"])
-        self.assertIn("volume", lifted["overrides"])
-        self.assertFalse(card_gate(None, 100, 0.05, flags, points=100, settings=settings)["post_ok"])
+        self.assertEqual(blocked["overrides"], [])
+        still = card_gate("CALL", 0, 0.05, settings, bid=1.0, option_volume_5m=200)
+        self.assertFalse(still["post_ok"])
+        self.assertIn("volume", still["blocked_by"])
+        self.assertFalse(card_gate(None, 100, 0.05, settings, bid=1.0, option_volume_5m=200)["post_ok"])
 
     def test_wide_spread_blocker_lifts_when_the_strong_variables_are_on(self):
         settings = model_v_settings()
-        flags = {name: 0 for name, _tier in CONFLUENCE_TABLE}
-        held = card_gate("CALL", 100, 0.25, flags, points=0, settings=settings)
+        held = card_gate("CALL", 100, 0.25, settings, bid=1.0, option_volume_5m=200)
         self.assertIn("wide_spread", held["blocked_by"])
         self.assertFalse(held["post_ok"])
-        flags["pm_break"] = 1
-        flags["rvol"] = 1
-        lifted = card_gate("CALL", 100, 0.25, flags, points=0, settings=settings)
-        self.assertIn("wide_spread", lifted["overrides"])
-        self.assertTrue(lifted["post_ok"])
-        self.assertIn("wide_spread", lifted["blockers"])
+        self.assertEqual(held["overrides"], [])
+        exact = card_gate("CALL", 100, 0.15, settings, bid=0.06, option_volume_5m=50)
+        self.assertTrue(exact["post_ok"])
+        self.assertFalse(card_gate("CALL", 100, 0.15, settings, bid=0.05, option_volume_5m=50)["post_ok"])
+        self.assertIn("low_bid", card_gate("CALL", 100, 0.05, settings, bid=0, option_volume_5m=200)["blocked_by"])
+        self.assertFalse(card_gate("CALL", 100, 0.05, settings, bid=1.0, option_volume_5m=49)["post_ok"])
+        self.assertTrue(card_gate("CALL", 100, 0.05, settings, bid=1.0, option_volume_5m=50)["post_ok"])
 
     def test_put_pullback_and_flag_mirror_the_call(self):
         settings = model_v_settings()
@@ -1067,7 +1129,7 @@ class ConfluenceGateTests(unittest.TestCase):
             "SELECT features FROM decisions WHERE reason LIKE 'active alert%'").fetchone()["features"])
         for key in ("quote_age_s", "bar_age_s", "min_since_trigger"):
             self.assertIn(key, features["metrics"])
-        self.assertGreaterEqual(features["metrics"]["confluence_score"], engine.settings.bypass_confluence_min)
+        self.assertGreaterEqual(features["metrics"]["confluence_score"], engine.settings.bypass_threshold)
 
         quiet = Store(":memory:")
         self.addCleanup(quiet.db.close)
@@ -1089,6 +1151,160 @@ class ConfluenceGateTests(unittest.TestCase):
         row = puts.db.execute("SELECT side, contract FROM alerts").fetchone()
         self.assertEqual(row["side"], "PUT")
         self.assertTrue(row["contract"].startswith("P98"))
+
+
+def _clock_bars(ohlc, frame=2):
+    start = datetime(2026, 10, 26, 9, 30, tzinfo=ET)
+    rows = []
+    for index, (open_, high, low, close) in enumerate(ohlc):
+        end = start + timedelta(minutes=(index + 1) * frame)
+        rows.append(Bar(end, open_, max(high, open_, close), min(low, open_, close), close, 100, None))
+    return tuple(rows)
+
+
+def _mirror_ohlc(ohlc, axis=100.0):
+    mirrored = []
+    for open_, high, low, close in ohlc:
+        mirrored.append((axis * 2 - open_, axis * 2 - low, axis * 2 - high, axis * 2 - close))
+    return mirrored
+
+
+def _rise_pull_ohlc(count=16, step=0.45, depth=1.8):
+    closes = [100 + index * step for index in range(count)]
+    peak = closes[-1]
+    closes.extend([peak - depth * 0.35, peak - depth, peak - depth * 0.55])
+    rows = []
+    previous = closes[0] - 0.05
+    for index, close in enumerate(closes):
+        open_ = previous
+        if index >= count:
+            low = close - 0.2
+            high = max(open_, close) + 0.05
+        else:
+            low = min(open_, close) - 0.05
+            high = max(open_, close) + 0.08
+        rows.append((open_, high, low, close))
+        previous = close
+    return rows
+
+
+def _dip_ohlc(count=18, step=0.55):
+    rows = []
+    close = 100.0
+    for _index in range(count):
+        open_ = close
+        close = open_ + step
+        rows.append((open_, close + 0.05, min(open_, close) - 0.04, close))
+    open_ = close
+    close = open_ + 0.15
+    rows.append((open_, close + 0.05, open_ - 3.2, close))
+    return rows
+
+
+def _ema_of(closes, period: int) -> float:
+    alpha = 2 / (period + 1)
+    ema = closes[0]
+    for value in closes[1:]:
+        ema = alpha * value + (1 - alpha) * ema
+    return ema
+
+
+def _nia_rising(count=40, step=0.4, atr=2.0, depth_atr=0.2, period=21):
+    """Steady rise whose last bar wicks  depth_atr past the EMA and closes back above."""
+    closes = [100 + index * step for index in range(count)]
+    ema = _ema_of(closes, period)
+    rows = []
+    previous = closes[0] - step
+    last = count - 1
+    for index, close in enumerate(closes):
+        open_ = previous
+        high = max(open_, close) + 0.05
+        low = min(open_, close) - 0.05
+        if index == last:
+            low = ema - depth_atr * atr
+        rows.append((open_, high, low, close))
+        previous = close
+    return rows
+
+
+class LiveEmaTests(unittest.TestCase):
+    def test_v4c_bare_dip_reclaim_scores_zero_and_confirmed_scores_six(self):
+        book = load_weights()
+        self.assertEqual(book["version"], "v4c")
+        self.assertEqual(book["posting_threshold"], 60)
+        self.assertEqual(book["bypass_threshold"], 40)
+        self.assertEqual(book["weights"][DRC_EMA21_2M]["call"], 6)
+        bare, bare_score, _count = score_path({DRC_EMA21_2M: 1}, "CALL", book, "primary")
+        self.assertEqual(bare[DRC_EMA21_2M], 0)
+        self.assertEqual(bare_score, 0)
+        one = score_path({DRC_EMA21_2M: 1, "level_break": 1}, "CALL", book, "primary")
+        self.assertEqual(one[0][DRC_EMA21_2M], 0)
+        self.assertEqual(one[1], 0)
+        confirmed = score_path(
+            {DRC_EMA21_2M: 1, "level_break": 1, "rvol15": 1}, "CALL", book, "primary")
+        self.assertEqual(confirmed[0][DRC_EMA21_2M], 6)
+        self.assertEqual(confirmed[1], 6)
+        puts = score_path(
+            {DRC_EMA21_2M: 1, "level_break": 1, "rvol15": 1}, "PUT", book, "primary")
+        self.assertEqual(puts[0][DRC_EMA21_2M], 0)
+        self.assertEqual(puts[1], 0)
+
+        bare_put, bare_put_score, _count = score_path({DRP_510: 1}, "PUT", book, "bypass")
+        self.assertEqual(bare_put[DRP_510], 0)
+        self.assertEqual(bare_put_score, 0)
+        drp = {
+            DRP_510: 1,
+            "room_used_le_1atr": 1,
+            "push30_ge_0.75atr": 1,
+            "flow85": 1,
+            "spy_with": 1,
+        }
+        put_points, put_score, _count = score_path(drp, "PUT", book, "bypass")
+        self.assertEqual(put_points[DRP_510], 6)
+        self.assertEqual(put_score, 32 + 13 + 6)
+        self.assertEqual(score_path(drp, "CALL", book, "bypass")[0][DRP_510], 0)
+        thin = dict(drp)
+        thin.pop("spy_with")
+        self.assertEqual(score_path(thin, "PUT", book, "bypass")[0][DRP_510], 0)
+        self.assertEqual(score_path(drp, "PUT", book, "primary")[0][DRP_510], 0)
+
+        synthetic = json.loads(json.dumps(book))
+        synthetic["weights"]["custom_gate"] = {"call": 3, "put": 1, "requires_min_conf": 2}
+        synthetic["weights"]["needs_company"] = {"call": 4, "put": 4, "requires_min_other_positive": 1}
+        locked = score_path({"custom_gate": 1, "needs_company": 1}, "CALL", synthetic, "primary")[0]
+        self.assertEqual(locked["custom_gate"], 0)
+        self.assertEqual(locked["needs_company"], 0)
+        opened = score_path(
+            {"custom_gate": 1, "needs_company": 1, "level_break": 1, "rvol15": 1},
+            "CALL", synthetic, "primary")[0]
+        self.assertEqual(opened["custom_gate"], 3)
+        self.assertEqual(opened["needs_company"], 4)
+
+    def test_dip_reclaim_detector_matches_the_put_mirror(self):
+        settings = model_v_settings()
+        atr = 2.0
+        calls = _clock_bars(_nia_rising(period=21), 2)
+        puts = _clock_bars(_mirror_ohlc(_nia_rising(period=21)), 2)
+        self.assertEqual(nia_dip_reclaim(calls, 2, 1, atr, 21), 1)
+        self.assertEqual(detect_drc_ema21_2m(calls, 1, atr), 1)
+        self.assertEqual(detect_drc_ema21_2m(puts, -1, atr), 0)
+        self.assertEqual(nia_dip_reclaim(puts, 2, -1, atr, 21), 1)
+        self.assertEqual(nia_dip_reclaim(calls, 2, -1, atr, 21), 0)
+        self.assertEqual(nia_dip_reclaim(_clock_bars(_nia_rising(depth_atr=0.8), 2), 2, 1, atr, 21), 0)
+        self.assertEqual(nia_dip_reclaim(_clock_bars(_nia_rising(depth_atr=0.01), 2), 2, 1, atr, 21), 0)
+
+        put_frame = _clock_bars(_mirror_ohlc(_nia_rising(period=9)), 5)
+        self.assertEqual(detect_drp_510(put_frame, -1, atr), 1)
+        self.assertEqual(detect_drp_510(_clock_bars(_nia_rising(period=9), 5), 1, atr), 0)
+
+        early = _clock_bars(_rise_pull_ohlc(11), 2)
+        early_puts = _clock_bars(_mirror_ohlc(_rise_pull_ohlc(11)), 2)
+        late = tuple(replace(bar, end=bar.end + timedelta(minutes=40)) for bar in early)
+        self.assertGreater(detect_ema9_2m_before_10(early, 1, atr, settings), 0)
+        self.assertGreater(detect_ema9_2m_before_10(early_puts, -1, atr, settings), 0)
+        self.assertEqual(detect_ema9_2m_before_10(late, 1, atr, settings), 0)
+        self.assertLess(detect_ema9_2m_before_10(early_puts, 1, atr, settings),
+                        detect_ema9_2m_before_10(early_puts, -1, atr, settings))
 
 
 def _expand_frame(ohlc, minutes, direction, axis=100.0):

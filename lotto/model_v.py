@@ -244,7 +244,8 @@ def held_level(bars, level, direction: int, closes: int = 2) -> bool:
 def stock_terms(snap: Snapshot, direction: int, metrics: dict, settings: Settings, sync: bool) -> dict:
     atr = snap.prior_atr if snap.prior_atr and snap.prior_atr > 0 else None
     move = metrics.get("move_from_open_atr") or 0
-    move_points = min(settings.w_move_atr * 2, settings.w_move_atr * max(0.0, move))
+    # More room used from the open scores lower.
+    move_points = -min(settings.w_move_atr * 2, settings.w_move_atr * max(0.0, move))
     rvol = max(metrics.get("pace_rvol") or 0, metrics.get("local_rvol_5m") or 0)
     rvol_points = min(settings.w_rvol * 2, settings.w_rvol * max(0.0, rvol - 1))
     if direction == 1:
@@ -523,12 +524,32 @@ def _live_ask(option: Option) -> bool:
     return option.ask is not None and isfinite(option.ask) and option.ask > 0
 
 
-def choose_fallback_contract(snap: Snapshot, side: str) -> dict:
-    """0DTE if any 0DTE contract on this side has a live ask, else 1DTE.
+def _inside_strike_window(option: Option, snap: Snapshot, settings: Settings) -> bool:
+    spot = snap.spot
+    if spot is None or not isfinite(spot) or spot <= 0:
+        return False
+    return abs(option.strike - spot) / spot <= settings.strike_window_pct + 1e-12
 
-    The posted contract is the nearest strike to the stock (ATM).
-    Spread does not choose the strike.
+
+def _quote_passes(option: Option, snap: Snapshot, settings: Settings) -> bool:
+    """Spread, bid, ask, 5-minute volume, and the strike window."""
+    if not _live_ask(option) or not _inside_strike_window(option, snap, settings):
+        return False
+    if option.bid is None or not isfinite(option.bid) or option.bid <= settings.blocker_bid:
+        return False
+    if (option.ask - option.bid) / option.ask > settings.blocker_spread:
+        return False
+    volume = option_volume_5m(option, None, snap)
+    return volume is not None and volume >= settings.blocker_option_volume_5m
+
+
+def choose_fallback_contract(snap: Snapshot, side: str, settings: Settings | None = None) -> dict:
+    """Nearest strike that passes the blockers, 0DTE first, then 1DTE.
+
+    The search starts at the strike closest to the stock and walks out inside
+    5% of spot. OTM and ITM both count. If none pass, the card is dropped.
     """
+    settings = settings or Settings()
     today = snap.at.astimezone(ET).date()
     grouped = {0: [], 1: []}
     for option in snap.options:
@@ -537,31 +558,31 @@ def choose_fallback_contract(snap: Snapshot, side: str) -> dict:
         days = (option.expiry - today).days
         if days in grouped:
             grouped[days].append(option)
-    pool = grouped[0] if any(_live_ask(option) for option in grouped[0]) else grouped[1]
-    if not any(_live_ask(option) for option in pool):
-        pool = []
     empty = {
         "option": None, "occ_symbol": None, "expiry": None, "dte": None, "strike": None,
         "fire_bid": None, "fire_ask": None, "atm_symbol": None, "atm_strike": None,
         "atm_bid": None, "atm_ask": None,
     }
-    if not pool:
+    order = (0, 1) if grouped[0] else (1,)
+    chosen = None
+    for days in order:
+        pool = [option for option in grouped[days] if _inside_strike_window(option, snap, settings)]
+        pool.sort(key=lambda option: (abs(option.strike - snap.spot), option.strike))
+        for option in pool:
+            if _quote_passes(option, snap, settings):
+                chosen = option
+                break
+        if chosen is not None:
+            break
+    if chosen is None:
         return empty
-    strikes = sorted({option.strike for option in pool})
-    atm_strike = min(strikes, key=lambda strike: (abs(strike - snap.spot), strike))
-
-    def pick(strike):
-        choices = [option for option in pool if option.strike == strike]
-        live = [option for option in choices if _live_ask(option)]
-        return (live or choices)[0]
-
-    atm = pick(atm_strike)
     result = dict(empty)
     result.update({
-        "option": atm, "occ_symbol": atm.symbol, "expiry": atm.expiry.isoformat(),
-        "dte": (atm.expiry - today).days, "strike": atm.strike,
-        "fire_bid": atm.bid, "fire_ask": atm.ask,
-        "atm_symbol": atm.symbol, "atm_strike": atm.strike, "atm_bid": atm.bid, "atm_ask": atm.ask,
+        "option": chosen, "occ_symbol": chosen.symbol, "expiry": chosen.expiry.isoformat(),
+        "dte": (chosen.expiry - today).days, "strike": chosen.strike,
+        "fire_bid": chosen.bid, "fire_ask": chosen.ask,
+        "atm_symbol": chosen.symbol, "atm_strike": chosen.strike,
+        "atm_bid": chosen.bid, "atm_ask": chosen.ask,
     })
     return result
 
@@ -690,31 +711,43 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     atr21 = getattr(snap, "prior_atr21", None)
     sessions = getattr(snap, "fallback_rvol_sessions", None)
     base = getattr(snap, "fallback_rvol_base", None)
-    rvol = fallback_rvol_value(indexed, minute, base, sessions)
+    days = getattr(snap, "prior_full_days", None)
+    curve = getattr(snap, "rvol_base", None)
+    if days is not None and days >= 10 and curve and curve > 0:
+        rvol = sum(indexed[index].volume for index in indexed if index <= minute) / curve
+    else:
+        rvol = fallback_rvol_value(indexed, minute, base, sessions)
     push = fallback_push(indexed, minute, side, atr21)
     room = room_from_open(indexed, minute, side, atr21)
-    q_true = (rvol is not None and push is not None and room is not None
-              and rvol >= settings.fb_rvol_min and push >= settings.fb_push_atr_min
-              and room <= settings.fb_room_atr_max)
+    from .confluence import (PATTERN_FEATURES, additive_features, card_gate, confluence_flags_for,
+                              match_value, pattern_match, spread_fraction)
+    from .weights import load_weights, score_path
+    contract = choose_fallback_contract(snap, side, settings)
+    probe = contract["option"]
+    features = additive_features(snap, probe, settings)
+    vol5 = features.pop("_vol5", None)
+    flags = confluence_flags_for(snap, probe, {}, settings)
+    _points, bypass_score, positive = score_path(features, side, load_weights(settings.weights_path), "bypass")
+    bar = indexed[minute]
+    volume = bar.volume
+    if probe is None:
+        gate = card_gate(side, volume, None, settings, bid=None, option_volume_5m=None)
+    else:
+        gate = card_gate(side, volume, spread_fraction(probe), settings, bid=probe.bid, option_volume_5m=vol5)
+    # RVOL, push, and room are points. The bypass posts when those points clear
+    # the bypass line and the contract that would post passes the blockers.
+    q_true = bypass_score >= settings.bypass_threshold and gate["post_ok"]
     if state.get("last_m") is not None and minute > state["last_m"] and not q_true:
         state["q_false_since"] = True
     breaks = held_level_breaks(indexed, minute, snap, side)
     fresh = any(item["lvl"] in {"pmh", "pdh", "pml", "pdl"} for item in breaks)
     hod = next((item for item in breaks if item["lvl"] in {"hod", "lod"}), None)
-    bar = indexed[minute]
     new_extreme = False
     if hod is not None and state.get("last_m") is not None:
         if side == "CALL" and state.get("run_high_at_fire") is not None and bar.high > state["run_high_at_fire"]:
             new_extreme = True
         if side == "PUT" and state.get("run_low_at_fire") is not None and bar.low < state["run_low_at_fire"]:
             new_extreme = True
-    from .confluence import (PATTERN_FEATURES, card_gate, confluence_flags_for, match_value,
-                              pattern_match, spread_fraction, tiered_points)
-    probe = next((item for item in snap.options if item.side == side), None)
-    flags = confluence_flags_for(snap, probe, {}, settings)
-    _points, confluence_score, _count = tiered_points(flags, settings)
-    volume = bar.volume
-    gate = card_gate(side, volume, spread_fraction(probe), flags, confluence_score, settings)
     # A held PM/PD/HOD is a confluence point, not a fresh trigger. The trigger
     # is a level break on this bar, or a pattern match that first clears the
     # line inside the entry window. A print from before that window is not spent.
@@ -727,15 +760,12 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     else:
         pattern_new = False
     setup_on = bool(breaks) or pattern_new
-    # Data-derived entry (RVOL, push, room, time) plus the tiered score.
-    # A single weak feature stays under bypass_confluence_min and does not fire.
-    score_ok = confluence_score >= settings.bypass_confluence_min and gate["post_ok"]
+    score_ok = q_true
     candidate = in_window and q_true and setup_on and score_ok
     why = fire_why(first=state.get("k", 0) == 0, fresh_level=fresh, new_extreme=new_extreme,
                    q_false_since=bool(state.get("q_false_since")), candidate=candidate, side=side)
     if why is None:
         return None
-    contract = choose_fallback_contract(snap, side)
     skip_flag, skip_id, skip_ts = option_skip or (False, None, None)
     dedupe_ts = None
     window = timedelta(minutes=settings.event_dedupe_minutes)
@@ -760,13 +790,15 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     rvol_text = 0 if rvol is None else rvol
     push_text = 0 if push is None else push
     label = "+".join(part.upper() for part in lvl.split("+"))
-    reason = f"stock bypass: {label}, confluence {confluence_score:.0f}"
+    reason = f"stock bypass: {label}, confluence {bypass_score:.0f}"
     record = {
         "date": snap.day, "ts_fire": snap.at.astimezone(ET).isoformat(), "tk": snap.symbol, "side": side,
         "k": k, "why": why, "lvl": lvl, "level_value": level_value,
         "levels": {item["lvl"]: item["level_value"] for item in breaks},
         "px": bar.close, "open": earliest.open, "atr21": atr21, "rvol": rvol, "push30": push,
-        "room_atr": room, "confluence_score": confluence_score, "confluence_flags": flags,
+        "room_atr": room, "confluence_score": bypass_score, "bypass_score": bypass_score,
+        "positive_features": positive, "confluence_flags": flags, "confluence_points": _points,
+        "gate_post": int(gate["post_ok"]),
         "base": gate["base"], "blockers": gate["blockers"], "overrides": gate["overrides"],
         "run_high": run_high, "run_low": run_low, "bars_since_last_fire": bars_since, "prev_fire_ts": prev_ts,
         "skip_flag": bool(skip_flag), "skip_ref_card_id": skip_id, "skip_ref_ts": skip_ts,
@@ -936,7 +968,7 @@ def _break_flag(close: float, level: float | None, side: int) -> float | None:
 def build_handoff_features(snap: Snapshot, option: Option, history: list[Snapshot], side: int) -> dict:
     """Raw handoff inputs. None marks a missing value for the fill step.
 
-    RVOL is 0 until five prior full sessions exist. A missing premarket break,
+    RVOL is 0 until ten prior full sessions exist. A missing premarket break,
     prior-day break, or new extreme stays None so the fill can set it to 1.
     """
     bars = list(snap.bars)
@@ -955,7 +987,7 @@ def build_handoff_features(snap: Snapshot, option: Option, history: list[Snapsho
         raw["mo_pct"] = side * (close_m / open0 - 1) * 100
     days = getattr(snap, "prior_full_days", None)
     base = getattr(snap, "rvol_base", None)
-    if days is not None and days >= 5 and base and base > 0:
+    if days is not None and days >= 10 and base and base > 0:
         raw["rvol"] = sum(bar.volume for bar in bars) / base
     else:
         raw["rvol"] = 0.0
@@ -997,6 +1029,24 @@ def build_handoff_features(snap: Snapshot, option: Option, history: list[Snapsho
     raw["cdte"] = 0.0 if dte_of(option, snap) == 0 else 1.0
     raw["m"] = float(minute if minute is not None else 0)
     return raw
+
+
+def option_volume_5m(option, history=None, snap=None) -> float | None:
+    """Contracts in the last five minutes.
+
+    A print about five minutes earlier turns the cumulative total into a
+    delta. With no earlier print, the cumulative total is the number we have.
+    """
+    if option is None:
+        return None
+    if history and snap is not None:
+        delta = _option_volume_5(option, history, snap)
+        if delta is not None:
+            return float(delta)
+    volume = getattr(option, "volume", None)
+    if volume is None:
+        return None
+    return float(volume)
 
 
 def _option_volume_5(option: Option, history: list[Snapshot], snap: Snapshot) -> float | None:
@@ -1406,7 +1456,7 @@ def apply_v2(candidate: Candidate, settings: Settings, history: list[Snapshot],
     candidate.qualifying = qualifying
     from .confluence import apply_card_layers
     try:
-        apply_card_layers(candidate, settings, qualifying, score_v2)
+        apply_card_layers(candidate, settings, qualifying, score_v2, history)
     except Exception as exc:
         LOG.warning("card layers failed (%s)", type(exc).__name__)
     return candidate

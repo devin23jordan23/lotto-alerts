@@ -27,10 +27,10 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
     score_context = " · ".join(part for part in (context, peers) if part)
     displayed_score = round(candidate.score)
     title = ("👀 POTENTIAL TRADE WATCH" if phase == "POTENTIAL"
-             else "⚡ GREEKS UNAVAILABLE · ACTIVE TRADE IDEA" if option.direct_quote_verified
-             else "⚡ RISKY OPENING DRIVE · ACTIVE TRADE IDEA" if candidate.metrics.get("opening_fast_lane")
+             else "GREEKS UNAVAILABLE · ACTIVE TRADE IDEA" if option.direct_quote_verified
+             else "RISKY OPENING DRIVE · ACTIVE TRADE IDEA" if candidate.metrics.get("opening_fast_lane")
                   and candidate.setup and candidate.setup.name == "OPENING_DRIVE"
-             else "⚡ RISKY OPENING BREAK · ACTIVE TRADE IDEA" if candidate.metrics.get("opening_fast_lane")
+             else "RISKY OPENING BREAK · ACTIVE TRADE IDEA" if candidate.metrics.get("opening_fast_lane")
              else "🏆🔥 ACTIVE TRADE IDEA 🔥🏆" if displayed_score >= 92
              else "🏆 ACTIVE TRADE IDEA 🏆" if displayed_score >= 90
              else "🚨 ACTIVE TRADE IDEA")
@@ -66,7 +66,7 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
     if quality is not None:
         embed=payload['embeds'][0]
         if quality.tier == 'SECONDARY':
-            embed['title']=('⚡ GREEKS UNAVAILABLE · ' if option.direct_quote_verified else '')+'B — SECONDARY TRADE IDEA'
+            embed['title']=('GREEKS UNAVAILABLE · ' if option.direct_quote_verified else '')+'B — SECONDARY TRADE IDEA'
             embed['color']=0xE6A23C
         details=[setup.name.replace('_',' ').title()] if setup else []
         details.extend(quality.labels)

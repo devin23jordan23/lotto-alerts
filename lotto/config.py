@@ -34,6 +34,8 @@ CONFLUENCE_TABLE = (
 # Vince's handoff logistic, standardization, and strength ranks. One file
 # serves both LOTTO_HANDOFF_MODEL_PATH and LOTTO_STRENGTH_DISTRIBUTION_PATH.
 HANDOFF_SPEC_PATH = str(Path(__file__).resolve().parent.parent / "config" / "handoff_model_v1026.json")
+# v4c is the live book. A feature it does not list scores 0.
+WEIGHTS_PATH = str(Path(__file__).resolve().parent.parent / "config" / "vince_additive_weights_v4c.json")
 
 
 @dataclass(frozen=True)
@@ -83,14 +85,27 @@ class Settings:
     # post is the default. on is an alias of post. log writes JSONL only.
     # off skips the rule. None of these fields change the handoff step-down.
     fallback_rule: str = "post"
-    fb_rvol_min: float = 0.78
+    # RVOL, push, and room are scored features, not gates. fb_push_atr_min and
+    # fb_room_atr_max are the cuts inside those features.
+    fb_rvol_min: float = 0
     fb_push_atr_min: float = 0.75
     fb_room_atr_max: float = 1.0
-    fb_min_minutes: int = 15
-    fb_max_spread_pct: float = 30
+    fb_min_minutes: int = 0
+    fb_max_spread_pct: float = 15
+    weights_path: str = WEIGHTS_PATH
+    # POST_THRESHOLD. One-line change to 45 lowers the post line.
+    post_threshold: float = 60
+    bypass_threshold: float = 40
+    # ⚡ when the card scores at least bolt_min_score AND at least this many
+    # features contribute positive points.
+    bolt_min_score: float = 20
+    strong_feature_min: int = 10
+    blocker_bid: float = 0.05
+    blocker_option_volume_5m: float = 50
+    strike_window_pct: float = 0.05
     fb_same_move_before_min: int = 15
     fb_same_move_after_min: int = 5
-    # ⚡ on a primary card when the model score (after the stale penalty) clears this.
+    # Legacy score hook. The live ⚡ uses bolt_min_score and strong_feature_min.
     strong_score: float = 57
     stale_quote_seconds: float = 5
     stale_quote_penalty: float = 4
@@ -98,9 +113,8 @@ class Settings:
     # Missing volume posts when confluence points reach the override.
     base_volume_min: float = 1
     base_override_points: float = 8
-    # Blocker table. A slightly wide spread blocks until confluence points
-    # clear the line, or PM break + RVOL + volume are all on.
-    blocker_spread: float = 0.20
+    # Blocker table. Spread, bid, and 5-minute option volume do not lift.
+    blocker_spread: float = 0.15
     blocker_spread_override_points: float = 6
     # Reserved per-feature knobs. The scorer does not read them. The live
     # weight is the tier weight on CONFLUENCE_TABLE, times the 0-1 match.
@@ -308,6 +322,13 @@ class Settings:
             raise ValueError("Invalid base-layer setting")
         if self.blocker_spread <= 0 or self.blocker_spread_override_points < 0:
             raise ValueError("Invalid blocker setting")
+        if (self.post_threshold < 0 or self.bypass_threshold < 0
+                or self.strong_feature_min < 0 or self.bolt_min_score < 0):
+            raise ValueError("Invalid post or bypass threshold")
+        if self.blocker_bid < 0 or self.blocker_option_volume_5m < 0:
+            raise ValueError("Invalid bid or option-volume blocker")
+        if not 0 < self.strike_window_pct <= 1:
+            raise ValueError("Invalid strike window")
         if self.conf_rvol_min < 0 or self.conf_atr_min < 0:
             raise ValueError("Invalid confluence floor")
         weights = (

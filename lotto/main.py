@@ -95,28 +95,39 @@ def atr_window_status(settings) -> int:
     return days
 
 
+def _setting_text(value) -> str:
+    number = float(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.4f}".rstrip("0").rstrip(".")
+
+
 def fallback_rule_status(settings) -> str:
-    """One startup line naming the bypass mode, entry filters, and confluence line."""
+    """One startup line. RVOL, push, and room are points, not gates."""
     mode = settings.fallback_rule
     LOG.warning(
-        "Fallback rule: %s rvol>=%s push>=%s atr=21 room<=%s min_after_open=%sm spread<=%s%% contract=atm confluence>=%s",
-        mode, settings.fb_rvol_min, settings.fb_push_atr_min, settings.fb_room_atr_max,
-        settings.fb_min_minutes, settings.fb_max_spread_pct, settings.bypass_confluence_min,
+        "Fallback rule: %s post>=%s bypass>=%s atr=21 contract=roll spread<=%s%% bid>%s opt_vol>=%s",
+        mode, _setting_text(settings.post_threshold), _setting_text(settings.bypass_threshold),
+        _setting_text(settings.fb_max_spread_pct), _setting_text(settings.blocker_bid),
+        _setting_text(settings.blocker_option_volume_5m),
     )
     return mode
 
 
-def strong_score_status(settings) -> float:
-    """⚡ is applied in scoring when the model score clears this line."""
-    LOG.warning("Strong score: ⚡ on primary cards with model score >= %s", settings.strong_score)
-    return settings.strong_score
+def strong_score_status(settings) -> int:
+    """⚡ needs both the score floor and the positive-feature count."""
+    LOG.warning(
+        "Strong score: ⚡ on cards with score>=%s and >= %s positive features",
+        _setting_text(settings.bolt_min_score), settings.strong_feature_min,
+    )
+    return settings.strong_feature_min
 
 
 def freshness_status(settings) -> None:
     """Ages are logged. A stale quote is a flag and a point penalty, not a gate."""
     LOG.warning(
         "Freshness: quote_age_s bar_age_s min_since_trigger logged; stale quote >%ss is a flag and -%s, not a gate",
-        settings.stale_quote_seconds, settings.stale_quote_penalty,
+        _setting_text(settings.stale_quote_seconds), _setting_text(settings.stale_quote_penalty),
     )
 
 

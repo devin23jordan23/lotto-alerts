@@ -327,35 +327,18 @@ class Schwab:
                 total += minutes.get(minute) or 0
                 curve[minute] = total
             full_days.append(curve)
-        used = full_days[-10:]
         handoff_base = {}
-        if len(full_days) >= 5:
+        if len(full_days) >= 10:
+            used = full_days[-10:]
             for minute in range(390):
-                handoff_base[minute] = sum(curve[minute] for curve in used) / len(used)
+                handoff_base[minute] = sum(curve[minute] for curve in used) / 10
         if not hasattr(self, "handoff_rvol"):
             self.handoff_rvol = {}
         self.handoff_rvol[key] = {"days": len(full_days), "base": handoff_base}
-        # Fallback RVOL is the prior 10 sessions, partial days included. It does
-        # not use the handoff model's 5-day / 380-bar floor.
-        session_curves = []
-        for historic_day in sorted(profiles):
-            minutes = profiles[historic_day]
-            if not any(0 <= minute < 390 for minute in minutes):
-                continue
-            total = 0.0
-            curve = {}
-            for minute in range(390):
-                total += minutes.get(minute) or 0
-                curve[minute] = total
-            session_curves.append(curve)
-        fallback_base = {}
-        if len(session_curves) >= 10:
-            used_fallback = session_curves[-10:]
-            for minute in range(390):
-                fallback_base[minute] = sum(curve[minute] for curve in used_fallback) / 10
+        # Fallback RVOL is the same 10-full-day curve. Partial sessions do not build a second one.
         if not hasattr(self, "fallback_rvol"):
             self.fallback_rvol = {}
-        self.fallback_rvol[key] = {"sessions": len(session_curves), "base": fallback_base}
+        self.fallback_rvol[key] = {"sessions": len(full_days), "base": handoff_base}
         baseline = {minute: median(values) for minute, values in observations.items() if len(values) >= 10}
         if symbol == "SPX":
             # Schwab index candles have zero volume; use traded SPY volume only
