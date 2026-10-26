@@ -95,13 +95,13 @@ class Settings:
     weights_path: str = WEIGHTS_PATH
     # LOTTO_PROFILE names a block in the weights book. Defaults match moderate.
     profile: str = "moderate"
-    # Additive post line from the active profile. Not capped.
-    post_threshold: float = 60
+    # Additive post line from the active profile. Not capped. Moderate is 110.
+    post_threshold: float = 110
     bypass_threshold: float = 40
-    # A card posts only when at least this many features contribute points.
+    # Primary cards also need this many features with value >= 0.5.
+    # Bypass cards do not read this field.
     min_positive_features: int = 0
-    # ⚡ when the card scores at least bolt_min_score AND at least this many
-    # features contribute positive points.
+    # Legacy score floor. The live ⚡ uses the profile post_threshold.
     bolt_min_score: float = 20
     strong_feature_min: int = 10
     blocker_bid: float = 0.05
@@ -109,7 +109,7 @@ class Settings:
     strike_window_pct: float = 0.05
     fb_same_move_before_min: int = 15
     fb_same_move_after_min: int = 5
-    # Legacy score hook. The live ⚡ uses bolt_min_score and strong_feature_min.
+    # Legacy score hook. The live ⚡ uses post_threshold and strong_feature_min.
     strong_score: float = 57
     stale_quote_seconds: float = 5
     stale_quote_penalty: float = 4

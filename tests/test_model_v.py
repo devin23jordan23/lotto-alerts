@@ -16,7 +16,7 @@ from lotto.confluence import (DRC_EMA21_2M, DRP_510, SHADOW_EMA_FEATURES, additi
                               detect_ema9_2m_before_10, detect_ema_pullback, detect_fashionably_late, detect_flag,
                               detect_flushpop, detect_m, detect_open_reclaim, detect_pmx_reclaim, detect_spike_rev,
                               detect_spy10, detect_vwap_slap, detect_w, nia_dip_reclaim, pattern_match,
-                              primary_strength_marker, tiered_points)
+                              primary_strength_marker, spread_fraction, tiered_points)
 from lotto.weights import active_profile, load_weights, score_path
 from lotto.features import Candidate
 from lotto.discord import alert_payload
@@ -56,7 +56,8 @@ class ModelVTests(unittest.TestCase):
                          "LOTTO_STANDBY_NAMES", "LOTTO_HANDOFF_MODEL_PATH",
                          "LOTTO_STRENGTH_DISTRIBUTION_PATH", "LOTTO_ATR_DAYS",
                          "LOTTO_FALLBACK_RULE", "LOTTO_STRONG_SCORE", "LOTTO_FB_PUSH_ATR_MIN",
-                         "LOTTO_PROFILE", "LOTTO_POST_THRESHOLD", "LOTTO_MIN_POSITIVE_FEATURES"):
+                         "LOTTO_PROFILE", "LOTTO_POST_THRESHOLD", "LOTTO_BYPASS_THRESHOLD",
+                         "LOTTO_MIN_POSITIVE_FEATURES"):
                 os.environ.pop(name, None)
             live = env_settings()
         self.assertEqual(live.model, "V")
@@ -65,7 +66,7 @@ class ModelVTests(unittest.TestCase):
         self.assertEqual(live.fallback_rule, "post")
         self.assertEqual((live.fb_rvol_min, live.fb_push_atr_min, live.fb_room_atr_max, live.fb_max_spread_pct),
                          (0, 0.75, 1.0, 15))
-        self.assertEqual(live.post_threshold, 60)
+        self.assertEqual(live.post_threshold, 110)
         self.assertEqual(live.profile, "moderate")
         self.assertEqual(live.min_positive_features, 0)
         self.assertEqual(model_v_settings(post_threshold=45).post_threshold, 45)
@@ -224,7 +225,7 @@ class ModelVTests(unittest.TestCase):
         store = Store(":memory:")
         self.addCleanup(store.db.close)
         settings = model_v_settings(max_alerts_per_day=1, max_alerts_per_cycle=1, max_alerts_per_ticker=1,
-                                    fallback_rule="off")
+                                    fallback_rule="off", post_threshold=20)
         engine = Engine(store, settings, dry_run=False)
         base = _liquid(list(demo_frames())[20][0])
         wide = base.options[0]
@@ -258,7 +259,7 @@ class ModelVTests(unittest.TestCase):
     def test_repeats_are_not_penalized_and_only_the_same_event_is_deduped(self):
         store = Store(":memory:")
         self.addCleanup(store.db.close)
-        engine = Engine(store, model_v_settings(fallback_rule="off"), dry_run=True)
+        engine = Engine(store, model_v_settings(fallback_rule="off", post_threshold=20), dry_run=True)
         # ATR stays under 40 so a 10-point trigger move is a new event. The
         # liquid quote still clears the post line.
         base = replace(_liquid(list(demo_frames())[20][0]), prior_atr=8)
@@ -323,7 +324,7 @@ class ModelVTests(unittest.TestCase):
         self.assertGreater(logged + decisions, 0)
         loud = Engine(Store(":memory:"), model_v_settings(score_mode="combined", post_combined_0dte=1,
                                                           post_v2_stock_0dte=1, post_v2_option_0dte=1,
-                                                          fallback_rule="off"), dry_run=False)
+                                                          fallback_rule="off", post_threshold=20), dry_run=False)
         self.addCleanup(loud.store.db.close)
         loud.remember_stock_events([idea])
         _seed_history(loud, base)
@@ -584,7 +585,7 @@ class ModelVTests(unittest.TestCase):
         snap = _liquid(list(demo_frames())[12][0])
         engine = Engine(Store(":memory:"), model_v_settings(
             score_mode="combined", post_combined_0dte=1, post_v2_option_0dte=1, post_v2_stock_0dte=1,
-            fallback_rule="off",
+            fallback_rule="off", post_threshold=20,
         ), dry_run=False)
         self.addCleanup(engine.store.db.close)
         engine.remember_stock_events(ideas)
@@ -838,12 +839,12 @@ class FallbackRuleTests(unittest.TestCase):
             weights_file_status(model_v_settings())
         logged = "\n".join(caught.output)
         self.assertIn(
-            "Profile: moderate post>=60 bypass>=40 min_positive_features>=0 bolt_features>=10",
+            "Profile: moderate post>=110 bypass>=40 min_positive_features>=0 bolt_features>=10",
             logged)
         self.assertIn(
-            "Fallback rule: post post>=60 bypass>=40 atr=21 contract=roll spread<=15% bid>0.05 opt_vol>=50",
+            "Fallback rule: post post>=110 bypass>=40 atr=21 contract=roll spread<=15% bid>0.05 opt_vol>=50",
             logged)
-        self.assertIn("Strong score: ⚡ on cards with score>=20 and >= 10 positive features", logged)
+        self.assertIn("Strong score: ⚡ on cards with score>=110 and >= 10 positive features", logged)
         self.assertIn(
             "Freshness: quote_age_s bar_age_s min_since_trigger logged; stale quote >5s is a flag and -4, not a gate",
             logged)
@@ -1482,6 +1483,29 @@ def _ohlc(start, rows, volume=20000):
     return tuple(bars)
 
 
+def _fives(start, fives, alert=True, volume=20000):
+    """Each (open, high, low, close) becomes one completed 5-minute bar.
+
+    An alert minute is appended so the event sits strictly before the card.
+    """
+    rows = []
+    minute = 0
+    for open_, high, low, close in fives:
+        for step in range(5):
+            minute += 1
+            end = start + timedelta(minutes=minute)
+            if step < 4:
+                px = open_ if step == 0 else (open_ + close) / 2
+                rows.append(Bar(end, open_ if step == 0 else px, max(open_, px), min(open_, px), px, volume, None))
+            else:
+                rows.append(Bar(end, open_, max(high, open_, close), min(low, open_, close), close, volume, None))
+    if alert and rows:
+        minute += 1
+        last = rows[-1].close
+        rows.append(Bar(start + timedelta(minutes=minute), last, last + 0.05, last - 0.05, last, volume, None))
+    return tuple(rows)
+
+
 class ReviewFixTests(unittest.TestCase):
     """Vince's re-review of 8faaa6e. Each blocking item has a failing case."""
 
@@ -1511,78 +1535,126 @@ class ReviewFixTests(unittest.TestCase):
     def test_ace_setups_and_spy10_score_their_weights_when_they_fire(self):
         start = datetime(2026, 10, 26, 9, 30, tzinfo=ET)
         atr = 2.0
-        drive = _bars(start, 10, lambda minute: 100 + minute * 0.4, high_pad=0.1, low_pad=0.1)
+        drive = _bars(start, 16, lambda minute: 100 + minute * 0.4, high_pad=0.1, low_pad=0.1)
         self.assertEqual(detect_ace_drive(drive, 1, atr), 1.0)
         self.assertEqual(detect_ace_drive(drive, -1, atr), 0.0)
-        crash_end = drive[-1].end + timedelta(minutes=1)
-        crash = Bar(crash_end, drive[-1].close, drive[-1].close + 0.1,
-                    drive[-1].close - 4.2, drive[-1].close - 4, 20000, None)
-        extended = tuple(drive) + (crash,)
-        self.assertEqual(detect_ace_drive(extended, 1, atr, trigger_end=drive[-1].end), 1.0)
-        self.assertEqual(detect_ace_drive(extended, 1, atr), 0.0)
+        self.assertEqual(detect_ace_drive(drive, 1, atr, trigger_end=drive[8].end), 0.0)
+        price = drive[-1].close
+        moment = drive[-1].end
+        held = []
+        while (moment.astimezone(ET).hour, moment.astimezone(ET).minute) < (10, 1):
+            moment += timedelta(minutes=1)
+            held.append(Bar(moment, price, price + 0.1, price - 0.1, price, 20000, None))
+        crash = []
+        for _step in range(20):
+            moment += timedelta(minutes=1)
+            price -= 0.5
+            crash.append(Bar(moment, price + 0.5, price + 0.6, price - 0.1, price, 20000, None))
+        self.assertEqual(detect_ace_drive(drive + tuple(held) + tuple(crash), 1, atr), 1.0)
         self._wired("a_drive", drive, "CALL")
         put_points = score_path({"a_drive": detect_ace_drive(drive, -1, atr)}, "PUT", load_weights())[0]
         self.assertEqual(put_points["a_drive"], 0)
 
-        reclaim = _ohlc(start, [
-            (100.0, 100.2, 99.5, 99.7),
+        reclaim = _fives(start, [
+            (100.0, 100.2, 99.4, 99.7),
             (99.7, 100.6, 99.6, 100.3),
         ])
         self.assertEqual(detect_open_reclaim(reclaim, 1, atr), 1.0)
         self.assertEqual(detect_open_reclaim(reclaim, -1, atr), 0.0)
-        self.assertEqual(detect_open_reclaim(reclaim, 1, atr, trigger_end=reclaim[0].end), 0.0)
+        self.assertEqual(detect_open_reclaim(_fives(start, [
+            (100.0, 100.2, 99.4, 99.7),
+            (99.7, 100.6, 99.6, 100.3),
+        ], alert=False), 1, atr), 0.0)
+        wick = _fives(start, [
+            (100.0, 100.3, 99.4, 100.2),
+            (100.2, 100.5, 100.0, 100.4),
+        ])
+        self.assertEqual(detect_open_reclaim(wick, 1, atr), 0.0)
+        late = _fives(start, [
+            (100.0, 100.1, 99.4, 99.6),
+            (99.6, 99.8, 99.4, 99.5),
+            (99.5, 99.7, 99.3, 99.4),
+            (99.4, 99.6, 99.2, 99.3),
+            (99.3, 100.5, 99.2, 100.4),
+        ])
+        self.assertEqual(detect_open_reclaim(late, 1, atr), 0.0)
+        giveback = _fives(start, [
+            (100.0, 100.1, 99.4, 99.6),
+            (99.6, 100.5, 99.5, 100.3),
+            (100.3, 100.4, 99.2, 99.4),
+        ])
+        self.assertEqual(detect_open_reclaim(giveback, 1, atr), 1.0)
         self._wired("a_open_reclaim", reclaim, "CALL")
-        put_reclaim = _ohlc(start, [
-            (100.0, 100.6, 99.7, 100.4),
+        put_reclaim = _fives(start, [
+            (100.0, 100.6, 99.8, 100.4),
             (100.4, 100.5, 99.2, 99.4),
         ])
         self.assertEqual(detect_open_reclaim(put_reclaim, -1, atr), 1.0)
         self._wired("a_open_reclaim", put_reclaim, "PUT")
 
-        pmx = _ohlc(start, [
-            (101.2, 101.4, 100.8, 101.0),
+        pmx = _fives(start, [
+            (101.0, 101.4, 100.8, 101.0),
             (101.0, 103.2, 100.9, 103.0),
         ])
         self.assertEqual(detect_pmx_reclaim(pmx, 1, 102.0), 1.0)
         self.assertEqual(detect_pmx_reclaim(pmx, -1, 102.0), 0.0)
-        self.assertEqual(detect_pmx_reclaim(pmx, 1, 102.0, trigger_end=pmx[0].end), 0.0)
+        self.assertEqual(detect_pmx_reclaim(_fives(start, [
+            (101.0, 101.4, 100.8, 101.0),
+            (101.0, 103.2, 100.9, 103.0),
+        ], alert=False), 1, 102.0), 0.0)
+        held = _fives(start, [
+            (101.0, 101.4, 100.8, 101.0),
+            (101.0, 103.2, 100.9, 103.0),
+            (103.0, 103.1, 100.5, 101.0),
+        ])
+        self.assertEqual(detect_pmx_reclaim(held, 1, 102.0), 1.0)
         self._wired("a_pmx_reclaim", pmx, "CALL", premarket_high=102.0)
-        put_pmx = _ohlc(start, [
-            (102.4, 102.8, 102.1, 102.5),
-            (102.5, 102.6, 100.8, 101.0),
+        put_pmx = _fives(start, [
+            (103.0, 103.2, 102.4, 102.8),
+            (102.8, 102.9, 100.8, 101.0),
         ])
         self.assertEqual(detect_pmx_reclaim(put_pmx, -1, 102.0), 1.0)
         self._wired("a_pmx_reclaim", put_pmx, "PUT", premarket_low=102.0)
 
-        flush = _ohlc(start, [
+        flush = _fives(start, [
             (100.0, 100.2, 99.9, 100.0),
-            (100.0, 100.1, 99.0, 99.2),
-            (99.2, 100.8, 99.1, 100.5),
+            (100.0, 100.8, 99.0, 100.5),
         ])
         self.assertEqual(detect_flushpop(flush, 1, atr), 1.0)
         self.assertEqual(detect_flushpop(flush, -1, atr), 0.0)
-        undone = flush + (Bar(flush[-1].end + timedelta(minutes=1), 100.5, 100.6, 98.8, 99.0, 20000, None),)
-        self.assertEqual(detect_flushpop(undone, 1, atr, trigger_end=flush[-1].end), 1.0)
-        self.assertEqual(detect_flushpop(undone, 1, atr), 0.0)
+        self.assertEqual(detect_flushpop(_fives(start, [
+            (100.0, 100.2, 99.9, 100.0),
+            (100.0, 100.8, 99.0, 100.5),
+        ], alert=False), 1, atr), 0.0)
+        undone = _fives(start, [
+            (100.0, 100.2, 99.9, 100.0),
+            (100.0, 100.8, 99.0, 100.5),
+            (100.5, 100.6, 98.8, 99.0),
+        ])
+        self.assertEqual(detect_flushpop(undone, 1, atr), 1.0)
         self._wired("a_flushpop", flush, "CALL")
 
-        slap = _ohlc(start, [
-            (100.4, 100.7, 100.3, 100.5),
-            (100.5, 100.8, 99.9, 100.6),
+        slap = _fives(start, [
+            (100.4, 100.8, 99.9, 100.5),
+            (100.5, 101.4, 100.6, 101.2),
         ])
         self.assertEqual(detect_vwap_slap(slap, 1, atr, vwap=100.0), 1.0)
         self.assertEqual(detect_vwap_slap(slap, -1, atr, vwap=100.0), 0.0)
-        self.assertEqual(detect_vwap_slap(slap, 1, atr, vwap=100.0, trigger_end=slap[0].end), 0.0)
+        self.assertEqual(detect_vwap_slap(_fives(start, [
+            (100.4, 100.8, 99.9, 100.5),
+        ], alert=False), 1, atr, vwap=100.0), 0.0)
         self._wired("a_vwap_slap", slap, "CALL", metrics={"vwap": 100.0})
 
-        spike = _ohlc(start, [
-            (100.2, 100.4, 100.0, 100.2),
-            (100.0, 100.2, 98.5, 99.0),
+        spike = _fives(start, [
+            (100.2, 100.4, 98.5, 99.0),
             (99.0, 100.8, 98.9, 100.5),
         ])
         self.assertEqual(detect_spike_rev(spike, 1, atr), 1.0)
         self.assertEqual(detect_spike_rev(spike, -1, atr), 0.0)
-        self.assertEqual(detect_spike_rev(spike, 1, atr, trigger_end=spike[1].end), 0.0)
+        self.assertEqual(detect_spike_rev(_fives(start, [
+            (100.2, 100.4, 98.5, 99.0),
+            (99.0, 100.8, 98.9, 100.5),
+        ], alert=False), 1, atr), 0.0)
         self._wired("a_spike_rev", spike, "CALL")
 
         def morning(minute):
@@ -1595,6 +1667,14 @@ class ReviewFixTests(unittest.TestCase):
         dumped = spy + (Bar(spy[-1].end + timedelta(minutes=1), 104.5, 104.6, 100.0, 100.2, 20000, None),)
         self.assertEqual(detect_spy10(dumped, 1, atr, trigger_end=spy[-1].end), 1.0)
         self.assertEqual(detect_spy10(dumped, 1, atr), 0.0)
+        afternoon = spy
+        moment = spy[-1].end
+        price = spy[-1].close
+        for _step in range(50):
+            moment += timedelta(minutes=1)
+            afternoon = afternoon + (Bar(moment, price, price + 0.05, price - 0.05, price, 20000, None),)
+        self.assertEqual(detect_spy10(afternoon, 1, atr), 0.0)
+        self.assertEqual(detect_spy10(afternoon, 1, atr, trigger_end=spy[-1].end), 1.0)
         self._wired("spy10", spy, "CALL", spy_bars=spy)
 
         def falling(minute):
@@ -1639,9 +1719,10 @@ class ReviewFixTests(unittest.TestCase):
         snap = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (option,), prior_atr=50, source="replay")
         scored = apply_v2(
             Candidate(snap, option, 30, {}, {}, [], False),
-            model_v_settings(), _volume_history(snap, prior_volume=0))
+            model_v_settings(post_threshold=60), _volume_history(snap, prior_volume=0))
         self.assertTrue(scored.qualifying)
         self.assertGreaterEqual(scored.metrics["card_score"], 60)
+        self.assertLess(scored.metrics["card_score"], 110)
         self.assertLess(scored.metrics["option_v2"], 61)
         self.assertEqual(scored.metrics["s12_qualifying"], 0)
         self.assertEqual(scored.metrics["gate_blocked_by"], [])
@@ -1657,28 +1738,56 @@ class ReviewFixTests(unittest.TestCase):
     def test_profile_selection_and_an_uncapped_post_line(self):
         book = load_weights()
         self.assertEqual(set(book["profiles"]), {"loose", "moderate", "conservative"})
-        self.assertEqual(active_profile(book, "loose")["post_threshold"], 45)
+        self.assertEqual(active_profile(book, "loose")["post_threshold"], 20)
         self.assertEqual(active_profile(book, "moderate")["min_positive_features"], 0)
+        self.assertEqual(active_profile(book, "moderate")["strong_feature_min"], 10)
         conservative = active_profile(book, "conservative")
-        self.assertEqual(conservative["post_threshold"], 60)
-        self.assertEqual(conservative["min_positive_features"], 10)
+        self.assertEqual(conservative["post_threshold"], 140)
+        self.assertEqual(conservative["min_positive_features"], 0)
+        self.assertEqual(conservative["strong_feature_min"], 10)
+        self.assertNotIn("conservative_alt_confluence", book["profiles"])
+        clamped = active_profile({
+            "profiles": {"moderate": {
+                "post_threshold": -5, "bypass_threshold": -1, "min_positive_features": -3,
+                "bolt_min_features": -2,
+            }},
+        }, "moderate")
+        self.assertEqual((clamped["post_threshold"], clamped["bypass_threshold"],
+                          clamped["min_positive_features"], clamped["strong_feature_min"]), (0, 0, 0, 0))
+        with self.assertLogs("lotto.weights", level="WARNING") as unknown:
+            fallback = active_profile(book, "conservativ")
+        self.assertEqual(fallback["profile"], "moderate")
+        self.assertEqual(fallback["post_threshold"], 110)
+        self.assertIn("Unknown LOTTO_PROFILE", "\n".join(unknown.output))
         saved = {key: os.environ.pop(key) for key in list(os.environ) if key.startswith("LOTTO_")}
         try:
             moderate = env_settings()
             self.assertEqual(moderate.profile, "moderate")
             self.assertEqual((moderate.post_threshold, moderate.bypass_threshold, moderate.min_positive_features),
-                             (60, 40, 0))
+                             (110, 40, 0))
             os.environ["LOTTO_PROFILE"] = "loose"
             loose = env_settings()
             self.assertEqual(loose.profile, "loose")
             self.assertEqual((loose.post_threshold, loose.bypass_threshold, loose.min_positive_features),
-                             (45, 40, 0))
+                             (20, 40, 0))
             os.environ["LOTTO_PROFILE"] = "conservative"
             strict = env_settings()
             self.assertEqual(strict.profile, "conservative")
-            self.assertEqual(strict.min_positive_features, 10)
+            self.assertEqual(strict.post_threshold, 140)
+            self.assertEqual(strict.min_positive_features, 0)
             self.assertEqual(strict.strong_feature_min, 10)
+            os.environ["LOTTO_PROFILE"] = "moderate"
+            os.environ["LOTTO_POST_THRESHOLD"] = "20"
+            os.environ["LOTTO_BYPASS_THRESHOLD"] = "15"
+            with self.assertLogs("lotto.main", level="WARNING") as overridden:
+                forced = env_settings()
+            self.assertEqual(forced.post_threshold, 110)
+            self.assertEqual(forced.bypass_threshold, 40)
+            self.assertIn("overrides LOTTO_POST_THRESHOLD", "\n".join(overridden.output))
         finally:
+            for name in ("LOTTO_PROFILE", "LOTTO_POST_THRESHOLD", "LOTTO_BYPASS_THRESHOLD",
+                         "LOTTO_MIN_POSITIVE_FEATURES"):
+                os.environ.pop(name, None)
             os.environ.update(saved)
 
         high = active_profile({
@@ -1715,8 +1824,8 @@ class ReviewFixTests(unittest.TestCase):
         snap, option = self._quiet_call()
         blocked = apply_v2(
             Candidate(snap, option, 30, {}, {}, [], False),
-            model_v_settings(min_positive_features=10), _volume_history(snap))
-        self.assertGreaterEqual(blocked.metrics["card_score"], 60)
+            model_v_settings(post_threshold=20, min_positive_features=10), _volume_history(snap))
+        self.assertGreaterEqual(blocked.metrics["card_score"], 20)
         self.assertLess(blocked.metrics["positive_features"], 10)
         self.assertGreater(blocked.metrics["positive_features"], 0)
         self.assertEqual(blocked.metrics["positive_features_met"], 0)
@@ -1801,6 +1910,83 @@ class ReviewFixTests(unittest.TestCase):
         title = stock_payload(idea)["embeds"][0]["title"]
         self.assertIn("STOCK-LED", title)
         self.assertNotIn("⚡", title)
+
+    def test_spread_blocker_uses_the_mid(self):
+        at = datetime(2026, 10, 26, 10, 30, tzinfo=ET)
+        tight = _contract(at, 100, bid=1.0, ask=1.05)
+        mid = (1.05 + 1.0) / 2
+        self.assertAlmostEqual(spread_fraction(tight), (1.05 - 1.0) / mid)
+        self.assertLess(spread_fraction(tight), 0.15)
+        # (ask-bid)/ask is under 0.15. (ask-bid)/mid is over 0.15.
+        crossed = _contract(at, 100, bid=0.86, ask=1.0)
+        self.assertLess((1.0 - 0.86) / 1.0, 0.15)
+        self.assertGreater(spread_fraction(crossed), 0.15)
+        self.assertFalse(card_gate(
+            "CALL", 100, spread_fraction(crossed), model_v_settings(), bid=0.86, option_volume_5m=50,
+        )["post_ok"])
+        exact = _contract(at, 100, bid=0.925, ask=1.075)
+        self.assertAlmostEqual(spread_fraction(exact), 0.15)
+        self.assertTrue(card_gate(
+            "CALL", 100, spread_fraction(exact), model_v_settings(), bid=0.925, option_volume_5m=50,
+        )["post_ok"])
+
+    def test_positive_count_is_value_at_least_half(self):
+        book = json.loads(json.dumps(load_weights()))
+        book["weights"]["partial_row"] = {"call": 10, "put": 10}
+        book["weights"]["needs_half"] = {"call": 5, "put": 5, "requires_min_other_positive": 1}
+        low_points, _low_score, low_count = score_path(
+            {"partial_row": 0.4, "needs_half": 1}, "CALL", book, "primary")
+        self.assertGreater(low_points["partial_row"], 0)
+        self.assertEqual(low_points["needs_half"], 0)
+        self.assertEqual(low_count, 0)
+        high_points, _high_score, high_count = score_path(
+            {"partial_row": 0.5, "needs_half": 1}, "CALL", book, "primary")
+        self.assertEqual(high_points["needs_half"], 5)
+        self.assertEqual(high_count, 2)
+        zero = score_path({"ema50_touch": 1, "partial_row": 0.5}, "CALL", book, "primary")
+        self.assertEqual(zero[0].get("ema50_touch", 0), 0)
+
+    def test_bypass_min_positive_does_not_block_and_bolt_uses_the_post_line(self):
+        settings = model_v_settings(min_positive_features=10, post_threshold=110, fallback_rule="post")
+        store = Store(":memory:")
+        self.addCleanup(store.db.close)
+        engine = Engine(store, settings)
+        snap = _fallback_snap(_session([100] * 16))
+        option = snap.options[0]
+
+        def record(score, positives):
+            return {
+                "_option": option,
+                "dedupe_flag": False,
+                "skip_flag": False,
+                "gate_post": 1,
+                "positive_features": positives,
+                "base": {"direction": 1, "volume": 1},
+                "level_value": 100.0,
+                "bypass_score": score,
+                "card_reason": "stock bypass: test",
+            }
+
+        def fake_apply(candidate, *args, **kwargs):
+            candidate.metrics["gate_post"] = 1
+            candidate.metrics["score_v2"] = candidate.score
+            return candidate
+
+        ready = []
+        with patch("lotto.model_v.apply_v2", fake_apply):
+            engine._post_fallback(snap, record(45, 0), ready)
+        self.assertEqual(len(ready), 1)
+        self.assertTrue(ready[0].qualifying)
+        self.assertEqual(ready[0].metrics["path"], "bypass")
+        self.assertNotIn("strength_marker", ready[0].metrics)
+        bolted = []
+        with patch("lotto.model_v.apply_v2", fake_apply):
+            engine._post_fallback(snap, record(110, 10), bolted)
+        self.assertEqual(bolted[0].metrics.get("strength_marker"), "⚡")
+        quiet = []
+        with patch("lotto.model_v.apply_v2", fake_apply):
+            engine._post_fallback(snap, record(109, 10), quiet)
+        self.assertNotIn("strength_marker", quiet[0].metrics)
 
 
 if __name__ == "__main__":

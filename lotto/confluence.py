@@ -117,7 +117,7 @@ def pattern_match(flags: dict) -> float:
 def card_gate(side, volume, spread, settings: Settings, bid=None, option_volume_5m=None) -> dict:
     """Direction, stock volume, spread, bid, and 5-minute option volume.
 
-    Nothing in the score lifts a miss. Spread is (ask-bid)/ask. Exactly the
+    Nothing in the score lifts a miss. Spread is (ask-bid)/mid. Exactly the
     spread cap passes. A bid at the floor blocks. Exactly the volume floor passes.
     """
     base = {
@@ -890,124 +890,249 @@ def _session_vwap(bars) -> float | None:
     return total / volume
 
 
-def detect_ace_drive(bars, direction: int, atr: float | None, trigger_end=None) -> float:
-    """Opening drive. Calls grind up off the open; puts grind down. 0 or 1."""
+# Research join (fq_s.py and andre_core.py): the feature is the match of the
+# latest setup event whose trig_m is <= the card minute minus 1. That match
+# persists. The last causal bar is the alert minute and is not searched.
+# The attached research files store precomputed match columns. These cuts are
+# those same ATR21 depths on completed 5-minute bars, which is the timeframe
+# a 0.30/0.50 ATR event can actually print on. spy10 is not in that event
+# table. It is the 10:00 pause/turn and scores only through the 10:15 bar.
+DRIVE_NET_ATR = 0.35
+DRIVE_EFFICIENCY = 0.55
+FLUSH_DEPTH_ATR = 0.30
+SPIKE_DEPTH_ATR = 0.50
+SPIKE_REVERSAL_BARS = 3
+OPEN_LOSS_ATR = 0.05
+OPEN_RECLAIM_BARS = 3
+SPY10_FIRST_MINUTE = 29  # bar ending 10:00 ET
+SPY10_LAST_MINUTE = 44   # bar ending 10:15 ET
+
+
+def _research_rows(bars, trigger_end=None) -> list:
+    """Causal bars through the alert minute, with the alert minute removed."""
     rows = _causal_bars(bars, trigger_end)
-    if atr is None or atr <= 0 or direction not in (1, -1) or len(rows) < 8:
+    if len(rows) < 2:
+        return []
+    return rows[:-1]
+
+
+def _clock_bars(bars, minutes: int) -> list[dict]:
+    """Completed clock bars from 9:30, with the bucket's end timestamp."""
+    buckets: dict[int, list] = {}
+    open_min = 9 * 60 + 30
+    for bar in bars:
+        local = bar.end.astimezone(ET)
+        minute = local.hour * 60 + local.minute
+        if minute <= open_min:
+            continue
+        index = (minute - open_min - 1) // minutes
+        buckets.setdefault(index, []).append(bar)
+    if not buckets:
+        return []
+    last_index = max(buckets)
+    built = []
+    for index in sorted(buckets):
+        group = buckets[index]
+        end_min = open_min + (index + 1) * minutes
+        last = group[-1].end.astimezone(ET)
+        if index == last_index and (last.hour * 60 + last.minute) < end_min:
+            continue
+        built.append({
+            "open": group[0].open,
+            "high": max(item.high for item in group),
+            "low": min(item.low for item in group),
+            "close": group[-1].close,
+            "end": group[-1].end,
+        })
+    return built
+
+
+def _vwap_through(bars, end) -> float | None:
+    volume = 0.0
+    total = 0.0
+    for bar in bars:
+        if bar.end > end:
+            break
+        if bar.volume <= 0:
+            continue
+        volume += bar.volume
+        total += (bar.high + bar.low + bar.close) / 3 * bar.volume
+    if volume <= 0:
+        return None
+    return total / volume
+
+
+def _ready(direction: int, atr: float | None, rows) -> bool:
+    return (atr is not None and atr > 0 and direction in (1, -1) and bool(rows))
+
+
+def detect_ace_drive(bars, direction: int, atr: float | None, trigger_end=None) -> float:
+    """Opening drive on 5-minute bars through 10:00. The match persists after.
+
+    Net move at least 0.35 ATR21 and path efficiency at least 0.55. A later
+    bar does not turn the flag off, and a bar after the alert does not count.
+    """
+    rows = _research_rows(bars, trigger_end)
+    if not _ready(direction, atr, rows):
         return 0.0
-    minute = _session_minute(rows[-1])
-    if minute is None or minute > 29:
+    opening = [bar for bar in _clock_bars(rows, 5) if _session_minute_of(bar["end"]) is not None
+               and _session_minute_of(bar["end"]) <= 29]
+    if len(opening) < 2:
         return 0.0
-    net = direction * (rows[-1].close - rows[0].open)
-    if net < 0.35 * atr:
+    net = direction * (opening[-1]["close"] - opening[0]["open"])
+    if net < DRIVE_NET_ATR * atr:
         return 0.0
-    path = sum(abs(rows[i].close - rows[i - 1].close) for i in range(1, len(rows)))
-    if path <= 0 or net / path < 0.55:
-        return 0.0
-    held = sum(direction * (bar.close - rows[0].open) > 0 for bar in rows) / len(rows)
-    if held < 0.7:
-        return 0.0
-    if direction * (rows[-1].close - rows[-2].close) <= 0:
+    path = abs(opening[0]["close"] - opening[0]["open"])
+    path += sum(abs(opening[index]["close"] - opening[index - 1]["close"]) for index in range(1, len(opening)))
+    if path <= 0 or net / path < DRIVE_EFFICIENCY:
         return 0.0
     return 1.0
+
+
+def _session_minute_of(moment):
+    local = moment.astimezone(ET)
+    minute = local.hour * 60 + local.minute
+    open_min = 9 * 60 + 30
+    if minute <= open_min:
+        return None
+    return minute - open_min - 1
 
 
 def detect_open_reclaim(bars, direction: int, atr: float | None, trigger_end=None) -> float:
-    """Price loses the session open, then the latest close takes it back."""
-    rows = _causal_bars(bars, trigger_end)
-    if atr is None or atr <= 0 or direction not in (1, -1) or len(rows) < 2:
+    """A 5-minute close loses the open, then a close reclaims it within 15 minutes.
+
+    The reclaim is an event. It persists. A wick through the open, or a close
+    that is merely back on the trade side with no paired loss, does not fire.
+    """
+    rows = _research_rows(bars, trigger_end)
+    framed = _clock_bars(rows, 5)
+    if not _ready(direction, atr, framed) or len(framed) < 2:
         return 0.0
     open_ = rows[0].open
-    if direction == 1:
-        pierced = any(open_ - bar.low >= 0.05 * atr for bar in rows)
-    else:
-        pierced = any(bar.high - open_ >= 0.05 * atr for bar in rows)
-    lost = any(direction * (bar.close - open_) <= 0 for bar in rows[:-1])
-    back = direction * (rows[-1].close - open_) > 0
-    return 1.0 if pierced and lost and back else 0.0
+    episode = False
+    for index, bar in enumerate(framed):
+        lost = direction * (open_ - bar["close"]) >= OPEN_LOSS_ATR * atr
+        back = direction * (bar["close"] - open_) > 0
+        if lost and not episode:
+            window = framed[index + 1:index + 1 + OPEN_RECLAIM_BARS]
+            if any(direction * (later["close"] - open_) > 0 for later in window):
+                return 1.0
+            episode = True
+        elif back:
+            episode = False
+    return 0.0
 
 
 def detect_pmx_reclaim(bars, direction: int, level, trigger_end=None) -> float:
-    """Latest close reclaims the premarket extreme after trading through it."""
-    rows = _causal_bars(bars, trigger_end)
-    if level is None or not isinstance(level, (int, float)) or not isfinite(level) or len(rows) < 2:
+    """A 5-minute close through the premarket extreme, after price was on the other side.
+
+    The cross can be any bar before the alert. It persists. Calls use the
+    premarket high. Puts use the premarket low.
+    """
+    rows = _research_rows(bars, trigger_end)
+    if level is None or not isinstance(level, (int, float)) or not isfinite(level):
         return 0.0
-    if direction not in (1, -1):
+    if direction not in (1, -1) or not rows:
         return 0.0
-    if direction * (rows[-2].close - level) > 0:
+    framed = _clock_bars(rows, 5)
+    if not framed:
         return 0.0
-    if direction * (rows[-1].close - level) <= 0:
-        return 0.0
-    return 1.0
+    armed = direction * (rows[0].open - level) <= 0
+    for bar in framed:
+        through = direction * (bar["close"] - level) > 0
+        if through and armed:
+            return 1.0
+        if not through:
+            armed = True
+    return 0.0
 
 
 def detect_flushpop(bars, direction: int, atr: float | None, trigger_end=None) -> float:
-    """A fast flush against the trade, then the latest close back through it."""
-    rows = _causal_bars(bars, trigger_end)
-    if atr is None or atr <= 0 or direction not in (1, -1) or len(rows) < 3:
+    """A 5-minute flush of at least 0.30 ATR21, then a close back through it.
+
+    The pop can be that same 5-minute bar or a later one. The match persists.
+    """
+    rows = _research_rows(bars, trigger_end)
+    framed = _clock_bars(rows, 5)
+    if not _ready(direction, atr, framed) or len(framed) < 2:
         return 0.0
-    last = len(rows) - 1
-    for flush_i in range(max(1, last - 3), last):
-        origin = rows[flush_i - 1].close
+    for index in range(1, len(framed)):
+        origin = framed[index - 1]["close"]
+        bar = framed[index]
         if direction == 1:
-            depth = (origin - rows[flush_i].low) / atr
-            popped = rows[last].close > origin and rows[last].close > rows[flush_i].close
+            depth = (origin - bar["low"]) / atr
+            popped = bar["close"] > origin
         else:
-            depth = (rows[flush_i].high - origin) / atr
-            popped = rows[last].close < origin and rows[last].close < rows[flush_i].close
-        if depth >= 0.30 and popped:
+            depth = (bar["high"] - origin) / atr
+            popped = bar["close"] < origin
+        if depth < FLUSH_DEPTH_ATR:
+            continue
+        if popped:
             return 1.0
+        for later in framed[index + 1:]:
+            if direction == 1 and later["close"] > origin and later["close"] > bar["close"]:
+                return 1.0
+            if direction == -1 and later["close"] < origin and later["close"] < bar["close"]:
+                return 1.0
     return 0.0
 
 
 def detect_vwap_slap(bars, direction: int, atr: float | None, vwap=None, trigger_end=None) -> float:
-    """Latest bar tags VWAP from the trade side and closes back off it."""
-    rows = _causal_bars(bars, trigger_end)
-    if atr is None or atr <= 0 or direction not in (1, -1) or len(rows) < 2:
+    """Any earlier 5-minute bar tags VWAP and closes on the trade side.
+
+    The tag does not have to be the alert bar. The match persists. A missing
+    VWAP is the session VWAP known at that bar.
+    """
+    rows = _research_rows(bars, trigger_end)
+    framed = _clock_bars(rows, 5)
+    if not _ready(direction, atr, framed):
         return 0.0
-    if vwap is None:
-        vwap = _session_vwap(rows)
-    if vwap is None:
-        return 0.0
-    bar = rows[-1]
-    tagged = bar.low <= vwap <= bar.high
-    if direction == 1:
-        rejected = bar.close > vwap and (bar.close - vwap) >= 0.02 * atr
-        held_side = rows[-2].close > vwap
-    else:
-        rejected = bar.close < vwap and (vwap - bar.close) >= 0.02 * atr
-        held_side = rows[-2].close < vwap
-    return 1.0 if tagged and rejected and held_side else 0.0
+    for bar in framed:
+        level = vwap if vwap is not None else _vwap_through(rows, bar["end"])
+        if level is None:
+            continue
+        tagged = bar["low"] <= level <= bar["high"]
+        if tagged and direction * (bar["close"] - level) > 0:
+            return 1.0
+    return 0.0
 
 
 def detect_spike_rev(bars, direction: int, atr: float | None, trigger_end=None) -> float:
-    """A spike against the trade, then the latest close back through the spike open."""
-    rows = _causal_bars(bars, trigger_end)
-    if atr is None or atr <= 0 or direction not in (1, -1) or len(rows) < 3:
+    """A 5-minute spike of at least 0.50 ATR21, then a reversal within three bars.
+
+    The reversal is a later close back through the spike open and beyond the
+    spike close. The match persists.
+    """
+    rows = _research_rows(bars, trigger_end)
+    framed = _clock_bars(rows, 5)
+    if not _ready(direction, atr, framed) or len(framed) < 2:
         return 0.0
-    last = rows[-1]
-    for spike in rows[-4:-1]:
+    for index, spike in enumerate(framed[:-1]):
         if direction == 1:
-            depth = (spike.open - spike.low) / atr
-            reversed_ = last.close > spike.open and last.close > spike.close
+            depth = (spike["open"] - spike["low"]) / atr
         else:
-            depth = (spike.high - spike.open) / atr
-            reversed_ = last.close < spike.open and last.close < spike.close
-        if depth >= 0.50 and reversed_:
-            return 1.0
+            depth = (spike["high"] - spike["open"]) / atr
+        if depth < SPIKE_DEPTH_ATR:
+            continue
+        for later in framed[index + 1:index + 1 + SPIKE_REVERSAL_BARS]:
+            if direction == 1 and later["close"] > spike["open"] and later["close"] > spike["close"]:
+                return 1.0
+            if direction == -1 and later["close"] < spike["open"] and later["close"] < spike["close"]:
+                return 1.0
     return 0.0
 
 
 def detect_spy10(spy_bars, direction: int, atr: float | None, trigger_end=None) -> float:
     """SPY 10:00 pause or turn, in the trade direction. Bars after the trigger are ignored.
 
-    The cut is ATR21. A print before 10:00 ET does not score.
+    The cut is ATR21. The flag is on only while the alert bar ends from 10:00
+    through 10:15 ET. It does not stay on for the rest of the day.
     """
     rows = _causal_bars(spy_bars, trigger_end)
     if atr is None or atr <= 0 or direction not in (1, -1) or len(rows) < 5:
         return 0.0
-    last_local = rows[-1].end.astimezone(ET)
-    if (last_local.hour, last_local.minute) < (10, 0):
+    minute = _session_minute(rows[-1])
+    if minute is None or minute < SPY10_FIRST_MINUTE or minute > SPY10_LAST_MINUTE:
         return 0.0
     ten = None
     for bar in rows:
@@ -1159,9 +1284,13 @@ def additive_features(snap, option, settings: Settings, metrics=None, history=No
 
 
 def spread_fraction(option) -> float | None:
-    if option is None or not option.ask:
+    """Blocker spread. Research and the book use (ask-bid)/mid."""
+    if option is None or not option.ask or option.bid is None:
         return None
-    return (option.ask - option.bid) / option.ask
+    mid = (option.ask + option.bid) / 2
+    if not mid:
+        return None
+    return (option.ask - option.bid) / mid
 
 
 def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: float, history=None,
@@ -1169,8 +1298,9 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     """Score the weights book, roll a failing contract, and set the ⚡ marker.
 
     The additive score is the post decision. It has to clear the profile
-    post_threshold, at least min_positive_features rows have to contribute
-    points, and the contract that would post has to pass the blockers,
+    post_threshold, at least min_positive_features rows have to be at least
+    0.5 and contribute points, and the contract that would post has to pass
+    the blockers,
     including a real 5-minute volume reading. s12_ok is stored as a label
     and does not vote. A stale quote subtracts points and does not block
     by itself. The post line is not capped.
@@ -1239,7 +1369,7 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
             candidate.reasons = list(candidate.reasons) + ["stale quote"]
         candidate.parts["stale_quote"] = round(-penalty, 2)
     marker = primary_strength_marker(
-        positive, settings.strong_feature_min, marked, settings.bolt_min_score)
+        positive, settings.strong_feature_min, marked, settings.post_threshold)
     if post_ok and marker:
         metrics["strength_marker"] = marker
     else:

@@ -5,27 +5,27 @@
  "bolt_threshold": {
   "min_score": 20,
   "min_positive_features": 10,
-  "note": "bolt = score>=20 AND >=10 positive-point features firing"
+  "note": "live bolt = score>= the profile post_threshold AND >=10 features with value>=0.5. min_score is the old research floor and is not the live marker."
  },
  "bypass_threshold": 40,
  "profiles": {
   "loose": {
-   "post_threshold": 45,
+   "post_threshold": 20,
    "bypass_threshold": 40,
    "min_positive_features": 0,
-   "bolt_min_positive_features": 10
+   "bolt_min_features": 10
   },
   "moderate": {
-   "post_threshold": 60,
+   "post_threshold": 110,
    "bypass_threshold": 40,
    "min_positive_features": 0,
-   "bolt_min_positive_features": 10
+   "bolt_min_features": 10
   },
   "conservative": {
-   "post_threshold": 60,
+   "post_threshold": 140,
    "bypass_threshold": 40,
-   "min_positive_features": 10,
-   "bolt_min_positive_features": 10
+   "min_positive_features": 0,
+   "bolt_min_features": 10
   }
  },
  "blockers": {
@@ -284,8 +284,8 @@
   "open_reclaim": "fit coef minus 15",
   "spy10": "capped at 15",
   "fit": "joint L2 logistic C=0.1, penalties x0.25, fit<2026-07-20 test>=2026-07-20",
-  "v4c": "adds Nia EMA terms as stacked interactions only; ~400 combinations tested by Nia -> shadow-check sized; default profile moderate posts at 60",
-  "profiles": "LOTTO_PROFILE selects loose, moderate, or conservative. post_threshold is not capped. A card also needs min_positive_features positive-point rows. No daily cap, top-N, or cooldown."
+  "v4c": "adds Nia EMA terms as stacked interactions only; ~400 combinations tested by Nia -> shadow-check sized; live default profile moderate posts at 110. posting_threshold 60 is the research reference, not the live line.",
+  "profiles": "LOTTO_PROFILE selects loose 20/40/0/10, moderate 110/40/0/10, or conservative 140/40/0/10. post_threshold is not capped. Primary cards count features with value>=0.5. Bypass cards use bypass_threshold only. Bolt is score>=post_threshold and >=10 such features. No daily cap, top-N, or cooldown."
  },
  "definitions": {
   "flow85": "option vol5 (m-4..m) >=85",

@@ -126,10 +126,10 @@ def fallback_rule_status(settings) -> str:
 
 
 def strong_score_status(settings) -> int:
-    """⚡ needs both the score floor and the positive-feature count."""
+    """⚡ needs the profile post line and the positive-feature count."""
     LOG.warning(
         "Strong score: ⚡ on cards with score>=%s and >= %s positive features",
-        _setting_text(settings.bolt_min_score), settings.strong_feature_min,
+        _setting_text(settings.post_threshold), settings.strong_feature_min,
     )
     return settings.strong_feature_min
 
@@ -224,8 +224,18 @@ def env_settings() -> Settings:
     if model == "V":
         from .weights import active_profile, load_weights
         requested = str(updates.get("profile") or "moderate")
+        overridden = [
+            name for name in ("LOTTO_POST_THRESHOLD", "LOTTO_BYPASS_THRESHOLD", "LOTTO_MIN_POSITIVE_FEATURES")
+            if os.getenv(name) is not None
+        ]
         try:
-            updates.update(active_profile(load_weights(updates.get("weights_path")), requested))
+            chosen = active_profile(load_weights(updates.get("weights_path")), requested)
+            updates.update(chosen)
+            if overridden:
+                LOG.warning(
+                    "LOTTO_PROFILE=%s overrides %s. Set LOTTO_PROFILE to change the line.",
+                    chosen["profile"], ", ".join(overridden),
+                )
         except (OSError, ValueError) as exc:
             LOG.error("Weights profile not loaded (%s); using settings defaults", type(exc).__name__)
             updates["profile"] = "moderate"

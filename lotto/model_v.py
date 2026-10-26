@@ -28,10 +28,11 @@ Those rows are kept. They are not posted and they are not dropped silently.
 
 Posting is the v4c additive score on the active profile. A primary card
 posts when that score clears the profile post_threshold, at least
-min_positive_features contribute points, and the posted contract passes
-the blockers, including a real 5-minute option-volume reading. The post
-line is not capped. The hybrid bars (40/61) and the handoff floors stay
-on the card as labels. They do not decide the post.
+min_positive_features rows have value >= 0.5 and contribute points, and
+the posted contract passes the blockers, including a real 5-minute
+option-volume reading. Bypass cards clear bypass_threshold and the
+blockers only. The post line is not capped. The hybrid bars (40/61) and
+the handoff floors stay on the card as labels. They do not decide the post.
 The handoff floors are P(true win). hoF >= A - delta is the same bar on the
 log-odds scale (A is 58/80, delta is 200/100 on S12 and 150/75 on S11).
 
@@ -543,7 +544,9 @@ def _quote_passes(option: Option, snap: Snapshot, settings: Settings, history=No
         return False
     if option.bid is None or not isfinite(option.bid) or option.bid <= settings.blocker_bid:
         return False
-    if (option.ask - option.bid) / option.ask > settings.blocker_spread:
+    from .confluence import spread_fraction
+    fraction = spread_fraction(option)
+    if fraction is None or fraction > settings.blocker_spread:
         return False
     volume = option_volume_5m(option, history, snap)
     return volume is not None and volume >= settings.blocker_option_volume_5m

@@ -546,8 +546,6 @@ class Engine:
             return
         if not record.get("gate_post"):
             return
-        if (record.get("positive_features") or 0) < self.settings.min_positive_features:
-            return
         base = record.get("base") or {}
         if not base.get("direction") or not base.get("volume"):
             return
@@ -570,7 +568,7 @@ class Engine:
         positive = record.get("positive_features") or 0
         bypass_score = record.get("bypass_score")
         if (positive >= self.settings.strong_feature_min
-                and bypass_score is not None and bypass_score >= self.settings.bolt_min_score):
+                and bypass_score is not None and bypass_score >= self.settings.post_threshold):
             candidate.metrics["strength_marker"] = "⚡"
         else:
             candidate.metrics.pop("strength_marker", None)

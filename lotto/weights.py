@@ -11,7 +11,8 @@ scores 0. Two gates are generic and live on the weight row:
   gate is not one of those others. Gated rows do not count each other.
 
 On the bypass path the gate count includes primary positives. The bypass
-score does not.
+score does not. A row counts as positive when its value is at least 0.5
+and its points are positive. Points above zero with a smaller value do not.
 """
 import json
 import logging
@@ -71,8 +72,9 @@ def _whole(value, default: int) -> int:
 def active_profile(book: dict | None = None, name: str | None = None) -> dict:
     """The profile LOTTO_PROFILE selected.
 
-    post_threshold is used as written. A value above 60 stays. An unknown
-    name falls back to moderate.
+    post_threshold is used as written. A value above 60 stays. Negative
+    thresholds clamp to 0. An unknown name logs a warning and uses moderate.
+    Missing keys use the moderate preset: 110 / 40 / 0 / 10.
     """
     if book is None:
         book = load_weights()
@@ -81,21 +83,23 @@ def active_profile(book: dict | None = None, name: str | None = None) -> dict:
         profiles = {}
     requested = str(name or "moderate").strip().lower() or "moderate"
     if requested not in profiles:
-        if requested != "moderate":
-            LOG.error("Unknown LOTTO_PROFILE %s; using moderate", requested)
+        LOG.warning(
+            "Unknown LOTTO_PROFILE %r; using moderate. "
+            "Expected loose, moderate, or conservative.",
+            requested,
+        )
         requested = "moderate"
     raw = profiles.get(requested)
     if not isinstance(raw, dict):
         raw = {}
-    chosen = {
+    bolt = raw.get("bolt_min_features", raw.get("bolt_min_positive_features", 10))
+    return {
         "profile": requested,
-        "post_threshold": _number(raw.get("post_threshold"), 60),
-        "bypass_threshold": _number(raw.get("bypass_threshold"), 40),
+        "post_threshold": max(0.0, _number(raw.get("post_threshold"), 110)),
+        "bypass_threshold": max(0.0, _number(raw.get("bypass_threshold"), 40)),
         "min_positive_features": max(0, _whole(raw.get("min_positive_features"), 0)),
+        "strong_feature_min": max(0, _whole(bolt, 10)),
     }
-    if "bolt_min_positive_features" in raw:
-        chosen["strong_feature_min"] = max(0, _whole(raw.get("bolt_min_positive_features"), 10))
-    return chosen
 
 
 def _side_weight(spec, side: str) -> float:
@@ -142,7 +146,7 @@ def _contributions(table: dict, features: dict, side: str) -> dict:
         raw = _side_weight(spec, side) * value
         other = _field_count(spec, "requires_min_other_positive")
         conf = _field_count(spec, "requires_min_conf")
-        out[name] = (raw, other, conf)
+        out[name] = (raw, other, conf, value)
     return out
 
 
@@ -163,18 +167,22 @@ def score_path(features: dict, side: str, book: dict | None = None, path: str = 
         return need <= 0 or conf >= need
 
     ungated = sum(
-        1 for raw, other, need in universe.values()
-        if not other and raw > 0 and conf_ok(need)
+        1 for raw, other, need, value in universe.values()
+        if not other and raw > 0 and value >= 0.5 and conf_ok(need)
     )
 
     def apply(contribs):
         points = {}
-        for name, (raw, other, need) in contribs.items():
+        counted = {}
+        for name, (raw, other, need, value) in contribs.items():
             allowed = conf_ok(need) and (not other or ungated >= other)
             points[name] = raw if allowed else 0.0
-        return points
+            counted[name] = value if allowed else 0.0
+        return points, counted
 
-    points = apply(bypass_c if path == "bypass" else primary_c)
+    points, counted = apply(bypass_c if path == "bypass" else primary_c)
     score = sum(points.values())
-    positive = sum(1 for value in points.values() if value > 0)
+    positive = sum(
+        1 for name, value in points.items() if value > 0 and counted[name] >= 0.5
+    )
     return points, score, positive
