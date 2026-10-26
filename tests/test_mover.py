@@ -224,10 +224,12 @@ class BypassTests(unittest.TestCase):
 class MoverDeliveryTests(unittest.TestCase):
     def test_send_quote_requires_fresh_tradable_two_sided_market(self):
         now = datetime.now(timezone.utc)
-        valid = {"realtime": True, "quote_time": now, "bid": .80, "ask": 1.0, "spot": 100.0}
+        valid = {"realtime": True, "quote_time": now, "spot_time": now,
+                 "bid": .80, "ask": 1.0, "spot": 100.0}
         self.assertTrue(mover_send_quote_ok(valid, now))
         for change in ({"ask": 1.5}, {"bid": 0}, {"spot": None},
-                       {"quote_time": now - timedelta(seconds=91)}, {"realtime": False}):
+                       {"quote_time": now - timedelta(seconds=91)},
+                       {"spot_time": now - timedelta(seconds=91)}, {"realtime": False}):
             self.assertFalse(mover_send_quote_ok({**valid, **change}, now), change)
 
     def test_failed_mover_requote_stays_internal_without_discord_post(self):

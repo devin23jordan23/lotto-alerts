@@ -250,6 +250,13 @@ def run(db_path):
             "bid40_10": hits[10], "bid40_15": hits[15], "bid40_30": hits[30],
             "clean28_30": clean28,
             "stock_up03_15": sum(e["stock_15"] >= .003 for e in group),
+            "by_day": {day: {
+                "alerts": sum(e["day"] == day for e in group),
+                "priced_valid": sum(e["day"] == day for e in valid),
+                "bid40_10": sum(e["day"] == day and e["bid_10"] >= .40 for e in valid),
+                "bid40_15": sum(e["day"] == day and e["bid_15"] >= .40 for e in valid),
+                "bid40_30": sum(e["day"] == day and e["bid_30"] >= .40 for e in valid),
+            } for day in DAYS},
             "panw_crwd_net_by_10": {s: min((t for sym, side, t in oct23 if sym == s and side == "CALL"), default=None)
                                      for s in ("PANW", "CRWD", "NET")},
         })
@@ -258,6 +265,12 @@ def run(db_path):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 3 and sys.argv[3] == "--all":
+        inventory = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+        counts = inventory.execute("SELECT substr(at,1,10), COUNT(*) FROM snapshots GROUP BY 1 ORDER BY 1").fetchall()
+        inventory.close()
+        DAYS = tuple(day for day, count in counts if count > 0)
+        print("ALL SAVED SESSIONS", counts, flush=True)
     result = run(sys.argv[1])
     with open(sys.argv[2], "w") as handle:
         json.dump(result, handle, indent=2)

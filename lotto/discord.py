@@ -114,14 +114,18 @@ def mover_send_quote_ok(quote: dict | None, now: datetime) -> bool:
     """The bypass only posts a priced card when its send-time quote is tradable."""
     if not quote or quote.get("realtime") is not True:
         return False
-    qt, bid, ask, spot = (quote.get("quote_time"), quote.get("bid"),
-                          quote.get("ask"), quote.get("spot"))
+    qt, st, bid, ask, spot = (quote.get("quote_time"), quote.get("spot_time"),
+                              quote.get("bid"), quote.get("ask"), quote.get("spot"))
     if (not isinstance(qt, datetime) or qt.tzinfo is None
+            or not isinstance(st, datetime) or st.tzinfo is None
             or not isinstance(bid, (int, float)) or not isinstance(ask, (int, float))
             or not isinstance(spot, (int, float))):
         return False
     age = (now - qt).total_seconds()
-    return (0 <= age <= 90 and spot > 0 and bid > 0 and ask > bid and ask >= .15
+    stock_age = (now - st).total_seconds()
+    return (0 <= age <= 90 and 0 <= stock_age <= 90
+            and abs((qt - st).total_seconds()) <= 90
+            and spot > 0 and bid > 0 and ask > bid and ask >= .15
             and ((ask - bid) / ask <= .35 or ask - bid <= .05))
 
 
