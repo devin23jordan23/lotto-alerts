@@ -142,6 +142,48 @@ class AdapterTests(unittest.TestCase):
         client.rate_limit_hits = 2
         self.assertEqual(client.request_statistics(), (1, .5, 2))
 
+    def _daily_candles(self, today, true_ranges):
+        candles = []
+        close = 100.0
+        series = [0, *true_ranges]
+        for index, width in enumerate(series):
+            day = (today - timedelta(days=len(series) - index)).replace(hour=10, minute=0, second=0, microsecond=0)
+            candles.append({"datetime": day.timestamp() * 1000, "open": close, "high": close + width,
+                            "low": close, "close": close, "volume": 100})
+        return candles
+
+    def test_atr21_needs_15_true_ranges_and_leaves_the_14_day_atr(self):
+        today = datetime(2026, 10, 26, 10, 0, tzinfo=ET)
+        self.client.candles = Mock(return_value={"candles": self._daily_candles(today, [4] * 14)})
+        self.client.baseline("TEST", today)
+        self.assertEqual(self.client.atrs[("TEST", today.date())], 4)
+        self.assertIsNone(self.client.atrs21[("TEST", today.date())])
+        ranges = [50] + [3] * 7 + [1] * 14
+        self.client.baselines = {}
+        self.client.candles = Mock(return_value={"candles": self._daily_candles(today, ranges)})
+        self.client.baseline("TEST", today)
+        self.assertEqual(self.client.atrs[("TEST", today.date())], 1)
+        self.assertAlmostEqual(self.client.atrs21[("TEST", today.date())], (3 * 7 + 1 * 14) / 21)
+
+    def test_fallback_rvol_needs_ten_sessions_and_does_not_use_the_handoff_floor(self):
+        today = datetime(2026, 10, 26, 10, 0, tzinfo=ET)
+        candles = []
+        for age in range(10, 0, -1):
+            start = (today - timedelta(days=age)).replace(hour=9, minute=30, second=0, microsecond=0)
+            candles.append({"datetime": start.timestamp() * 1000, "high": 101, "low": 99, "close": 100, "volume": 80})
+        self.client.candles = Mock(return_value={"candles": candles})
+        self.client.baseline("TEST", today)
+        stored = self.client.fallback_rvol[("TEST", today.date())]
+        self.assertEqual(stored["sessions"], 10)
+        self.assertEqual(stored["base"][0], 80)
+        self.assertEqual(self.client.handoff_rvol[("TEST", today.date())]["days"], 0)
+        self.client.baselines = {}
+        self.client.candles = Mock(return_value={"candles": candles[1:]})
+        self.client.baseline("TEST", today)
+        short = self.client.fallback_rvol[("TEST", today.date())]
+        self.assertEqual(short["sessions"], 9)
+        self.assertEqual(short["base"], {})
+
     def test_baseline_excludes_today_and_uses_same_elapsed_time(self):
         today = datetime(2026, 9, 21, 10, 0, tzinfo=ET)
         candles = []

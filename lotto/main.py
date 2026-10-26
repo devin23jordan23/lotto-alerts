@@ -81,6 +81,17 @@ PWIN_FIELDS = (
 )
 
 
+def fallback_rule_status(settings) -> str:
+    """One startup line naming the strong-stock fallback mode and thresholds."""
+    mode = settings.fallback_rule
+    LOG.warning(
+        "Fallback rule: %s rvol>=%s push>=%s atr=21 spread<=%s%% same_move=-%s/+%s",
+        mode, settings.fb_rvol_min, settings.fb_push_atr_min, settings.fb_max_spread_pct,
+        settings.fb_same_move_before_min, settings.fb_same_move_after_min,
+    )
+    return mode
+
+
 def handoff_fallback_status(enabled: bool, requested_mode: str | None) -> str:
     """Whether stock-led option cards are built.
 
@@ -121,6 +132,8 @@ def env_settings() -> Settings:
                 updates[field.name] = type(getattr(base, field.name))(raw)
     if "score_mode" in updates:
         updates["score_mode"] = str(updates["score_mode"]).lower()
+    if "fallback_rule" in updates:
+        updates["fallback_rule"] = str(updates["fallback_rule"]).strip().lower()
     updates["model"] = model
     if model == "V":
         updates["preset"] = preset
@@ -204,6 +217,7 @@ def main():
     if live_delivery and not webhook:
         raise SystemExit("DISCORD_LOTTO_WEBHOOK is required when LOTTO_SEND_ALERTS=true")
     engine = Engine(store, env_settings(), dry_run=not live_delivery)
+    engine.fallback_log = data_dir / "fallback-rule.jsonl"
     # Stock cards stay internal even if LOTTO_STOCK_FIRST_MODE=send.
     stock_first = StockFirst(store,
         enabled=os.getenv("LOTTO_STOCK_FIRST_ENABLED", "true").lower() == "true",
@@ -245,6 +259,7 @@ def main():
              'configured' if os.getenv('DISCORD_LOTTO_SECONDARY_WEBHOOK') else 'internal',
              ','.join(sorted(engine.quality.disabled_rules)) or 'none')
     handoff_fallback_status(stock_first.enabled, os.getenv("LOTTO_STOCK_FIRST_MODE"))
+    fallback_rule_status(engine.settings)
     from .model_v import scan_budget
     LOG.info("Model %s score_mode=%s preset=%s standby_names=%s standby=%s",
              engine.settings.model, engine.settings.score_mode, engine.settings.preset,

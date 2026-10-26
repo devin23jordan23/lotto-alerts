@@ -12,14 +12,17 @@ from lotto.demo import demo_frames
 from lotto.discord import deliver_stock_pending
 from lotto.engine import Engine
 from lotto.features import Candidate
-from lotto.main import env_settings, handoff_fallback_status, standby_symbols
-from lotto.model_v import (apply_v2, build_handoff_features, cap_stock, classify_runner,
-                           due_standby, exceptional_stock, features_from_spec_raw,
-                           fill_model_features, fill_strength_inputs, invert_live_blend,
-                           lane_decision, level_retest, pick_one_otm, post_bar,
-                           quote_in_play, quote_universe, score_handoff)
+from lotto.discord import alert_payload
+from lotto.main import env_settings, fallback_rule_status, handoff_fallback_status, standby_symbols
+from lotto.model_v import (apply_v2, atr21_value, build_handoff_features, cap_stock,
+                           choose_fallback_contract, classify_runner, due_standby,
+                           evaluate_fallback, exceptional_stock, fallback_push, fallback_rvol_value,
+                           features_from_spec_raw, fill_model_features, fill_strength_inputs,
+                           fire_why, handoff_floor, invert_live_blend, lane_decision, level_retest,
+                           new_fallback_state, pick_one_otm, post_bar, quote_in_play, quote_spread_fail,
+                           quote_universe, resolve_fallback_skip, score_handoff)
 from lotto.stock_first import StockFirst
-from lotto.models import Bar, ET, Option
+from lotto.models import Bar, ET, Option, Snapshot
 from lotto.patterns import Setup
 from lotto.quality import evaluate
 from lotto.replay_v import replay
@@ -48,6 +51,8 @@ class ModelVTests(unittest.TestCase):
             live = env_settings()
         self.assertEqual(live.model, "V")
         self.assertEqual(live.min_score, 60)
+        self.assertEqual(live.fallback_rule, "log")
+        self.assertEqual((live.fb_rvol_min, live.fb_push_atr_min, live.fb_max_spread_pct), (0.78, 0.5, 30))
         self.assertEqual(live.score_mode, "s12")
         self.assertEqual(live.preset, "S12")
         self.assertEqual(live.standby_names, 0)
@@ -543,6 +548,249 @@ class ModelVTests(unittest.TestCase):
         posted_log = "\n".join(on.output)
         self.assertIn("Handoff fallback state: posting", posted_log)
         self.assertIn("Stock-only cards never post", posted_log)
+
+
+def _contract(at, strike, side="CALL", bid=1.0, ask=1.1, dte=0):
+    expiry = at.astimezone(ET).date() + timedelta(days=dte)
+    root = "C" if side == "CALL" else "P"
+    return Option(f"{root}{strike:g}{dte}", expiry, side, strike, bid, ask, 200, 10, 0.4, 0.02, at)
+
+
+def _session(closes, volume=78, low_pad=1.0, high_pad=0.2, pads=None):
+    start = datetime(2026, 10, 26, 9, 30, tzinfo=ET)
+    rows = []
+    for index, close in enumerate(closes):
+        end = start + timedelta(minutes=index + 1)
+        low = close - low_pad
+        high = close + high_pad
+        if pads:
+            low, high = pads[index]
+        rows.append(Bar(end, close, max(high, close), min(low, close), close, volume, None))
+    return tuple(rows)
+
+
+def _fallback_snap(bars, side="CALL", options=None, level=100.0, base=1600, sessions=10, atr21=2.0):
+    at = bars[-1].end
+    if options is None:
+        if side == "CALL":
+            options = (_contract(at, bars[-1].close, "CALL", 1.0, 1.05),
+                       _contract(at, bars[-1].close + 1, "CALL", 1.0, 1.1))
+        else:
+            options = (_contract(at, bars[-1].close, "PUT", 1.0, 1.05),
+                       _contract(at, bars[-1].close - 1, "PUT", 1.0, 1.1))
+    snap = Snapshot("DEMO", at, bars[-1].close, at, 100, bars, tuple(options), prior_atr=9,
+                    premarket_high=level if side == "CALL" else None,
+                    premarket_low=level if side == "PUT" else None,
+                    source="replay")
+    object.__setattr__(snap, "prior_atr21", atr21)
+    object.__setattr__(snap, "fallback_rvol_sessions", sessions)
+    object.__setattr__(snap, "fallback_rvol_base", base)
+    return snap
+
+
+class FallbackRuleTests(unittest.TestCase):
+    def test_boundaries_puts_rvol_gate_and_retrigger(self):
+        self.assertIsNone(atr21_value([1] * 14))
+        self.assertEqual(atr21_value([1] * 15), 1)
+        self.assertEqual(atr21_value([9] + [1] * 21), 1)
+        self.assertIsNone(fallback_rvol_value({0: Bar(datetime(2026, 10, 26, 9, 31, tzinfo=ET), 1, 1, 1, 1, 10, None)},
+                                               0, 100, 9))
+        self.assertEqual(fallback_rvol_value({}, 0, 0, 10), 0)
+        indexed = {index: Bar(datetime(2026, 10, 26, 9, 31, tzinfo=ET), 1, 2, 0, 1, 1, None)
+                   for index in range(16)}
+        self.assertAlmostEqual(fallback_push(indexed, 15, "CALL", 2), 0.5)
+        self.assertLess(fallback_push(indexed, 15, "CALL", 2.1), 0.5)
+        self.assertEqual(quote_spread_fail(0.7, 1.0, 30)[0], 0)
+        self.assertEqual(quote_spread_fail(0.69, 1.0, 30)[0], 1)
+        self.assertEqual(quote_spread_fail(0, 1.0, 30)[0], 1)
+        self.assertEqual(fire_why(first=False, fresh_level=False, new_extreme=False,
+                                  q_false_since=True, candidate=True, side="CALL"), "rule_re_met")
+        self.assertIsNone(fire_why(first=False, fresh_level=False, new_extreme=False,
+                                   q_false_since=False, candidate=True, side="CALL"))
+
+        settings = model_v_settings(fallback_rule="log")
+        early = _session([100] * 12 + [100, 101, 102])
+        state = new_fallback_state()
+        self.assertIsNone(evaluate_fallback(_fallback_snap(early), "CALL", settings, state))
+        self.assertEqual(state["k"], 0)
+        held = _session([100] * 14 + [101, 102])
+        fired = evaluate_fallback(_fallback_snap(held), "CALL", settings, state)
+        self.assertEqual((fired["why"], fired["m"], fired["k"]), ("first", 15, 1))
+        self.assertIn("pmh", fired["lvl"])
+        self.assertAlmostEqual(fired["rvol"], 0.78)
+        quiet = _fallback_snap(_session([100] * 14 + [101, 102, 102], volume=1), base=10_000)
+        self.assertIsNone(evaluate_fallback(quiet, "CALL", settings, state))
+        self.assertTrue(state["q_false_since"])
+        still = _fallback_snap(_session([100] * 14 + [101, 102, 102, 102]))
+        self.assertIsNone(evaluate_fallback(still, "CALL", settings, state))
+        short = _fallback_snap(held, sessions=9)
+        empty = new_fallback_state()
+        self.assertIsNone(evaluate_fallback(short, "CALL", settings, empty))
+
+        high_early = [100] * 16
+        pads = [(99, 200)] + [(99, 100.2)] * 15
+        blocked = _fallback_snap(_session(high_early, pads=pads), level=None)
+        self.assertIsNone(evaluate_fallback(blocked, "CALL", settings, new_fallback_state()))
+        hod_pads = [(99, 100)] * 14 + [(100, 101), (101, 102)]
+        hod_closes = [100] * 14 + [101, 102]
+        hod = evaluate_fallback(_fallback_snap(_session(hod_closes, pads=hod_pads), level=None),
+                                "CALL", settings, new_fallback_state())
+        self.assertEqual(hod["lvl"], "hod")
+        self.assertEqual(hod["level_value"], 100)
+
+        late_closes = [100] * 382 + [100, 101, 102]
+        late = evaluate_fallback(_fallback_snap(_session(late_closes)), "CALL", settings, new_fallback_state())
+        self.assertEqual(late["m"], 384)
+        after = _session(late_closes + [103])
+        self.assertIsNone(evaluate_fallback(_fallback_snap(after), "CALL", settings, new_fallback_state()))
+
+        puts = _session([100] * 14 + [99, 98], high_pad=1, low_pad=0.2)
+        put = evaluate_fallback(_fallback_snap(puts, side="PUT"), "PUT", settings, new_fallback_state())
+        self.assertIn("pml", put["lvl"])
+        self.assertGreaterEqual(put["push30"], 0.5)
+        self.assertEqual(put["strike"], 97)
+        retaken = _session([100] * 14 + [101, 102] + [102] * 4 + [100, 101, 102])
+        second = evaluate_fallback(_fallback_snap(retaken), "CALL", settings, state)
+        self.assertEqual(second["why"], "fresh_level")
+        self.assertFalse(second["dedupe_flag"])
+        self.assertEqual(second["k"], 2)
+
+    def test_contract_spread_and_same_move_flag(self):
+        at = datetime(2026, 10, 26, 9, 46, tzinfo=ET)
+        wide = _contract(at, 101, bid=0.1, ask=2)
+        tight = _contract(at, 102, bid=1.0, ask=1.1)
+        snap = Snapshot("DEMO", at, 100, at, 100, (), (wide, tight), source="replay")
+        chosen = choose_fallback_contract(snap, "CALL")
+        self.assertEqual(chosen["strike"], 101)
+        self.assertEqual(quote_spread_fail(wide.bid, wide.ask, 30)[0], 1)
+        no_ask = _contract(at, 105, bid=0, ask=0)
+        later = _contract(at, 106, bid=1, ask=1.1, dte=1)
+        deferred = choose_fallback_contract(
+            Snapshot("DEMO", at, 100, at, 100, (), (no_ask, later), source="replay"), "CALL")
+        self.assertEqual(deferred["dte"], 1)
+        live = _contract(at, 104, bid=0.2, ask=0.4)
+        preferred = choose_fallback_contract(
+            Snapshot("DEMO", at, 100, at, 100, (), (live, later), source="replay"), "CALL")
+        self.assertEqual(preferred["dte"], 0)
+        self.assertEqual(preferred["atm_strike"], 104)
+
+        record = {"date": "2026-10-26", "ts_fire": at.isoformat(), "tk": "DEMO", "side": "CALL",
+                  "skip_flag": False, "same_move_before_min": 15, "same_move_after_min": 5}
+        later_alert = {"symbol": "DEMO", "side": "CALL", "id": "opt-1", "setup_name": "OPENING_BREAK",
+                       "at": at + timedelta(minutes=4)}
+        resolved = resolve_fallback_skip(record, [later_alert])
+        self.assertTrue(resolved["skip_flag"])
+        self.assertEqual(resolved["skip_ref_card_id"], "opt-1")
+        self.assertTrue(resolved["skip_after_resolved"])
+
+    def test_log_posts_nothing_and_matches_current_posting(self):
+        closes = [100] * 14 + [101, 102, 102, 102]
+        frames = [closes[:index] for index in (16, 17, 18)]
+        with self.assertLogs("lotto.main", level="WARNING") as caught:
+            self.assertEqual(fallback_rule_status(model_v_settings()), "log")
+        self.assertIn("Fallback rule: log rvol>=0.78 push>=0.5 atr=21", "\n".join(caught.output))
+
+        def run(mode, directory):
+            store = Store(":memory:")
+            self.addCleanup(store.db.close)
+            engine = Engine(store, model_v_settings(fallback_rule=mode))
+            engine.fallback_log = Path(directory) / "fallback-rule.jsonl"
+            def candidates(snap, history, settings):
+                option = snap.options[0]
+                return [Candidate(snap, option, 80, {}, {"cluster_size": 2}, ["option side"], True)]
+            def fake_apply(candidate, *args, **kwargs):
+                candidate.metrics["score_v2"] = 80
+                candidate.metrics["path"] = "hybrid"
+                candidate.score = 80
+                candidate.qualifying = True
+                return candidate
+            posted = []
+            with patch("lotto.engine.candidates", candidates), patch("lotto.model_v.apply_v2", fake_apply):
+                for prefix in frames:
+                    posted.extend(engine.process([_fallback_snap(_session(prefix))]))
+            rows = store.db.execute("SELECT payload, contract, setup_name FROM alerts ORDER BY at").fetchall()
+            return posted, rows, engine.fallback_log
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as off_dir, tempfile.TemporaryDirectory() as log_dir:
+            off_posted, off_rows, off_path = run("off", off_dir)
+            log_posted, log_rows, log_path = run("log", log_dir)
+            self.assertEqual(len(off_posted), 1)
+            self.assertEqual([row["payload"] for row in off_rows], [row["payload"] for row in log_rows])
+            self.assertEqual([row["contract"] for row in off_rows], [row["contract"] for row in log_rows])
+            self.assertFalse(off_path.exists())
+            lines = log_path.read_text().strip().splitlines()
+            self.assertEqual(len(lines), 1)
+            logged = json.loads(lines[0])
+            self.assertEqual(logged["entry_ask"], 1.1)
+            self.assertEqual(logged["spread_fail"], 0)
+            # The option card posted on the fire bar, so the flag is set and the line is not held.
+            self.assertTrue(logged["skip_flag"])
+            self.assertEqual(logged["skip_ref_card_id"], "pending")
+            self.assertFalse(logged["skip_after_resolved"])
+            self.assertNotIn("strong-stock fallback", off_rows[0]["payload"])
+            self.assertEqual(len(log_posted), 1)
+        bare = Snapshot("DEMO", datetime(2026, 10, 26, 9, 46, tzinfo=ET), 1, datetime(2026, 10, 26, 9, 46, tzinfo=ET),
+                        1, (), ())
+        object.__setattr__(bare, "prior_atr21", 2)
+        self.assertNotIn("prior_atr21", bare.to_dict())
+
+    def test_repeats_dedupe_skip_and_on_floors(self):
+        on = model_v_settings(fallback_rule="on")
+        self.assertEqual(handoff_floor(0.9, 0, on), 0.43157386)
+        self.assertEqual(handoff_floor(0.9, 1, on), 0.47114974)
+        self.assertEqual(handoff_floor(0.9, 0, model_v_settings(fallback_rule="log")),
+                         model_v_settings().pwin_decile)
+        self.assertEqual(handoff_floor(0.9, 0, model_v_settings(fallback_rule="off")),
+                         model_v_settings().pwin_decile)
+
+        def play(mode, closes_list, directory, prime=None):
+            store = Store(":memory:")
+            self.addCleanup(store.db.close)
+            if prime:
+                prime(store)
+            engine = Engine(store, model_v_settings(fallback_rule=mode))
+            engine.fallback_log = Path(directory) / "fallback-rule.jsonl"
+            posted = []
+            with patch("lotto.engine.candidates", return_value=[]):
+                for closes in closes_list:
+                    posted.extend(engine.process([_fallback_snap(_session(closes))]))
+            text = engine.fallback_log.read_text().strip().splitlines() if engine.fallback_log.exists() else []
+            return posted, [json.loads(line) for line in text if line]
+
+        first = [100] * 14 + [101, 102]
+        near = first + [100, 101, 102]
+        near_entry = near + [102, 102]
+        later = first + [102] * 4 + [100, 101, 102]
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            posted, rows = play("on", [first, first + [102], first + [102, 102], near, near + [102], near_entry], directory)
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(rows[0]["k"], 1)
+        self.assertTrue(rows[1]["dedupe_flag"])
+        self.assertEqual(rows[1]["k"], 2)
+        self.assertIn("PMH", posted[0]["payload"]["embeds"][0]["description"])
+        self.assertIn("strong-stock fallback:", posted[0]["payload"]["embeds"][0]["description"])
+        with tempfile.TemporaryDirectory() as directory:
+            posted, _rows = play("on", [first, later], directory)
+        self.assertEqual(len(posted), 2)
+        with tempfile.TemporaryDirectory() as directory:
+            posted, rows = play("log", [first, first + [102], first + [102, 102]], directory)
+        self.assertEqual(posted, [])
+        self.assertEqual(len(rows), 1)
+
+        def prime(store):
+            at = datetime(2026, 10, 26, 9, 36, tzinfo=ET)
+            option = _contract(at, 103)
+            snap = Snapshot("DEMO", at, 100, at, 100, _session([100] * 6), (option,), prior_atr=9)
+            candidate = Candidate(snap, option, 80, {}, {"score_v2": 80}, ["option side"], True,
+                                  setup=Setup("OPENING_BREAK", 100, 99))
+            store.queue(candidate, alert_payload(candidate, "ACTIVE"), True, "ACTIVE")
+        with tempfile.TemporaryDirectory() as directory:
+            posted, rows = play("on", [first, first + [102], first + [102, 102]], directory, prime)
+        self.assertEqual(posted, [])
+        self.assertTrue(rows[0]["skip_flag"])
+        self.assertNotEqual(rows[0]["skip_ref_card_id"], "pending")
 
 
 if __name__ == "__main__":

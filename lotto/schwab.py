@@ -275,6 +275,10 @@ class Schwab:
         if not hasattr(self, "atrs"):
             self.atrs = {}
         self.atrs[key] = sum(ranges[-14:])/14 if len(ranges) >= 14 else None
+        if not hasattr(self, "atrs21"):
+            self.atrs21 = {}
+        from .model_v import atr21_value
+        self.atrs21[key] = atr21_value(ranges)
         if not hasattr(self,"levels"):
             self.levels = {}
         if daily:
@@ -329,6 +333,27 @@ class Schwab:
         if not hasattr(self, "handoff_rvol"):
             self.handoff_rvol = {}
         self.handoff_rvol[key] = {"days": len(full_days), "base": handoff_base}
+        # Fallback RVOL is the prior 10 sessions, partial days included. It does
+        # not use the handoff model's 5-day / 380-bar floor.
+        session_curves = []
+        for historic_day in sorted(profiles):
+            minutes = profiles[historic_day]
+            if not any(0 <= minute < 390 for minute in minutes):
+                continue
+            total = 0.0
+            curve = {}
+            for minute in range(390):
+                total += minutes.get(minute) or 0
+                curve[minute] = total
+            session_curves.append(curve)
+        fallback_base = {}
+        if len(session_curves) >= 10:
+            used_fallback = session_curves[-10:]
+            for minute in range(390):
+                fallback_base[minute] = sum(curve[minute] for curve in used_fallback) / 10
+        if not hasattr(self, "fallback_rvol"):
+            self.fallback_rvol = {}
+        self.fallback_rvol[key] = {"sessions": len(session_curves), "base": fallback_base}
         baseline = {minute: median(values) for minute, values in observations.items() if len(values) >= 10}
         if symbol == "SPX":
             # Schwab index candles have zero volume; use traded SPY volume only
@@ -337,6 +362,9 @@ class Schwab:
             spy_rvol = self.handoff_rvol.get(("SPY", day))
             if spy_rvol:
                 self.handoff_rvol[key] = spy_rvol
+            spy_fallback = getattr(self, "fallback_rvol", {}).get(("SPY", day))
+            if spy_fallback is not None:
+                self.fallback_rvol[key] = spy_fallback
         if not baseline:
             LOG.warning("%s has fewer than ten usable historical sessions; no alerts until baseline is available", symbol)
         self.baselines[key] = baseline
@@ -715,7 +743,7 @@ class Schwab:
                     end = bars[-1].end.astimezone(ET)
                     rvol_minute = (end.hour * 60 + end.minute) - (9 * 60 + 31)
                 rvol_base = (rvol_info.get("base") or {}).get(rvol_minute)
-                result.append(Snapshot(symbol, at, spot, spot_time, previous, bars, tuple(options),
+                snap = Snapshot(symbol, at, spot, spot_time, previous, bars, tuple(options),
                                        context, context_time, benchmark, "schwab", session[1],
                                        volume_source="SPY" if symbol == "SPX" else symbol,
                                        prior_atr=self.atrs.get((symbol, now.astimezone(ET).date())),
@@ -725,7 +753,14 @@ class Schwab:
                                        peer_leaders=leaders,
                                        prior_full_days=rvol_info.get("days"),
                                        rvol_base=rvol_base,
-                                       **getattr(self,"levels",{}).get((symbol,now.astimezone(ET).date()),{})))
+                                       **getattr(self,"levels",{}).get((symbol,now.astimezone(ET).date()),{}))
+                # Kept off the dataclass so stored option cards stay the same bytes.
+                day_key = (symbol, now.astimezone(ET).date())
+                fb = getattr(self, "fallback_rvol", {}).get(day_key, {})
+                object.__setattr__(snap, "prior_atr21", getattr(self, "atrs21", {}).get(day_key))
+                object.__setattr__(snap, "fallback_rvol_sessions", fb.get("sessions"))
+                object.__setattr__(snap, "fallback_rvol_base", (fb.get("base") or {}).get(rvol_minute))
+                result.append(snap)
             except Exception as exc:
                 LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)
         recent_requests, spacing, rate_limits_total = self.request_statistics()

@@ -45,7 +45,7 @@ from datetime import datetime, timedelta
 from math import exp, isfinite, log, log1p
 from pathlib import Path
 
-from .config import Settings
+from .config import STRATEGY_VERSION, Settings
 from .features import Candidate
 from .models import ET, Option, Snapshot
 from .patterns import Setup
@@ -463,15 +463,356 @@ def score_handoff(spec: dict, inputs: dict, rvol: float | None = None) -> dict:
 
 
 def handoff_floor(strength: float | None, dte: int, settings: Settings, a_bar: bool = False) -> float:
-    """Fitted-probability floor. Runner names stay on the normal (A) floor."""
+    """Fitted-probability floor. Runner names stay on the normal (A) floor.
+
+    LOTTO_FALLBACK_RULE=on turns off the strength step-down. log and off do not.
+    """
     normal = settings.pwin_normal_0dte if dte == 0 else settings.pwin_normal_1dte
-    if a_bar or strength is None:
+    if getattr(settings, "fallback_rule", "off") == "on" or a_bar or strength is None:
         return normal
     if strength >= settings.strength_decile:
         return settings.pwin_decile if dte == 0 else settings.pwin_decile_1dte
     if strength >= settings.strength_quintile:
         return settings.pwin_quintile_0dte if dte == 0 else settings.pwin_quintile_1dte
     return normal
+
+
+FALLBACK_RULE_VERSION = "fallback-spec-2026-10-26"
+# m=0 is the 09:30 bar (close 09:31). m=15 is the 09:45 bar (close 09:46).
+FALLBACK_FIRST_BAR = 15
+FALLBACK_LAST_BAR = 384
+
+
+def atr21_value(true_ranges) -> float | None:
+    """Mean of the last 21 daily true ranges. At least 15 ranges, else none.
+
+    Today is already excluded by the caller. This does not touch the 14-day ATR.
+    """
+    if len(true_ranges) < 15:
+        return None
+    window = list(true_ranges[-21:])
+    return sum(window) / len(window)
+
+
+def new_fallback_state() -> dict:
+    return {
+        "k": 0,
+        "last_m": None,
+        "last_ts": None,
+        "run_high_at_fire": None,
+        "run_low_at_fire": None,
+        "q_false_since": False,
+        "fires": [],
+    }
+
+
+def _indexed_bars(bars) -> dict:
+    indexed = {}
+    for bar in bars:
+        minute = _minute_index(bar)
+        if minute is not None:
+            indexed[minute] = bar
+    return indexed
+
+
+def _live_ask(option: Option) -> bool:
+    return option.ask is not None and isfinite(option.ask) and option.ask > 0
+
+
+def choose_fallback_contract(snap: Snapshot, side: str) -> dict:
+    """0DTE if any 0DTE contract on this side has a live ask, else 1DTE.
+
+    1-OTM is the nearest strike strictly past the stock. ATM is the nearest
+    strike to the stock. Spread does not choose either strike.
+    """
+    today = snap.at.astimezone(ET).date()
+    grouped = {0: [], 1: []}
+    for option in snap.options:
+        if option.side != side:
+            continue
+        days = (option.expiry - today).days
+        if days in grouped:
+            grouped[days].append(option)
+    pool = grouped[0] if any(_live_ask(option) for option in grouped[0]) else grouped[1]
+    if not any(_live_ask(option) for option in pool):
+        pool = []
+    empty = {
+        "option": None, "occ_symbol": None, "expiry": None, "dte": None, "strike": None,
+        "fire_bid": None, "fire_ask": None, "atm_symbol": None, "atm_strike": None,
+        "atm_bid": None, "atm_ask": None,
+    }
+    if not pool:
+        return empty
+    strikes = sorted({option.strike for option in pool})
+    direction = 1 if side == "CALL" else -1
+    if direction == 1:
+        further = [strike for strike in strikes if strike > snap.spot]
+        target = further[0] if further else None
+    else:
+        further = [strike for strike in strikes if strike < snap.spot]
+        target = further[-1] if further else None
+    atm_strike = min(strikes, key=lambda strike: (abs(strike - snap.spot), strike))
+
+    def pick(strike):
+        choices = [option for option in pool if option.strike == strike]
+        live = [option for option in choices if _live_ask(option)]
+        return (live or choices)[0]
+
+    atm = pick(atm_strike)
+    chosen = pick(target) if target is not None else None
+    result = dict(empty)
+    result.update({
+        "atm_symbol": atm.symbol, "atm_strike": atm.strike, "atm_bid": atm.bid, "atm_ask": atm.ask,
+    })
+    if chosen is not None:
+        result.update({
+            "option": chosen, "occ_symbol": chosen.symbol, "expiry": chosen.expiry.isoformat(),
+            "dte": (chosen.expiry - today).days, "strike": chosen.strike,
+            "fire_bid": chosen.bid, "fire_ask": chosen.ask,
+        })
+    return result
+
+
+def fallback_push(indexed: dict, minute: int, side: str, atr21: float | None) -> float | None:
+    """Move off the low (calls) or high (puts) of bars m-30..m, current bar included."""
+    if atr21 is None or not isfinite(atr21) or atr21 <= 0 or minute not in indexed:
+        return None
+    window = [indexed[index] for index in indexed if minute - 30 <= index <= minute]
+    if not window:
+        return None
+    close = indexed[minute].close
+    if side == "CALL":
+        return (close - min(bar.low for bar in window)) / atr21
+    return (max(bar.high for bar in window) - close) / atr21
+
+
+def fallback_rvol_value(indexed: dict, minute: int, base: float | None, sessions: int | None) -> float | None:
+    """Cumulative volume over the prior-10-session mean. None means ineligible.
+
+    Fewer than 10 prior sessions does not fire. A zero mean is RVOL 0.
+    """
+    if sessions is None or sessions < 10:
+        return None
+    if base is None or base == 0:
+        return 0.0
+    volume = sum(indexed[index].volume for index in indexed if index <= minute)
+    return volume / base
+
+
+def held_level_breaks(indexed: dict, minute: int, snap: Snapshot, side: str) -> list[dict]:
+    """PM/PD held breaks at any m>=2, and HOD/LOD only from m>=15.
+
+    A re-take after the level is lost matches this formula and counts. The
+    first-clear-only reclaim fix is backlog and is not applied.
+    """
+    found = []
+    if minute >= 2 and all(index in indexed for index in (minute, minute - 1, minute - 2)):
+        close_m = indexed[minute].close
+        close_prev = indexed[minute - 1].close
+        close_prior = indexed[minute - 2].close
+        if side == "CALL":
+            levels = (("pmh", snap.premarket_high), ("pdh", snap.prior_high))
+            for name, level in levels:
+                if level is None or not isfinite(level) or level <= 0:
+                    continue
+                if close_m > level and close_prev > level and close_prior <= level:
+                    found.append({"lvl": name, "level_value": float(level)})
+        else:
+            levels = (("pml", snap.premarket_low), ("pdl", snap.prior_low))
+            for name, level in levels:
+                if level is None or not isfinite(level) or level <= 0:
+                    continue
+                if close_m < level and close_prev < level and close_prior >= level:
+                    found.append({"lvl": name, "level_value": float(level)})
+    if minute >= FALLBACK_FIRST_BAR and minute in indexed and minute - 1 in indexed:
+        if side == "CALL":
+            prior = [indexed[index].high for index in indexed if index <= minute - 2]
+            if prior:
+                running = max(prior)
+                if indexed[minute].close > running and indexed[minute - 1].close > running:
+                    found.append({"lvl": "hod", "level_value": float(running)})
+        else:
+            prior = [indexed[index].low for index in indexed if index <= minute - 2]
+            if prior:
+                running = min(prior)
+                if indexed[minute].close < running and indexed[minute - 1].close < running:
+                    found.append({"lvl": "lod", "level_value": float(running)})
+    return found
+
+
+def fire_why(*, first: bool, fresh_level: bool, new_extreme: bool, q_false_since: bool,
+             candidate: bool, side: str) -> str | None:
+    """Which re-trigger allowed this candidate. None means it does not fire."""
+    if not candidate:
+        return None
+    if first:
+        return "first"
+    if fresh_level:
+        return "fresh_level"
+    if new_extreme:
+        return "new_hod" if side == "CALL" else "new_lod"
+    if q_false_since:
+        return "rule_re_met"
+    return None
+
+
+def quote_spread_fail(bid, ask, max_spread_pct: float) -> tuple[int, float | None, float | None]:
+    """spread = (ask-bid)/ask. spread_fail when bid<=0 or spread>30%. Returns fail, pct, mid."""
+    if ask is None or bid is None or not isfinite(ask) or not isfinite(bid) or ask <= 0:
+        return 1, None, None
+    mid = (ask + bid) / 2
+    if bid <= 0:
+        return 1, None, mid
+    ratio = (ask - bid) / ask
+    pct = ratio * 100
+    # A binary value that lands on 30% must not fail the >30% check.
+    fail = 0 if pct <= max_spread_pct or abs(pct - max_spread_pct) <= 1e-6 else 1
+    return fail, pct, mid
+
+
+def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict,
+                      option_skip: tuple | None = None) -> dict | None:
+    """Advance one bar. Return a fire record, including deduped and skipped fires.
+
+    Q-false is RVOL and push only. A level break does not reset the re-trigger.
+    State updates on every fire. Nothing here posts.
+    """
+    indexed = _indexed_bars(snap.bars)
+    if not indexed:
+        return None
+    minute = max(indexed)
+    if state.get("last_m") == minute or (state.get("last_m") is not None and minute < state["last_m"]):
+        return None
+    atr21 = getattr(snap, "prior_atr21", None)
+    sessions = getattr(snap, "fallback_rvol_sessions", None)
+    base = getattr(snap, "fallback_rvol_base", None)
+    rvol = fallback_rvol_value(indexed, minute, base, sessions)
+    push = fallback_push(indexed, minute, side, atr21)
+    q_true = (rvol is not None and push is not None
+              and rvol >= settings.fb_rvol_min and push >= settings.fb_push_atr_min)
+    if state.get("last_m") is not None and minute > state["last_m"] and not q_true:
+        state["q_false_since"] = True
+    breaks = held_level_breaks(indexed, minute, snap, side)
+    fresh = any(item["lvl"] in {"pmh", "pdh", "pml", "pdl"} for item in breaks)
+    hod = next((item for item in breaks if item["lvl"] in {"hod", "lod"}), None)
+    bar = indexed[minute]
+    new_extreme = False
+    if hod is not None and state.get("last_m") is not None:
+        if side == "CALL" and state.get("run_high_at_fire") is not None and bar.high > state["run_high_at_fire"]:
+            new_extreme = True
+        if side == "PUT" and state.get("run_low_at_fire") is not None and bar.low < state["run_low_at_fire"]:
+            new_extreme = True
+    candidate = (FALLBACK_FIRST_BAR <= minute <= FALLBACK_LAST_BAR and bool(breaks) and q_true)
+    why = fire_why(first=state.get("k", 0) == 0, fresh_level=fresh, new_extreme=new_extreme,
+                   q_false_since=bool(state.get("q_false_since")), candidate=candidate, side=side)
+    if why is None:
+        return None
+    contract = choose_fallback_contract(snap, side)
+    skip_flag, skip_id, skip_ts = option_skip or (False, None, None)
+    dedupe_ts = None
+    window = timedelta(minutes=settings.event_dedupe_minutes)
+    for prior in reversed(state.get("fires") or []):
+        if prior.get("contract") and prior["contract"] == contract["occ_symbol"] and snap.at - prior["ts"] < window and snap.at >= prior["ts"]:
+            dedupe_ts = prior["ts"]
+            break
+    through = [indexed[index] for index in indexed if index <= minute]
+    run_high = max(item.high for item in through)
+    run_low = min(item.low for item in through)
+    earliest = indexed[min(indexed)]
+    lvl = "+".join(item["lvl"] for item in breaks)
+    level_value = breaks[0]["level_value"]
+    k = state.get("k", 0) + 1
+    bars_since = None if state.get("last_m") is None else minute - state["last_m"]
+    prev_ts = None if state.get("last_ts") is None else state["last_ts"].astimezone(ET).isoformat()
+    rvol_text = 0 if rvol is None else rvol
+    push_text = 0 if push is None else push
+    label = "+".join(part.upper() for part in lvl.split("+"))
+    reason = f"strong-stock fallback: {label} break, RVOL {rvol_text:.2f}, push {push_text:.2f} ATR21"
+    record = {
+        "date": snap.day, "ts_fire": snap.at.astimezone(ET).isoformat(), "tk": snap.symbol, "side": side,
+        "k": k, "why": why, "lvl": lvl, "level_value": level_value,
+        "levels": {item["lvl"]: item["level_value"] for item in breaks},
+        "px": bar.close, "open": earliest.open, "atr21": atr21, "rvol": rvol, "push30": push,
+        "run_high": run_high, "run_low": run_low, "bars_since_last_fire": bars_since, "prev_fire_ts": prev_ts,
+        "skip_flag": bool(skip_flag), "skip_ref_card_id": skip_id, "skip_ref_ts": skip_ts,
+        "skip_after_resolved": False,
+        "same_move_before_min": settings.fb_same_move_before_min,
+        "same_move_after_min": settings.fb_same_move_after_min,
+        "dedupe_flag": dedupe_ts is not None,
+        "dedupe_ref_ts": None if dedupe_ts is None else dedupe_ts.astimezone(ET).isoformat(),
+        "occ_symbol": contract["occ_symbol"], "expiry": contract["expiry"], "dte": contract["dte"],
+        "strike": contract["strike"], "bid": None, "ask": None, "mid": None, "spread_pct": None,
+        "spread_fail": None, "eligible_spread": None,
+        "atm_symbol": contract["atm_symbol"], "atm_strike": contract["atm_strike"],
+        "atm_bid": contract["atm_bid"], "atm_ask": contract["atm_ask"],
+        "entry_ask": None, "entry_m": minute + 2, "m": minute,
+        "max_gain": None, "max_loss": None, "first_hit": None, "ts_hit": None, "eod_mark": None, "true_win": None,
+        "quote_source": snap.source, "rule_version": FALLBACK_RULE_VERSION,
+        "strategy_version": STRATEGY_VERSION, "mode": settings.fallback_rule, "card_reason": reason,
+        "fire_bid": contract["fire_bid"], "fire_ask": contract["fire_ask"],
+    }
+    state["k"] = k
+    state["last_m"] = minute
+    state["last_ts"] = snap.at
+    state["run_high_at_fire"] = run_high
+    state["run_low_at_fire"] = run_low
+    state["q_false_since"] = False
+    state["fires"].append({"ts": snap.at, "contract": contract["occ_symbol"], "k": k, "m": minute})
+    record["_option"] = contract["option"]
+    return record
+
+
+def complete_fallback_entry(record: dict, snap: Snapshot, settings: Settings) -> dict:
+    """Fill the ask two bars after the fire. Spread at that quote does not change the strike."""
+    option = next((item for item in snap.options if item.symbol == record.get("occ_symbol")), None)
+    bid = option.bid if option is not None else None
+    ask = option.ask if option is not None else None
+    fail, pct, mid = quote_spread_fail(bid, ask, settings.fb_max_spread_pct)
+    record = dict(record)
+    record.pop("_option", None)
+    record.update({
+        "bid": bid, "ask": ask, "mid": mid, "spread_pct": pct, "spread_fail": fail,
+        "eligible_spread": 0 if fail else 1, "entry_ask": ask,
+    })
+    return record
+
+
+def append_fallback_log(path, record: dict) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {key: value for key, value in record.items() if key != "_option"}
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str) + "\n")
+
+
+def resolve_fallback_skip(record: dict, alerts: list[dict]) -> dict:
+    """Night join. A fallback line is not held for the +5 minute option-side window.
+
+    alerts items need symbol, side, at (datetime), id, and setup_name.
+    Option-side cards are never removed. This only fills the skip flag.
+    """
+    updated = dict(record)
+    if updated.get("skip_flag"):
+        updated["skip_after_resolved"] = True
+        return updated
+    start = datetime.fromisoformat(updated["ts_fire"]) - timedelta(minutes=updated["same_move_before_min"])
+    end = datetime.fromisoformat(updated["ts_fire"]) + timedelta(minutes=updated["same_move_after_min"])
+    for alert in alerts:
+        if alert.get("symbol") != updated["tk"] or alert.get("side") != updated["side"]:
+            continue
+        if alert.get("setup_name") == "STRONG_STOCK_FALLBACK":
+            continue
+        at = alert.get("at")
+        if isinstance(at, str):
+            at = datetime.fromisoformat(at)
+        if at is None or not start <= at <= end:
+            continue
+        updated["skip_flag"] = True
+        updated["skip_ref_card_id"] = alert.get("id")
+        updated["skip_ref_ts"] = at.astimezone(ET).isoformat() if at.tzinfo else at.isoformat()
+        break
+    updated["skip_after_resolved"] = True
+    return updated
 
 
 def strength_band(strength: float | None, settings: Settings, a_bar: bool = False) -> str | None:

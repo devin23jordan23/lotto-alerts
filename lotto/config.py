@@ -48,6 +48,15 @@ class Settings:
     # Runner names are off until LOTTO_STANDBY_NAMES=on. Those names use the
     # handoff A bar (the normal floors), with no strength step-down.
     standby_names: int = 0
+    # Strong-stock fallback. Default log writes one JSONL line per would-be
+    # card and posts nothing. on posts through the existing option path and
+    # uses the normal handoff floors. off does not evaluate the rule.
+    fallback_rule: str = "log"
+    fb_rvol_min: float = 0.78
+    fb_push_atr_min: float = 0.5
+    fb_max_spread_pct: float = 30
+    fb_same_move_before_min: int = 15
+    fb_same_move_after_min: int = 5
     # Exceptional-stock override. Every check is required. Defaults are high so it is rare.
     override_move_atr: float = 2.5
     override_rvol: float = 3.0
@@ -169,6 +178,12 @@ class Settings:
             raise ValueError("Invalid stock-strength cutoff or probability floor")
         if self.standby_names not in (0, 1):
             raise ValueError("LOTTO_STANDBY_NAMES must be on or off")
+        if self.fallback_rule not in {"off", "log", "on"}:
+            raise ValueError("LOTTO_FALLBACK_RULE must be off, log, or on")
+        if self.fb_rvol_min < 0 or self.fb_push_atr_min < 0 or self.fb_max_spread_pct <= 0:
+            raise ValueError("Invalid fallback threshold")
+        if self.fb_same_move_before_min < 0 or self.fb_same_move_after_min < 0:
+            raise ValueError("Invalid fallback same-move window")
         if min(self.override_move_atr, self.override_rvol) <= 0:
             raise ValueError("Invalid exceptional-stock threshold")
         if self.override_fresh_seconds <= 0 or self.override_trigger_minutes <= 0:
@@ -264,6 +279,8 @@ def model_v_settings(**overrides) -> Settings:
     values.update(overrides)
     values["preset"] = preset
     values["score_mode"] = str(values.get("score_mode", "s12")).lower()
+    if "fallback_rule" in values:
+        values["fallback_rule"] = str(values["fallback_rule"]).lower()
     if values["score_mode"] == "combined" and "preset_note" not in overrides:
         values["preset_note"] = (
             "Rollback: one combined score, bars 40/61, stock share cap 0.40, "
