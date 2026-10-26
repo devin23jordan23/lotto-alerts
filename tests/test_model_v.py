@@ -1,19 +1,23 @@
+import csv
 import json
 import os
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
-from lotto.config import Settings, model_v_settings
+from lotto.config import HANDOFF_SPEC_PATH, Settings, model_v_settings
 from lotto.demo import demo_frames
 from lotto.discord import deliver_stock_pending
 from lotto.engine import Engine
 from lotto.features import Candidate
 from lotto.main import env_settings, standby_symbols
-from lotto.model_v import (apply_v2, cap_stock, classify_runner, due_standby, exceptional_stock,
-                           invert_live_blend, level_retest, pick_one_otm, post_bar,
-                           quote_in_play, quote_universe)
+from lotto.model_v import (apply_v2, build_handoff_features, cap_stock, classify_runner,
+                           due_standby, exceptional_stock, fill_model_features,
+                           fill_strength_inputs, invert_live_blend, lane_decision,
+                           level_retest, pick_one_otm, post_bar, quote_in_play,
+                           quote_universe, score_handoff)
 from lotto.models import Bar, ET, Option
 from lotto.patterns import Setup
 from lotto.quality import evaluate
@@ -36,17 +40,27 @@ class ModelVTests(unittest.TestCase):
         self.assertEqual(Settings().min_score, 60)
         self.assertLessEqual(Settings().min_score, 60)
         with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("LOTTO_MODEL", None)
-            os.environ.pop("LOTTO_MIN_SCORE", None)
-            os.environ.pop("LOTTO_SCORE_MODE", None)
-            os.environ.pop("LOTTO_PRESET", None)
+            for name in ("LOTTO_MODEL", "LOTTO_MIN_SCORE", "LOTTO_SCORE_MODE", "LOTTO_PRESET",
+                         "LOTTO_STANDBY_NAMES", "LOTTO_HANDOFF_MODEL_PATH",
+                         "LOTTO_STRENGTH_DISTRIBUTION_PATH"):
+                os.environ.pop(name, None)
             live = env_settings()
         self.assertEqual(live.model, "V")
         self.assertEqual(live.min_score, 60)
-        self.assertEqual(live.score_mode, "combined")
+        self.assertEqual(live.score_mode, "s12")
+        self.assertEqual(live.preset, "S12")
+        self.assertEqual(live.standby_names, 0)
+        self.assertEqual(live.pwin_normal_0dte, 0.4316)
+        self.assertEqual(live.pwin_normal_1dte, 0.4711)
+        self.assertEqual(live.pwin_quintile_0dte, 0.2882)
+        self.assertEqual(live.pwin_decile, 0.1776)
+        self.assertEqual(live.pwin_decile_1dte, 0.1833)
+        self.assertTrue(live.handoff_model_path.endswith("handoff_model_v1026.json"))
+        self.assertEqual(live.handoff_model_path, live.strength_distribution_path)
+        self.assertEqual(live.handoff_model_path, HANDOFF_SPEC_PATH)
+        self.assertNotIn("PLACEHOLDER", live.preset_note)
         self.assertEqual((live.post_combined_0dte, live.post_combined_1dte), (40, 61))
         self.assertEqual(live.stock_max_share, 0.40)
-        self.assertIn("PLACEHOLDER", live.preset_note)
         self.assertEqual((live.post_v2_option_0dte, live.post_v2_option_1dte), (40, 61))
         self.assertEqual((live.post_v2_stock_0dte, live.post_v2_stock_1dte), (58, 80))
         self.assertEqual(live.send_requote, 1)
@@ -61,9 +75,18 @@ class ModelVTests(unittest.TestCase):
         self.assertEqual(clamped.min_score, 60)
         self.assertEqual(clamped.score_mode, "s12")
         self.assertEqual(clamped.preset, "S11")
-        self.assertEqual(clamped.pwin_decile, 1.0)
-        self.assertIn("PLACEHOLDER", clamped.preset_note)
+        self.assertEqual(clamped.pwin_quintile_0dte, 0.3215)
+        self.assertEqual(clamped.pwin_quintile_1dte, 0.347)
+        self.assertEqual(clamped.pwin_decile, 0.2282)
+        self.assertEqual(clamped.pwin_decile_1dte, 0.2406)
+        self.assertNotIn("PLACEHOLDER", clamped.preset_note)
         self.assertEqual(clamped.post_v2_option_0dte, 40)
+        with patch.dict(os.environ, {"LOTTO_MODEL": "V", "LOTTO_SCORE_MODE": "combined",
+                                      "LOTTO_STANDBY_NAMES": "on"}, clear=False):
+            rollback = env_settings()
+        self.assertEqual(rollback.score_mode, "combined")
+        self.assertEqual(rollback.standby_names, 1)
+        self.assertIn("Rollback", rollback.preset_note)
 
     def test_stock_cards_never_post_in_any_mode(self):
         store = Store(":memory:")
@@ -235,7 +258,7 @@ class ModelVTests(unittest.TestCase):
         base = list(demo_frames())[30][0]
         idea = StockIdea("DEMO", base.day, base.at - timedelta(minutes=1), "CALL", base.spot,
                          base.spot - 0.5, base.spot - 1, "INTRADAY_BREAK", "A", {})
-        quiet = model_v_settings(post_combined_0dte=500, post_v2_stock_0dte=500,
+        quiet = model_v_settings(score_mode="combined", post_combined_0dte=500, post_v2_stock_0dte=500,
                                  post_v2_option_0dte=500)
         engine = Engine(store, quiet, dry_run=False)
         engine.remember_stock_events([idea])
@@ -249,8 +272,8 @@ class ModelVTests(unittest.TestCase):
         logged = store.db.execute("SELECT COUNT(*) FROM candidate_evaluations").fetchone()[0]
         decisions = store.db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
         self.assertGreater(logged + decisions, 0)
-        loud = Engine(Store(":memory:"), model_v_settings(post_combined_0dte=1, post_v2_stock_0dte=1,
-                                                          post_v2_option_0dte=1), dry_run=False)
+        loud = Engine(Store(":memory:"), model_v_settings(score_mode="combined", post_combined_0dte=1,
+                                                          post_v2_stock_0dte=1, post_v2_option_0dte=1), dry_run=False)
         self.addCleanup(loud.store.db.close)
         loud.remember_stock_events([idea])
         with patch("lotto.engine.candidates", return_value=[]):
@@ -307,10 +330,15 @@ class ModelVTests(unittest.TestCase):
 
     def test_standby_list_is_env_configurable_and_only_in_play(self):
         with patch.dict(os.environ, {"UOA_IN_PLAY": "WULF,NVDA", "LOTTO_STANDBY_UNIVERSE": "DKNG,RIVN"}, clear=False):
+            os.environ.pop("LOTTO_STANDBY_NAMES", None)
+            self.assertEqual(standby_symbols(), [])
+        with patch.dict(os.environ, {"LOTTO_STANDBY_NAMES": "on", "UOA_IN_PLAY": "WULF,NVDA",
+                                      "LOTTO_STANDBY_UNIVERSE": "DKNG,RIVN"}, clear=False):
             names = set(standby_symbols())
         self.assertIn("DKNG", names)
         self.assertIn("WULF", names)
         self.assertIn("NVDA", names)
+        self.assertEqual(model_v_settings().standby_names, 0)
         settings = model_v_settings()
         self.assertFalse(quote_in_play({"price": 10, "open": 10, "previous": 10, "volume_acceleration": 0.2}, settings))
         self.assertTrue(quote_in_play({"price": 11, "open": 10, "previous": 10}, settings))
@@ -350,8 +378,8 @@ class ModelVTests(unittest.TestCase):
         base = replace(base, premarket_high=base.spot - 1)
         idea = StockIdea("DEMO", base.day, base.at - timedelta(minutes=1), "CALL", base.spot,
                          base.spot - 0.5, base.spot - 1, "INTRADAY_BREAK", "A", {})
-        rare = model_v_settings(post_combined_0dte=500, override_move_atr=0.01, override_rvol=0.01,
-                                override_vwap_share=0, override_fresh_seconds=120)
+        rare = model_v_settings(score_mode="combined", post_combined_0dte=500, override_move_atr=0.01,
+                                override_rvol=0.01, override_vwap_share=0, override_fresh_seconds=120)
         engine = Engine(store, rare, dry_run=False)
         engine.remember_stock_events([idea])
         with patch("lotto.engine.candidates", return_value=[]):
@@ -369,6 +397,69 @@ class ModelVTests(unittest.TestCase):
         self.assertEqual(features["metrics"]["score_mode"], "combined")
         self.assertIn("option_v2", features["metrics"])
         self.assertIn("stock_v2", features["metrics"])
+
+    def test_spec_vectors_match_fitted_probability_and_strength(self):
+        spec = json.loads(Path(HANDOFF_SPEC_PATH).read_text())
+        floors = spec["floors"]
+        self.assertEqual(floors["A_bar_normal"]["0DTE"]["p_floor"], 0.4316)
+        self.assertEqual(floors["A_bar_normal"]["1DTE"]["p_floor"], 0.4711)
+        s12 = floors["S12_top10m200_top20m100"]
+        s11 = floors["S11_top10m150_top20m75"]
+        self.assertEqual(s12["0DTE"]["top10_SS>=q90"]["p_floor"], model_v_settings().pwin_decile)
+        self.assertEqual(s12["1DTE"]["top10_SS>=q90"]["p_floor"], model_v_settings().pwin_decile_1dte)
+        self.assertEqual(s11["1DTE"]["top10_SS>=q90"]["p_floor"], model_v_settings(preset="S11").pwin_decile_1dte)
+        self.assertEqual(len(spec["test_vectors"]), 10)
+        for row in spec["test_vectors"]:
+            scored = score_handoff(spec, row["model_inputs"], rvol=row["raw"]["rvol"])
+            self.assertAlmostEqual(scored["p_win"], row["expected_p_win"], places=6, msg=row["cid"])
+            self.assertAlmostEqual(scored["hoF"], row["expected_v2eq_hoF"], places=4, msg=row["cid"])
+            self.assertAlmostEqual(scored["stock_strength"], row["expected_SS"], places=6, msg=row["cid"])
+            for name, expected in row["expected_SS_parts"].items():
+                self.assertAlmostEqual(scored["strength_parts"][name], expected, places=6, msg=(row["cid"], name))
+            untouched = score_handoff(spec, {**row["model_inputs"], "vwap_side": 0.0}, rvol=row["raw"]["rvol"])
+            self.assertEqual(scored["p_win"], untouched["p_win"])
+
+    def test_missing_breaks_fill_to_one_and_short_rvol_is_zero(self):
+        spec = json.loads(Path(HANDOFF_SPEC_PATH).read_text())
+        medians = spec["feature_definitions"]["missing_values"]["median"]
+        raw = {"mo_atr": None, "rvol": None, "pm_brk": None, "pd_brk": None, "newx5": None}
+        filled = fill_model_features(raw, medians)
+        strength = fill_strength_inputs(raw, medians)
+        self.assertEqual((filled["pm_brk"], filled["pd_brk"], filled["newx5"]), (1.0, 1.0, 1.0))
+        self.assertEqual((strength["pm_brk"], strength["pd_brk"], strength["newx5"]), (1.0, 1.0, 1.0))
+        self.assertEqual(strength["rvol"], 0.0)
+        self.assertEqual(filled["l_rvol"], 0.0)
+        scored = score_handoff(spec, filled, rvol=strength["rvol"])
+        self.assertEqual(scored["strength_parts"]["breaks"], 1.0)
+        snap = replace(list(demo_frames())[8][0], prior_full_days=4, rvol_base=1_000_000,
+                       premarket_high=None, prior_high=None)
+        features = build_handoff_features(snap, snap.options[0], [], 1)
+        self.assertEqual(features["rvol"], 0.0)
+        self.assertIsNone(features["pm_brk"])
+        self.assertIsNone(features["pd_brk"])
+        loud = replace(snap, prior_full_days=6, rvol_base=100.0)
+        self.assertGreater(build_handoff_features(loud, loud.options[0], [], 1)["rvol"], 0)
+
+    def test_vince_lane_vectors(self):
+        root = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
+        cases = (
+            ("TEST-VECTORS-C1_S12_default.csv", model_v_settings()),
+            ("TEST-VECTORS-fallback_S11_default.csv", model_v_settings(preset="S11")),
+        )
+        for name, settings in cases:
+            with (root / name).open() as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 40, name)
+            for row in rows:
+                v2 = None if row["v2_score"] == "" else float(row["v2_score"])
+                passed = lane_decision(
+                    row["lane"], int(float(row["cdte"])), v2, float(row["pF"]), float(row["ss"]), settings)
+                self.assertEqual(passed, bool(int(row["pass"])), (name, row["cid"], row["lane"]))
+        s12 = model_v_settings()
+        # A runner name stays on the normal floor. 0.20 clears the S12 top-decile floor and misses 0.4316.
+        self.assertTrue(lane_decision("handoff", 0, None, 0.20, 0.95, s12, a_bar=False))
+        self.assertFalse(lane_decision("handoff", 0, None, 0.20, 0.95, s12, a_bar=True))
+        self.assertTrue(lane_decision("handoff", 0, None, 0.44, 0.95, s12, a_bar=True))
 
 
 if __name__ == "__main__":

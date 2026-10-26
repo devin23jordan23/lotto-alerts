@@ -52,10 +52,10 @@ def main():
         result["source"] = str(args.input) if args.input else "synthetic demo_frames"
         out[name] = result
     out["vince_cited_not_rerun"] = {
-        "S0": "Earlier clean-day pick: 42.0% true win, 16.9 cards/day, 13% of +200% runners. Not this harness.",
-        "S11": "Probability floors unpublished. No Vince number in the attached material.",
-        "S12": "All days ~34 cards/day, ~41% true win, ~46% of +200 runners in test months. Not this harness.",
-        "combined": "Bars and weights are placeholders until Vince's 3:00 PM ET pass. No year-replay number yet.",
+        "S0": "Probability path off. Stock-led cards use the 58/80 v2 bars. Not a Vince final-check row.",
+        "S11": "Vince replay, not re-run here: test clean 41.0%, all days 41.8%, 17.8/30.1 cards a day, 29 of 142 runners.",
+        "S12": "Vince replay, not re-run here: test clean 40.8%, all days 41.5%, 18.0/30.6 cards a day, 30 of 142 runners.",
+        "combined": "Rollback score. Not in Vince's final table.",
     }
     out["note"] = "Local tape only. The year chain archive is not on this box."
     print(json.dumps(out, indent=2, default=str))

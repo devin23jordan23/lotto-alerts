@@ -26,22 +26,23 @@ When a stored row has only the live blend, invert it if the rule counts are
 present. If they are not, score_v2 stays empty and the reason is logged.
 Those rows are kept. They are not posted and they are not dropped silently.
 
-Default posting (LOTTO_SCORE_MODE=combined) is one total and one bar per expiry.
-The bars and weights are PLACEHOLDER until Vince's 3:00 PM ET pass.
-Stock points are capped at stock_max_share of that total, so stock alone
-cannot clear the bar. Option points at or above the bar post with no stock help.
-An exceptional stock that hits every strong-stock check can still post the
-priced 1-OTM contract. That card is path=stock_override.
+Default posting (LOTTO_SCORE_MODE=s12) is two lanes on one priced contract:
+    hybrid   v2 >= 40 (0DTE) or >= 61 (1DTE). v2 here is the option point score.
+    handoff  fitted win chance >= the S12 or S11 floor for that strength band.
+The handoff floors are P(true win). hoF >= A - delta is the same bar on the
+log-odds scale (A is 58/80, delta is 200/100 on S12 and 150/75 on S11).
 
-LOTTO_SCORE_MODE=s12 keeps the two-path comparison:
-    option-led  0DTE >= 40, 1DTE >= 61
-    stock-led   0DTE >= 58, 1DTE >= 80
-    plus the fitted-probability floors when a handoff model file is loaded.
+LOTTO_SCORE_MODE=combined is the rollback: one total, bars 40/61, stock capped
+at stock_max_share, plus the rare path=stock_override card.
+
+Runner names stay out of the quote batch until LOTTO_STANDBY_NAMES=on. Those
+names take the handoff A bar (the normal floor) with no strength step-down.
 """
 import json
+from bisect import bisect_left
 from dataclasses import replace
 from datetime import datetime, timedelta
-from math import exp, isfinite
+from math import exp, isfinite, log, log1p
 from pathlib import Path
 
 from .config import Settings
@@ -317,7 +318,276 @@ def s_rule_penalties(candidate: Candidate, settings: Settings) -> tuple[dict, tu
 
 
 STRENGTH_FEATURES = ("move_from_open_atr", "rvol", "held_pm", "held_pd", "held_range")
+MODEL_FEATURES = (
+    "mo_atr", "mo_pct", "l_rvol", "pm_brk", "pd_brk", "newx5", "vwap_side",
+    "eff10", "spread_c", "l_ask", "l_ovol5", "pe5", "cdte", "m",
+)
 _FILE_CACHE: dict = {}
+
+
+def _finite(value) -> float | None:
+    if isinstance(value, (int, float)) and isfinite(value):
+        return float(value)
+    return None
+
+
+def _minute_index(bar) -> int | None:
+    """Alert-bar index m. The 09:30-09:31 bar is 0."""
+    local = bar.end.astimezone(ET)
+    minute = (local.hour * 60 + local.minute) - (9 * 60 + 31)
+    if 0 <= minute <= 389:
+        return minute
+    return None
+
+
+def fill_model_features(raw: dict, medians: dict) -> dict:
+    """Apply Vince's fill order. Missing breaks are 1. The VWAP term is not used."""
+    def num(name):
+        return _finite(raw.get(name))
+
+    l_rvol = num("l_rvol")
+    if l_rvol is None:
+        rvol = num("rvol")
+        l_rvol = log1p(max(rvol, 0.0)) if rvol is not None else 0.0
+    filled = {
+        "l_rvol": l_rvol,
+        "l_ovol5": 0.0 if num("l_ovol5") is None else num("l_ovol5"),
+        "l_ask": 0.0 if num("l_ask") is None else num("l_ask"),
+        "pe5": 0.0 if num("pe5") is None else max(-1.0, min(3.0, num("pe5"))),
+        "spread_c": 1.0 if num("spread_c") is None else max(0.0, min(1.0, num("spread_c"))),
+    }
+    for name in ("pm_brk", "pd_brk", "newx5"):
+        value = num(name)
+        filled[name] = 1.0 if value is None else value
+    for name in ("mo_atr", "mo_pct", "vwap_side", "eff10", "cdte", "m"):
+        value = num(name)
+        fallback = medians.get(name, 0.0)
+        filled[name] = float(fallback) if value is None else value
+    return filled
+
+
+def fill_strength_inputs(raw: dict, medians: dict) -> dict:
+    """Same break fill as the model. RVOL is 0 when it was not observed."""
+    def num(name):
+        return _finite(raw.get(name))
+
+    mo_atr = num("mo_atr")
+    rvol = num("rvol")
+    return {
+        "mo_atr": float(medians.get("mo_atr", 0.5380223785056588)) if mo_atr is None else mo_atr,
+        "rvol": 0.0 if rvol is None else rvol,
+        "pm_brk": 1.0 if num("pm_brk") is None else num("pm_brk"),
+        "pd_brk": 1.0 if num("pd_brk") is None else num("pd_brk"),
+        "newx5": 1.0 if num("newx5") is None else num("newx5"),
+    }
+
+
+def _rank(sorted_values: list, value: float) -> float:
+    """count(ref < value) / n. Matches numpy searchsorted(..., side='left')."""
+    return bisect_left(sorted_values, value) / len(sorted_values)
+
+
+def score_handoff(spec: dict, inputs: dict, rvol: float | None = None) -> dict:
+    """Fitted win chance, hoF, and stock strength from the committed spec.
+
+    The VWAP coefficient is left out. Its training std is ~0, so the term is 0
+    and the code never divides by that std.
+    """
+    model = spec["handoff_model"]
+    mean = model["standardize"]["mean"]
+    scale = model["standardize"]["std_plus_1e9"]
+    linear = float(model["intercept"])
+    for name, weight in model["coef"].items():
+        if name == "vwap_side":
+            continue
+        denom = scale.get(name)
+        if not denom:
+            continue
+        linear += float(weight) * ((float(inputs[name]) - float(mean[name])) / float(denom))
+    linear = max(-30.0, min(30.0, linear))
+    probability = 1.0 / (1.0 + exp(-linear))
+    dte_key = "0DTE" if float(inputs["cdte"]) == 0 else "1DTE"
+    mapping = model["v2_equiv_mapping"]["params"][dte_key]
+    clipped = min(max(probability, 1e-15), 1 - 1e-15)
+    ho_f = (log(clipped) - log(1 - clipped) - float(mapping["a"])) / float(mapping["b"])
+    reference = spec["stock_strength"]["reference"]
+    mo_atr = float(inputs["mo_atr"])
+    ranked_rvol = 0.0 if rvol is None or not isfinite(rvol) else float(rvol)
+    breaks = (float(inputs["pm_brk"]) + float(inputs["pd_brk"]) + float(inputs["newx5"])) / 3
+    rank_mo = _rank(reference["mo_atr_sorted_exact"], mo_atr)
+    rank_rvol = _rank(reference["rvol_sorted_exact"], ranked_rvol)
+    strength = (rank_mo + rank_rvol + breaks) / 3
+    return {
+        "p_win": probability,
+        "hoF": ho_f,
+        "stock_strength": strength,
+        "strength_parts": {"rank_mo_atr": rank_mo, "rank_rvol": rank_rvol, "breaks": breaks},
+    }
+
+
+def handoff_floor(strength: float | None, dte: int, settings: Settings, a_bar: bool = False) -> float:
+    """Fitted-probability floor. Runner names stay on the normal (A) floor."""
+    normal = settings.pwin_normal_0dte if dte == 0 else settings.pwin_normal_1dte
+    if a_bar or strength is None:
+        return normal
+    if strength >= settings.strength_decile:
+        return settings.pwin_decile if dte == 0 else settings.pwin_decile_1dte
+    if strength >= settings.strength_quintile:
+        return settings.pwin_quintile_0dte if dte == 0 else settings.pwin_quintile_1dte
+    return normal
+
+
+def strength_band(strength: float | None, settings: Settings, a_bar: bool = False) -> str | None:
+    if a_bar:
+        return "a_bar"
+    if strength is None:
+        return None
+    if strength >= settings.strength_decile:
+        return "decile"
+    if strength >= settings.strength_quintile:
+        return "quintile"
+    return "normal"
+
+
+def lane_decision(lane: str, dte: int, v2_score: float | None, p_win: float | None,
+                  strength: float | None, settings: Settings, a_bar: bool = False) -> bool:
+    """Hybrid posts on v2 points. Handoff posts on the fitted-probability floor."""
+    dte = 0 if int(dte) == 0 else 1
+    if lane == "hybrid_v2":
+        bar = settings.post_v2_option_0dte if dte == 0 else settings.post_v2_option_1dte
+        return v2_score is not None and v2_score >= bar
+    if not settings.probability_path:
+        return False
+    floor = handoff_floor(strength, dte, settings, a_bar=a_bar)
+    return p_win is not None and p_win >= floor
+
+
+def _directional_slots(bars, side: int) -> tuple[list, list]:
+    slots = {}
+    for bar in bars:
+        minute = _minute_index(bar)
+        if minute is None:
+            continue
+        height = bar.high if side == 1 else -bar.low
+        slots[minute] = (height, side * bar.close)
+    if not slots:
+        return [], []
+    last = max(slots)
+    heights = [None] * (last + 1)
+    closes = [None] * (last + 1)
+    prev_h = prev_x = None
+    for minute in range(last + 1):
+        if minute in slots:
+            prev_h, prev_x = slots[minute]
+        heights[minute] = prev_h
+        closes[minute] = prev_x
+    return heights, closes
+
+
+def _break_flag(close: float, level: float | None, side: int) -> float | None:
+    if level is None or not isfinite(level):
+        return None
+    return 1.0 if side * close > side * level else 0.0
+
+
+def build_handoff_features(snap: Snapshot, option: Option, history: list[Snapshot], side: int) -> dict:
+    """Raw handoff inputs. None marks a missing value for the fill step.
+
+    RVOL is 0 until five prior full sessions exist. A missing premarket break,
+    prior-day break, or new extreme stays None so the fill can set it to 1.
+    """
+    bars = list(snap.bars)
+    raw = {name: None for name in MODEL_FEATURES}
+    raw["rvol"] = 0.0
+    if not bars:
+        raw["cdte"] = 0.0 if dte_of(option, snap) == 0 else 1.0
+        return raw
+    close_m = bars[-1].close
+    open0 = bars[0].open
+    minute = _minute_index(bars[-1])
+    atr = snap.prior_atr if snap.prior_atr and isfinite(snap.prior_atr) and snap.prior_atr > 0 else None
+    if atr and open0:
+        raw["mo_atr"] = (side * close_m - side * open0) / atr
+    if open0:
+        raw["mo_pct"] = side * (close_m / open0 - 1) * 100
+    days = getattr(snap, "prior_full_days", None)
+    base = getattr(snap, "rvol_base", None)
+    if days is not None and days >= 5 and base and base > 0:
+        raw["rvol"] = sum(bar.volume for bar in bars) / base
+    else:
+        raw["rvol"] = 0.0
+    raw["pm_brk"] = _break_flag(close_m, snap.premarket_high if side == 1 else snap.premarket_low, side)
+    raw["pd_brk"] = _break_flag(close_m, snap.prior_high if side == 1 else snap.prior_low, side)
+    heights, closes = _directional_slots(bars, side)
+    if minute is None or minute >= len(heights) or heights[minute] is None:
+        raw["newx5"] = None
+        raw["eff10"] = None
+    elif minute < 5:
+        raw["newx5"] = 0.0
+    else:
+        window = [value for value in heights[minute - 4:minute + 1] if value is not None]
+        day = [value for value in heights[:minute + 1] if value is not None]
+        prior = [value for value in heights[:minute - 4] if value is not None]
+        if window and day and prior:
+            raw["newx5"] = 1.0 if max(window) >= max(day) and max(window) > max(prior) else 0.0
+        else:
+            raw["newx5"] = 0.0
+    if minute is not None and minute < len(closes) and closes[minute] is not None:
+        k = min(10, minute)
+        segment = closes[minute - k:minute + 1]
+        if any(value is None for value in segment):
+            segment = [value for value in segment if value is not None]
+        if len(segment) < 2:
+            raw["eff10"] = 0.0
+        else:
+            path = sum(abs(segment[i] - segment[i - 1]) for i in range(1, len(segment)))
+            raw["eff10"] = 0.0 if path == 0 else max(segment[-1] - segment[0], 0.0) / path
+    vwap = _vwap_at(bars, bars[-1].end)
+    raw["vwap_side"] = None if vwap is None else (1.0 if side * close_m > side * vwap else 0.0)
+    if option.ask and option.ask > 0 and isfinite(option.bid):
+        raw["spread_c"] = max(0.0, min(1.0, (option.ask - option.bid) / option.ask))
+        raw["l_ask"] = log1p(option.ask)
+    volume_5 = _option_volume_5(option, history, snap)
+    if volume_5 is not None:
+        raw["l_ovol5"] = log1p(max(volume_5, 0.0))
+    raw["pe5"] = _premium_change_5(option, history, snap)
+    raw["cdte"] = 0.0 if dte_of(option, snap) == 0 else 1.0
+    raw["m"] = float(minute if minute is not None else 0)
+    return raw
+
+
+def _option_volume_5(option: Option, history: list[Snapshot], snap: Snapshot) -> float | None:
+    cutoff = snap.at - timedelta(minutes=5)
+    prior = None
+    for past in history:
+        if past.at > cutoff:
+            continue
+        match = next((item for item in past.options if item.symbol == option.symbol), None)
+        if match is not None:
+            prior = match.volume
+    if prior is None:
+        return None
+    return max(0.0, option.volume - prior)
+
+
+def _premium_change_5(option: Option, history: list[Snapshot], snap: Snapshot) -> float | None:
+    if not option.ask or option.ask <= 0:
+        return None
+    mid = (option.ask + option.bid) / 2
+    cutoff = snap.at - timedelta(minutes=5)
+    previous = None
+    for past in history:
+        if past.at > cutoff:
+            continue
+        match = next((item for item in past.options if item.symbol == option.symbol and item.ask > 0), None)
+        if match is not None:
+            previous = match
+    if previous is None:
+        return None
+    old = (previous.ask + previous.bid) / 2
+    if old <= 0:
+        return None
+    return max(-1.0, min(3.0, mid / old - 1))
 
 
 def post_bar(path: str, dte: int, settings: Settings) -> float:
@@ -384,9 +654,21 @@ def _load_json(path: str, kind: str):
 
 
 def stock_strength(features: dict, distribution) -> tuple[float | None, dict | str]:
-    """Mean percentile rank of the five strength inputs. None until a reference file is loaded."""
+    """Stock strength from the spec's sorted ranks, or a legacy reference file."""
     if not isinstance(distribution, dict):
         return None, "stock_strength: reference distribution not loaded"
+    if "stock_strength" in distribution:
+        medians = distribution.get("feature_definitions", {}).get("missing_values", {}).get("median", {})
+        filled = fill_strength_inputs(features, medians)
+        try:
+            scored = score_handoff(distribution, {
+                "mo_atr": filled["mo_atr"], "cdte": 0, "m": 0, "mo_pct": 0, "l_rvol": 0,
+                "pm_brk": filled["pm_brk"], "pd_brk": filled["pd_brk"], "newx5": filled["newx5"],
+                "vwap_side": 1, "eff10": 0, "spread_c": 0, "l_ask": 0, "l_ovol5": 0, "pe5": 0,
+            }, rvol=filled["rvol"])
+        except (KeyError, TypeError, ValueError) as exc:
+            return None, f"stock_strength: {exc}"
+        return scored["stock_strength"], scored["strength_parts"]
     ranks = {}
     for name in STRENGTH_FEATURES:
         sample = distribution.get(name)
@@ -401,13 +683,18 @@ def stock_strength(features: dict, distribution) -> tuple[float | None, dict | s
 
 
 def fitted_win_probability(features: dict, model) -> tuple[float | None, str | None]:
-    """Logistic handoff model.
-
-    TODO: Vince's coefficient file was not in the attached run. Point
-    LOTTO_HANDOFF_MODEL_PATH at {"link": "logistic", "intercept": n, "coefficients": {...}}.
-    Until that file is present this returns None and the s12 probability path does not post.
-    """
-    if not isinstance(model, dict) or "coefficients" not in model:
+    """Fitted P(true win) from the committed handoff spec, or a legacy coefficient file."""
+    if not isinstance(model, dict):
+        return None, "handoff model not loaded"
+    if "handoff_model" in model:
+        medians = model.get("feature_definitions", {}).get("missing_values", {}).get("median", {})
+        filled = fill_model_features(features, medians)
+        try:
+            scored = score_handoff(model, filled, rvol=features.get("rvol"))
+        except (KeyError, TypeError, ValueError) as exc:
+            return None, f"handoff model: {exc}"
+        return scored["p_win"], None
+    if "coefficients" not in model:
         return None, "handoff model not loaded"
     if model.get("link", "logistic") != "logistic":
         return None, f"unsupported link {model.get('link')}"
@@ -420,7 +707,7 @@ def fitted_win_probability(features: dict, model) -> tuple[float | None, str | N
     z = max(-30.0, min(30.0, z))
     probability = 1.0 / (1.0 + exp(-z))
     reason = f"missing features zero-filled: {','.join(missing)}" if missing else None
-    return round(probability, 4), reason
+    return probability, reason
 
 
 def quote_universe(core, standby, cycle: int, batch: int, quote_every: int) -> list[str]:
@@ -512,7 +799,8 @@ def index_sync(index_bars: dict, day: str, snap_at: datetime) -> bool:
 
 
 def apply_v2(candidate: Candidate, settings: Settings, history: list[Snapshot],
-             index_bars: dict | None = None, handoff: bool = False, thin: bool = False) -> Candidate:
+             index_bars: dict | None = None, handoff: bool = False, thin: bool = False,
+             a_bar: bool = False) -> Candidate:
     """Fill score_v2, path, and every term. Does not drop the candidate."""
     snap, option = candidate.snapshot, candidate.option
     direction = 1 if option.side == "CALL" else -1
@@ -532,31 +820,96 @@ def apply_v2(candidate: Candidate, settings: Settings, history: list[Snapshot],
     option_v2 = candidate.score + sum(extras.values()) + sum(penalties.values()) + hourly
     stock_raw = sum(terms.values())
     thin = thin or not metrics.get("cluster_size")
-    dte = dte_of(option, snap)
-    mode = getattr(settings, "score_mode", "combined")
+    dte = 0 if dte_of(option, snap) == 0 else 1
+    mode = getattr(settings, "score_mode", "s12")
     if mode == "s12":
         if stock_raw >= settings.stock_push_score:
             scale = settings.stock_push_thin_weight if thin else settings.stock_push_weight
             stock_v2 = min(settings.stock_push_cap, stock_raw * scale)
         else:
             stock_v2 = stock_raw * settings.stock_weak_scale
-        score_v2 = round(option_v2 + stock_v2, 2)
         stock_cap = settings.stock_push_cap
-        option_bar = post_bar("option", dte, settings)
-        if handoff and option_v2 < option_bar:
-            path = "stock"
-        elif option_v2 >= option_bar:
-            path = "option"
-        elif handoff or stock_raw >= settings.stock_push_score:
-            path = "stock"
-        else:
-            path = "option"
-        bar = post_bar(path, dte, settings)
     else:
         stock_v2, stock_cap, score_v2 = cap_stock(option_v2, stock_raw, settings)
+    raw_features = build_handoff_features(snap, option, history, direction)
+    spec_path = settings.handoff_model_path or settings.strength_distribution_path
+    spec, spec_reason = _load_json(spec_path, "handoff spec")
+    probability = ho_f = strength = None
+    strength_detail = None
+    probability_reason = spec_reason
+    strength_reason = spec_reason
+    if isinstance(spec, dict) and "handoff_model" in spec:
+        medians = spec.get("feature_definitions", {}).get("missing_values", {}).get("median", {})
+        filled = fill_model_features(raw_features, medians)
+        strength_inputs = fill_strength_inputs(raw_features, medians)
+        # Model and strength share the break fill and the ATR median.
+        filled["mo_atr"] = strength_inputs["mo_atr"]
+        filled["pm_brk"] = strength_inputs["pm_brk"]
+        filled["pd_brk"] = strength_inputs["pd_brk"]
+        filled["newx5"] = strength_inputs["newx5"]
+        try:
+            scored = score_handoff(spec, filled, rvol=strength_inputs["rvol"])
+        except (KeyError, TypeError, ValueError) as exc:
+            probability_reason = f"handoff model: {exc}"
+            strength_reason = probability_reason
+        else:
+            probability = scored["p_win"]
+            ho_f = scored["hoF"]
+            strength = scored["stock_strength"]
+            strength_detail = scored["strength_parts"]
+            probability_reason = None
+            strength_reason = None
+    else:
+        legacy = {
+            "move_from_open_atr": metrics.get("move_from_open_atr") or 0,
+            "rvol": flags.get("rvol_used") or 0,
+            "held_pm": flags.get("held_pm") or 0,
+            "held_pd": flags.get("held_pd") or 0,
+            "held_range": flags.get("held_range") or 0,
+        }
+        strength, strength_detail = stock_strength(legacy, spec)
+        if strength is None and isinstance(strength_detail, str):
+            strength_reason = strength_detail
+        probability, probability_reason = fitted_win_probability(legacy, spec)
+    option_bar = post_bar("option", dte, settings)
+    band, floor = None, None
+    if mode == "combined":
         path = "combined"
         bar = post_bar("combined", dte, settings)
-        option_bar = bar
+        qualifying = option_v2 >= bar or score_v2 >= bar
+        probability_post = 0
+    else:
+        # The posted hybrid number is the option v2. Stock does not add to that bar.
+        score_v2 = round(option_v2, 2)
+        hybrid_pass = option_v2 >= option_bar
+        handoff_pass = False
+        if handoff and settings.probability_path:
+            floor = handoff_floor(strength, dte, settings, a_bar=a_bar)
+            band = strength_band(strength, settings, a_bar=a_bar)
+            handoff_pass = probability is not None and probability >= floor
+        elif handoff:
+            floor = post_bar("stock", dte, settings)
+            band = "v2"
+            handoff_pass = (option_v2 + stock_v2) >= floor
+        if hybrid_pass:
+            path = "hybrid"
+            bar = option_bar
+            qualifying = True
+        elif handoff:
+            path = "handoff"
+            bar = floor if floor is not None else post_bar("stock", dte, settings)
+            qualifying = handoff_pass
+        else:
+            path = "hybrid"
+            bar = option_bar
+            qualifying = False
+        probability_post = int(bool(handoff_pass and not hybrid_pass))
+    if path == "handoff" and settings.probability_path and probability is not None:
+        below = round(max(0.0, float(bar) - probability), 4)
+    elif mode == "s12":
+        below = round(max(0.0, float(bar) - option_v2), 2)
+    else:
+        below = round(max(0.0, float(bar) - score_v2), 2)
     parts = dict(candidate.parts)
     parts.update(extras)
     parts.update(penalties)
@@ -564,40 +917,7 @@ def apply_v2(candidate: Candidate, settings: Settings, history: list[Snapshot],
     parts["hourly_break"] = hourly
     parts["stock_v2"] = round(stock_v2, 2)
     parts["stock_cap"] = stock_cap
-    strength_features = {
-        "move_from_open_atr": metrics.get("move_from_open_atr") or 0,
-        "rvol": flags.get("rvol_used") or 0,
-        "held_pm": flags.get("held_pm") or 0,
-        "held_pd": flags.get("held_pd") or 0,
-        "held_range": flags.get("held_range") or 0,
-        "option_v2": round(option_v2, 2),
-        "stock_raw": round(stock_raw, 2),
-        "score_v2": score_v2,
-        "dte": dte,
-    }
-    distribution, dist_reason = _load_json(settings.strength_distribution_path, "strength distribution")
-    strength, strength_detail = stock_strength(strength_features, distribution)
-    if strength is None and isinstance(strength_detail, str):
-        strength_reason = strength_detail if settings.strength_distribution_path or not dist_reason else dist_reason
-    else:
-        strength_reason = dist_reason
-    model, model_reason = _load_json(settings.handoff_model_path, "handoff model")
-    probability, probability_reason = fitted_win_probability(strength_features, model)
-    if probability is None:
-        probability_reason = probability_reason or model_reason
-    band, floor = None, None
-    if mode == "s12" and path == "stock" and strength is not None and settings.probability_path:
-        if strength >= settings.strength_decile:
-            band, floor = "decile", settings.pwin_decile
-        elif strength >= settings.strength_quintile:
-            band = "quintile"
-            floor = settings.pwin_quintile_0dte if dte == 0 else settings.pwin_quintile_1dte
-    probability_post = int(floor is not None and probability is not None and probability >= floor and score_v2 < bar)
     override = int(mode == "combined" and exceptional_stock(metrics, flags, snap, settings, candidate.setup, handoff))
-    if mode == "combined":
-        qualifying = option_v2 >= bar or score_v2 >= bar
-    else:
-        qualifying = score_v2 >= bar or bool(probability_post)
     metrics.update({
         "model": "V", "rules": "B" if dte == 0 else "F",
         "score_mode": mode, "preset": settings.preset,
@@ -606,13 +926,15 @@ def apply_v2(candidate: Candidate, settings: Settings, history: list[Snapshot],
         "stock_cap": stock_cap,
         "path": path, "thin_option": int(bool(thin or handoff and not metrics.get("cluster_size"))),
         "post_bar": bar, "handoff": int(handoff),
+        "a_bar": int(bool(a_bar)),
         "level_retest": terms["level_retest"],
-        "below_by": round(max(0.0, bar - score_v2), 2),
-        "option_below_by": round(max(0.0, bar - option_v2), 2),
+        "below_by": below,
+        "option_below_by": round(max(0.0, option_bar - option_v2), 2),
         "stock_strength": strength,
         "stock_strength_ranks": strength_detail if isinstance(strength_detail, dict) else None,
         "strength_reason": strength_reason,
         "fitted_win_probability": probability,
+        "handoff_v2eq": None if ho_f is None else ho_f,
         "fitted_win_reason": probability_reason,
         "strength_band": band, "probability_floor": floor, "probability_post": probability_post,
         "exceptional_stock": override,

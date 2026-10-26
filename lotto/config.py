@@ -1,7 +1,11 @@
 from dataclasses import dataclass
 from math import isfinite
+from pathlib import Path
 
 STRATEGY_VERSION = "model-v-2026-10-26"
+# Vince's handoff logistic, standardization, and strength ranks. One file
+# serves both LOTTO_HANDOFF_MODEL_PATH and LOTTO_STRENGTH_DISTRIBUTION_PATH.
+HANDOFF_SPEC_PATH = str(Path(__file__).resolve().parent.parent / "config" / "handoff_model_v1026.json")
 
 
 @dataclass(frozen=True)
@@ -16,26 +20,34 @@ class Settings:
     post_v2_option_1dte: float = 61
     post_v2_stock_0dte: float = 58
     post_v2_stock_1dte: float = 80
-    # Live default is one combined score and one bar per expiry.
-    # PLACEHOLDER until Vince replaces the bar, the share cap, and the weights
-    # (due 3:00 PM ET). A strong option clears the bar with no stock help.
-    # stock_max_share keeps stock from being enough to clear the bar alone.
-    score_mode: str = "combined"
+    # Live default is S12. Hybrid posts on v2 points. Handoff posts on fitted
+    # win chance. combined remains available as a rollback, with stock_override.
+    score_mode: str = "s12"
     post_combined_0dte: float = 40
     post_combined_1dte: float = 61
     stock_max_share: float = 0.40
-    # S12 is the optional two-path comparison (LOTTO_SCORE_MODE=s12).
-    # Probability floors are P(true win), not v2 points.
+    # LOTTO_PRESET=S11 selects the tighter handoff floors. S0 turns them off.
+    # Floors are P(true win), the same bars as hoF >= A - delta.
     preset: str = "S12"
     probability_path: int = 1
-    strength_quintile: float = 0.802
-    strength_decile: float = 0.876
-    pwin_quintile_0dte: float = 0.29
-    pwin_quintile_1dte: float = 0.31
-    pwin_decile: float = 0.18
-    handoff_model_path: str = ""
-    strength_distribution_path: str = ""
-    preset_note: str = "combined PLACEHOLDER bars 40/61 and stock share cap 0.40 until Vince's 3:00 PM ET pass."
+    strength_quintile: float = 0.8016471997604073
+    strength_decile: float = 0.8756064690026955
+    pwin_normal_0dte: float = 0.4316
+    pwin_normal_1dte: float = 0.4711
+    pwin_quintile_0dte: float = 0.2882
+    pwin_quintile_1dte: float = 0.309
+    pwin_decile: float = 0.1776
+    pwin_decile_1dte: float = 0.1833
+    handoff_model_path: str = HANDOFF_SPEC_PATH
+    strength_distribution_path: str = HANDOFF_SPEC_PATH
+    preset_note: str = (
+        "S12 handoff floors: normal 0.4316/0.4711, "
+        "strength >= 0.8016471997604073 → 0.2882/0.309, "
+        "strength >= 0.8756064690026955 → 0.1776/0.1833. Hybrid v2 bars stay 40/61."
+    )
+    # Runner names are off until LOTTO_STANDBY_NAMES=on. Those names use the
+    # handoff A bar (the normal floors), with no strength step-down.
+    standby_names: int = 0
     # Exceptional-stock override. Every check is required. Defaults are high so it is rare.
     override_move_atr: float = 2.5
     override_rvol: float = 3.0
@@ -149,10 +161,14 @@ class Settings:
         if min(self.post_combined_0dte, self.post_combined_1dte) <= 0:
             raise ValueError("Invalid combined bar")
         floors = (self.strength_quintile, self.strength_decile,
-                  self.pwin_quintile_0dte, self.pwin_quintile_1dte, self.pwin_decile,
+                  self.pwin_normal_0dte, self.pwin_normal_1dte,
+                  self.pwin_quintile_0dte, self.pwin_quintile_1dte,
+                  self.pwin_decile, self.pwin_decile_1dte,
                   self.override_vwap_share)
         if any(not 0 <= value <= 1 for value in floors) or self.strength_quintile > self.strength_decile:
             raise ValueError("Invalid stock-strength cutoff or probability floor")
+        if self.standby_names not in (0, 1):
+            raise ValueError("LOTTO_STANDBY_NAMES must be on or off")
         if min(self.override_move_atr, self.override_rvol) <= 0:
             raise ValueError("Invalid exceptional-stock threshold")
         if self.override_fresh_seconds <= 0 or self.override_trigger_minutes <= 0:
@@ -185,57 +201,73 @@ class Settings:
             raise ValueError("Invalid phase-one quality limits")
 
 
-# Probability floors are P(true win), in [0, 1]. They are not v2 points.
-# S11 floors are placeholders: Vince has not published them. 1.0 does not clear
-# for a real fitted probability, so S11 does not open the strong-stock path.
+# Probability floors are P(true win). They match hoF >= A - delta on the
+# log-odds scale. Cutoffs are the spec's exact q80 and q90.
+_STRENGTH = {
+    "strength_quintile": 0.8016471997604073,
+    "strength_decile": 0.8756064690026955,
+    "pwin_normal_0dte": 0.4316,
+    "pwin_normal_1dte": 0.4711,
+}
 PRESETS = {
     "S0": {
         "preset": "S0",
         "probability_path": 0,
-        "strength_quintile": 0.802,
-        "strength_decile": 0.876,
-        "pwin_quintile_0dte": 0.29,
-        "pwin_quintile_1dte": 0.31,
-        "pwin_decile": 0.18,
+        **_STRENGTH,
+        "pwin_quintile_0dte": 0.2882,
+        "pwin_quintile_1dte": 0.309,
+        "pwin_decile": 0.1776,
+        "pwin_decile_1dte": 0.1833,
         "preset_note": "S0 keeps the 58/80 stock-led v2 bars. The probability path is off.",
     },
     "S11": {
         "preset": "S11",
         "probability_path": 1,
-        "strength_quintile": 0.802,
-        "strength_decile": 0.876,
-        # PLACEHOLDER — not a Vince measurement. Replace when S11 floors are published.
-        "pwin_quintile_0dte": 1.0,
-        "pwin_quintile_1dte": 1.0,
-        "pwin_decile": 1.0,
-        "preset_note": "S11 PLACEHOLDER floors are 1.0. Same structure as S12; floors are unpublished.",
+        **_STRENGTH,
+        "pwin_quintile_0dte": 0.3215,
+        "pwin_quintile_1dte": 0.347,
+        "pwin_decile": 0.2282,
+        "pwin_decile_1dte": 0.2406,
+        "preset_note": (
+            "S11 handoff floors: normal 0.4316/0.4711, "
+            "strength >= 0.8016471997604073 → 0.3215/0.347, "
+            "strength >= 0.8756064690026955 → 0.2282/0.2406."
+        ),
     },
     "S12": {
         "preset": "S12",
         "probability_path": 1,
-        "strength_quintile": 0.802,
-        "strength_decile": 0.876,
-        "pwin_quintile_0dte": 0.29,
-        "pwin_quintile_1dte": 0.31,
-        "pwin_decile": 0.18,
-        "preset_note": "S12 probability floors: quintile 0.29 (0DTE) / 0.31 (1DTE), decile 0.18 either expiry.",
+        **_STRENGTH,
+        "pwin_quintile_0dte": 0.2882,
+        "pwin_quintile_1dte": 0.309,
+        "pwin_decile": 0.1776,
+        "pwin_decile_1dte": 0.1833,
+        "preset_note": (
+            "S12 handoff floors: normal 0.4316/0.4711, "
+            "strength >= 0.8016471997604073 → 0.2882/0.309, "
+            "strength >= 0.8756064690026955 → 0.1776/0.1833. Hybrid v2 bars stay 40/61."
+        ),
     },
 }
 
 
 def model_v_settings(**overrides) -> Settings:
-    """Shipped Model V profile. Score mode defaults to combined. MIN_SCORE stays at 60."""
+    """Shipped Model V profile. Score mode defaults to s12. MIN_SCORE stays at 60."""
     preset = str(overrides.get("preset", "S12")).upper()
     if preset not in PRESETS:
         raise ValueError("LOTTO_PRESET must be S0, S11, or S12")
-    values = dict(model="V", min_score=60, hybrid=1, soft_blocks=1, send_requote=1, score_mode="combined")
+    values = dict(model="V", min_score=60, hybrid=1, soft_blocks=1, send_requote=1,
+                  score_mode="s12", standby_names=0,
+                  handoff_model_path=HANDOFF_SPEC_PATH,
+                  strength_distribution_path=HANDOFF_SPEC_PATH)
     values.update(PRESETS[preset])
     values.update(overrides)
     values["preset"] = preset
-    values["score_mode"] = str(values.get("score_mode", "combined")).lower()
-    if values["score_mode"] == "combined" and preset == "S12" and "preset_note" not in overrides:
+    values["score_mode"] = str(values.get("score_mode", "s12")).lower()
+    if values["score_mode"] == "combined" and "preset_note" not in overrides:
         values["preset_note"] = (
-            "combined PLACEHOLDER bars 40/61 and stock share cap 0.40 until Vince's 3:00 PM ET pass."
+            "Rollback: one combined score, bars 40/61, stock share cap 0.40, "
+            "plus the exceptional stock_override path."
         )
     if values.get("min_score", 60) > 60:
         values["min_score"] = 60

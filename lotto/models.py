@@ -86,6 +86,8 @@ class Snapshot:
     premarket_high: float | None = None
     premarket_low: float | None = None
     volume_source: str | None = None  # SPX uses SPY share volume; never index volume.
+    prior_full_days: int | None = None  # Prior RTH sessions with at least 380 minute bars.
+    rvol_base: float | None = None  # Mean cumulative volume at this minute across up to 10 of those days.
 
     @property
     def day(self) -> str:

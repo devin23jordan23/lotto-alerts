@@ -310,11 +310,33 @@ class Schwab:
                 total += minutes.get(minute, 0)
                 if minute in minutes:
                     observations[minute + 1].append(total)
+        full_days = []
+        for historic_day in sorted(profiles):
+            minutes = profiles[historic_day]
+            if sum(1 for minute in minutes if 0 <= minute < 390) < 380:
+                continue
+            total = 0.0
+            curve = {}
+            for minute in range(390):
+                total += minutes.get(minute) or 0
+                curve[minute] = total
+            full_days.append(curve)
+        used = full_days[-10:]
+        handoff_base = {}
+        if len(full_days) >= 5:
+            for minute in range(390):
+                handoff_base[minute] = sum(curve[minute] for curve in used) / len(used)
+        if not hasattr(self, "handoff_rvol"):
+            self.handoff_rvol = {}
+        self.handoff_rvol[key] = {"days": len(full_days), "base": handoff_base}
         baseline = {minute: median(values) for minute, values in observations.items() if len(values) >= 10}
         if symbol == "SPX":
             # Schwab index candles have zero volume; use traded SPY volume only
             # for volume-based signals while retaining SPX prices and ATR.
             baseline = self.baseline("SPY", now)
+            spy_rvol = self.handoff_rvol.get(("SPY", day))
+            if spy_rvol:
+                self.handoff_rvol[key] = spy_rvol
         if not baseline:
             LOG.warning("%s has fewer than ten usable historical sessions; no alerts until baseline is available", symbol)
         self.baselines[key] = baseline
@@ -687,6 +709,12 @@ class Schwab:
                 peer_return = median(p[1] for p in peers) if len(peers) >= 2 else None
                 leaders = tuple(p[0] for p in sorted(peers, key=lambda p:abs(p[1]), reverse=True)[:3]
                                 if peer_return is not None and p[1]*peer_return > 0)
+                rvol_info = getattr(self, "handoff_rvol", {}).get((symbol, now.astimezone(ET).date()), {})
+                rvol_minute = None
+                if bars:
+                    end = bars[-1].end.astimezone(ET)
+                    rvol_minute = (end.hour * 60 + end.minute) - (9 * 60 + 31)
+                rvol_base = (rvol_info.get("base") or {}).get(rvol_minute)
                 result.append(Snapshot(symbol, at, spot, spot_time, previous, bars, tuple(options),
                                        context, context_time, benchmark, "schwab", session[1],
                                        volume_source="SPY" if symbol == "SPX" else symbol,
@@ -695,6 +723,8 @@ class Schwab:
                                        market_return_from_open=market_from_open, market_vwap_side=market_vwap_side,
                                        peer_return_5m=peer_return, peer_time=min((p[2] for p in peers), default=None),
                                        peer_leaders=leaders,
+                                       prior_full_days=rvol_info.get("days"),
+                                       rvol_base=rvol_base,
                                        **getattr(self,"levels",{}).get((symbol,now.astimezone(ET).date()),{})))
             except Exception as exc:
                 LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)

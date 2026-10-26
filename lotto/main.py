@@ -47,8 +47,18 @@ def universe_symbols(raw: str) -> list[str]:
     return sorted(symbols | REQUIRED_UNIVERSE) if symbols else []
 
 
+def _env_on(name: str, default: str = "off") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "on", "true", "yes"}
+
+
 def standby_symbols() -> list[str]:
-    """Named standby list, plus UOA names that are not already core."""
+    """Runner names. Empty unless LOTTO_STANDBY_NAMES is on.
+
+    When the switch is on, the named list is quoted and chain-scanned only
+    while in play. Those symbols are scored on the handoff A bar.
+    """
+    if not _env_on("LOTTO_STANDBY_NAMES", "off"):
+        return []
     raw = os.getenv("LOTTO_STANDBY_UNIVERSE")
     if raw is None:
         named = list(DEFAULT_STANDBY)
@@ -73,7 +83,10 @@ def env_settings() -> Settings:
     for field in fields(base):
         raw = os.getenv("LOTTO_" + field.name.upper())
         if raw is not None and field.name not in {"model", "preset"}:
-            updates[field.name] = type(getattr(base, field.name))(raw)
+            if field.name == "standby_names":
+                updates[field.name] = 1 if raw.strip().lower() in {"1", "on", "true", "yes"} else 0
+            else:
+                updates[field.name] = type(getattr(base, field.name))(raw)
     if "score_mode" in updates:
         updates["score_mode"] = str(updates["score_mode"]).lower()
     updates["model"] = model
@@ -81,6 +94,11 @@ def env_settings() -> Settings:
         updates["preset"] = preset
         if updates.get("min_score", base.min_score) > 60:
             updates["min_score"] = 60
+        if updates.get("score_mode", base.score_mode) == "combined" and "preset_note" not in updates:
+            updates["preset_note"] = (
+                "Rollback: one combined score, bars 40/61, stock share cap 0.40, "
+                "plus the exceptional stock_override path."
+            )
     return replace(base, **updates)
 
 
@@ -162,6 +180,7 @@ def main():
         configured_universe = ",".join(filter(None, (os.getenv("UOA_CORE_UNIVERSE", ""), os.getenv("UOA_IN_PLAY", "")))) or DEFAULT_UNIVERSE
     symbols = universe_symbols(configured_universe)
     standby = [s for s in standby_symbols() if s not in symbols]
+    engine.runner_names = frozenset(standby)
     if not symbols:
         raise SystemExit("LOTTO_UNIVERSE must contain at least one symbol")
     poll_seconds = max(30, int(os.getenv("LOTTO_POLL_SECONDS", "60")))
@@ -182,8 +201,9 @@ def main():
     LOG.info("Stock-first: enabled=%s posting=off requested_mode=%s", stock_first.enabled,
              os.getenv("LOTTO_STOCK_FIRST_MODE", "send"))
     from .model_v import scan_budget
-    LOG.info("Model %s score_mode=%s standby=%s", engine.settings.model, engine.settings.score_mode,
-             ",".join(standby) or "none")
+    LOG.info("Model %s score_mode=%s preset=%s standby_names=%s standby=%s",
+             engine.settings.model, engine.settings.score_mode, engine.settings.preset,
+             "on" if engine.settings.standby_names else "off", ",".join(standby) or "none")
     LOG.info("Scan budget: %s", json.dumps(scan_budget(
         len(symbols), len(standby), engine.settings.standby_scan_minutes,
         engine.settings.quote_batch, client.min_request_interval,

@@ -83,6 +83,7 @@ class Engine:
         self.rearmed = set()
         self.stock_events = []
         self.index_bars = {}
+        self.runner_names = frozenset()
 
     def remember_stock_events(self, ideas) -> None:
         self.stock_events.extend(ideas)
@@ -349,7 +350,8 @@ class Engine:
                     match = next(idea for idea in events if idea.side == candidate.option.side)
                     candidate.setup = Setup(match.setup, match.trigger, match.invalidation)
                 apply_v2(candidate, cfg, history, self.index_bars, handoff=handoff,
-                         thin=not candidate.metrics.get("cluster_size"))
+                         thin=not candidate.metrics.get("cluster_size"),
+                         a_bar=snap.symbol in self.runner_names)
                 if candidate.metrics.get("score_v2") is None:
                     candidate.metrics.update(missing_v2("score did not compute"))
                 scored.append(candidate)
@@ -453,6 +455,8 @@ class Engine:
             embed["description"] += f"\nLevel retest {metrics.get('retest_level') or ''}".rstrip()
         if path == "stock_override":
             embed["description"] += "\nExceptional stock override"
+        if metrics.get("strength_band") == "a_bar":
+            embed["description"] += "\nRunner name at the A bar"
 
     def _clear_confirmation(self, key):
         for score_key in list(self.qualified_since):
