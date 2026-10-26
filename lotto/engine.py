@@ -68,6 +68,34 @@ def active_quality_reason(candidate) -> str | None:
     return None
 
 
+def dedupe_ready_cards(ready: list) -> list:
+    """One card per contract at one timestamp. The higher score stays.
+
+    0DTE, 1DTE, and a handoff can roll onto the same strike. The alerts
+    primary key is that contract at that time, so the second insert would
+    abort the cycle.
+    """
+    best = {}
+    order = []
+    for candidate in ready:
+        snap, option = candidate.snapshot, candidate.option
+        if option is None:
+            order.append(id(candidate))
+            best[id(candidate)] = candidate
+            continue
+        key = (snap.day, snap.symbol, option.symbol, snap.at.isoformat())
+        current = best.get(key)
+        if current is None:
+            best[key] = candidate
+            order.append(key)
+            continue
+        score = candidate.metrics.get("card_score", candidate.score)
+        current_score = current.metrics.get("card_score", current.score)
+        if score > current_score:
+            best[key] = candidate
+    return [best[key] for key in order]
+
+
 class Engine:
     def __init__(self, store: Store, settings: Settings | None = None, dry_run: bool = True, quality: QualityConfig | None = None):
         self.store = store
@@ -391,6 +419,7 @@ class Engine:
             if cfg.fallback_rule in {"log", "post", "on"}:
                 self._observe_fallback_safely(snap, ready)
         alerts = []
+        ready = dedupe_ready_cards(ready)
         for candidate in sorted(ready, key=lambda c: (-c.metrics.get("card_score", c.score), c.snapshot.symbol)):
             snap = candidate.snapshot
             if cfg.send_requote:
@@ -517,14 +546,19 @@ class Engine:
             return
         if not record.get("gate_post"):
             return
+        if (record.get("positive_features") or 0) < self.settings.min_positive_features:
+            return
         base = record.get("base") or {}
         if not base.get("direction") or not base.get("volume"):
             return
         level = record["level_value"] if isinstance(record["level_value"], (int, float)) else snap.spot
         setup = Setup("STOCK_BYPASS", float(level), float(level))
         candidate = thin_candidate(snap, option, self.settings, setup)
-        apply_v2(candidate, self.settings, [], self.index_bars, handoff=False, thin=True,
+        history = self.history.get((snap.day, snap.symbol), [])
+        apply_v2(candidate, self.settings, history, self.index_bars, handoff=False, thin=True,
                  a_bar=snap.symbol in self.runner_names)
+        if candidate.metrics.get("card_layers_failed") or not candidate.metrics.get("gate_post"):
+            return
         if candidate.metrics.get("score_v2") is None:
             candidate.metrics["score_v2"] = candidate.score
         candidate.setup = setup
@@ -562,7 +596,11 @@ class Engine:
             if state is None:
                 state = new_fallback_state()
                 self.fallback_state[key] = state
-            record = evaluate_fallback(snap, side, self.settings, state, self._option_side_skip(snap, side, ready))
+            history = self.history.get((snap.day, snap.symbol), [])
+            spy_bars = self.index_bars.get((snap.day, "SPY"))
+            record = evaluate_fallback(
+                snap, side, self.settings, state, self._option_side_skip(snap, side, ready),
+                history=history, spy_bars=spy_bars)
             if record is None:
                 continue
             fire_line = {key: value for key, value in record.items() if key != "_option"}

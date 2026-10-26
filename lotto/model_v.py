@@ -26,9 +26,12 @@ When a stored row has only the live blend, invert it if the rule counts are
 present. If they are not, score_v2 stays empty and the reason is logged.
 Those rows are kept. They are not posted and they are not dropped silently.
 
-Default posting (LOTTO_SCORE_MODE=s12) is two lanes on one priced contract:
-    hybrid   v2 >= 40 (0DTE) or >= 61 (1DTE). v2 here is the option point score.
-    handoff  fitted win chance >= the S12 or S11 floor for that strength band.
+Posting is the v4c additive score on the active profile. A primary card
+posts when that score clears the profile post_threshold, at least
+min_positive_features contribute points, and the posted contract passes
+the blockers, including a real 5-minute option-volume reading. The post
+line is not capped. The hybrid bars (40/61) and the handoff floors stay
+on the card as labels. They do not decide the post.
 The handoff floors are P(true win). hoF >= A - delta is the same bar on the
 log-odds scale (A is 58/80, delta is 200/100 on S12 and 150/75 on S11).
 
@@ -531,19 +534,22 @@ def _inside_strike_window(option: Option, snap: Snapshot, settings: Settings) ->
     return abs(option.strike - spot) / spot <= settings.strike_window_pct + 1e-12
 
 
-def _quote_passes(option: Option, snap: Snapshot, settings: Settings) -> bool:
-    """Spread, bid, ask, 5-minute volume, and the strike window."""
+def _quote_passes(option: Option, snap: Snapshot, settings: Settings, history=None) -> bool:
+    """Spread, bid, ask, real 5-minute volume, and the strike window.
+
+    No 5-minute reading is a miss. Day volume does not stand in for it.
+    """
     if not _live_ask(option) or not _inside_strike_window(option, snap, settings):
         return False
     if option.bid is None or not isfinite(option.bid) or option.bid <= settings.blocker_bid:
         return False
     if (option.ask - option.bid) / option.ask > settings.blocker_spread:
         return False
-    volume = option_volume_5m(option, None, snap)
+    volume = option_volume_5m(option, history, snap)
     return volume is not None and volume >= settings.blocker_option_volume_5m
 
 
-def choose_fallback_contract(snap: Snapshot, side: str, settings: Settings | None = None) -> dict:
+def choose_fallback_contract(snap: Snapshot, side: str, settings: Settings | None = None, history=None) -> dict:
     """Nearest strike that passes the blockers, 0DTE first, then 1DTE.
 
     The search starts at the strike closest to the stock and walks out inside
@@ -569,7 +575,7 @@ def choose_fallback_contract(snap: Snapshot, side: str, settings: Settings | Non
         pool = [option for option in grouped[days] if _inside_strike_window(option, snap, settings)]
         pool.sort(key=lambda option: (abs(option.strike - snap.spot), option.strike))
         for option in pool:
-            if _quote_passes(option, snap, settings):
+            if _quote_passes(option, snap, settings, history):
                 chosen = option
                 break
         if chosen is not None:
@@ -696,7 +702,7 @@ def quote_spread_fail(bid, ask, max_spread_pct: float) -> tuple[int, float | Non
 
 
 def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict,
-                      option_skip: tuple | None = None) -> dict | None:
+                      option_skip: tuple | None = None, history=None, spy_bars=None) -> dict | None:
     """Advance one bar. Return a fire record, including deduped and skipped fires.
 
     Q-false is RVOL and push only. A level break does not reset the re-trigger.
@@ -722,9 +728,9 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     from .confluence import (PATTERN_FEATURES, additive_features, card_gate, confluence_flags_for,
                               match_value, pattern_match, spread_fraction)
     from .weights import load_weights, score_path
-    contract = choose_fallback_contract(snap, side, settings)
+    contract = choose_fallback_contract(snap, side, settings, history)
     probe = contract["option"]
-    features = additive_features(snap, probe, settings)
+    features = additive_features(snap, probe, settings, history=history, spy_bars=spy_bars)
     vol5 = features.pop("_vol5", None)
     flags = confluence_flags_for(snap, probe, {}, settings)
     _points, bypass_score, positive = score_path(features, side, load_weights(settings.weights_path), "bypass")
@@ -1032,21 +1038,18 @@ def build_handoff_features(snap: Snapshot, option: Option, history: list[Snapsho
 
 
 def option_volume_5m(option, history=None, snap=None) -> float | None:
-    """Contracts in the last five minutes.
+    """Contracts printed in the last five minutes.
 
-    A print about five minutes earlier turns the cumulative total into a
-    delta. With no earlier print, the cumulative total is the number we have.
+    The number is the delta from a print about five minutes earlier. With no
+    such print the reading is unknown. Day volume is not a substitute, and an
+    unknown reading blocks the card.
     """
-    if option is None:
+    if option is None or snap is None or not history:
         return None
-    if history and snap is not None:
-        delta = _option_volume_5(option, history, snap)
-        if delta is not None:
-            return float(delta)
-    volume = getattr(option, "volume", None)
-    if volume is None:
+    delta = _option_volume_5(option, history, snap)
+    if delta is None:
         return None
-    return float(volume)
+    return float(delta)
 
 
 def _option_volume_5(option: Option, history: list[Snapshot], snap: Snapshot) -> float | None:
@@ -1453,12 +1456,23 @@ def apply_v2(candidate: Candidate, settings: Settings, history: list[Snapshot],
             f"Level retest {retest.get('retest_level')} ×{retest.get('retest_count')}"
         ]
     candidate.blockers = tuple(candidate.blockers)
-    candidate.qualifying = qualifying
+    candidate.qualifying = False
+    from pathlib import Path
     from .confluence import apply_card_layers
+    spy_bars = snap.bars if snap.symbol == "SPY" else None
+    if index_bars:
+        spy_bars = index_bars.get((snap.day, "SPY")) or spy_bars
     try:
-        apply_card_layers(candidate, settings, qualifying, score_v2, history)
+        apply_card_layers(candidate, settings, qualifying, score_v2, history, spy_bars=spy_bars)
     except Exception as exc:
-        LOG.warning("card layers failed (%s)", type(exc).__name__)
+        candidate.qualifying = False
+        candidate.metrics["card_layers_failed"] = type(exc).__name__
+        LOG.error("card layers failed (%s); card not posted", type(exc).__name__)
+        if isinstance(exc, FileNotFoundError) or not Path(settings.weights_path).is_file():
+            LOG.error(
+                "WEIGHTS FILE MISSING: %s. No card will post until this file is present.",
+                settings.weights_path,
+            )
     return candidate
 
 

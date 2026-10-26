@@ -102,6 +102,17 @@ def _setting_text(value) -> str:
     return f"{number:.4f}".rstrip("0").rstrip(".")
 
 
+def profile_status(settings) -> str:
+    """The active profile and the lines it actually posts on. No cap is applied."""
+    LOG.warning(
+        "Profile: %s post>=%s bypass>=%s min_positive_features>=%s bolt_features>=%s",
+        settings.profile, _setting_text(settings.post_threshold),
+        _setting_text(settings.bypass_threshold), settings.min_positive_features,
+        settings.strong_feature_min,
+    )
+    return settings.profile
+
+
 def fallback_rule_status(settings) -> str:
     """One startup line. RVOL, push, and room are points, not gates."""
     mode = settings.fallback_rule
@@ -121,6 +132,19 @@ def strong_score_status(settings) -> int:
         _setting_text(settings.bolt_min_score), settings.strong_feature_min,
     )
     return settings.strong_feature_min
+
+
+def weights_file_status(settings) -> bool:
+    """Loud when the shipped weights book is not on disk. Cards will not post."""
+    path = Path(settings.weights_path)
+    if path.is_file():
+        LOG.warning("Weights file: %s", path.name)
+        return True
+    LOG.error(
+        "WEIGHTS FILE MISSING: %s. No card will post until this file is present.",
+        path,
+    )
+    return False
 
 
 def freshness_status(settings) -> None:
@@ -197,6 +221,14 @@ def env_settings() -> Settings:
                     "Ignoring LOTTO_%s=%s; LOTTO_PRESET=%s uses %s",
                     name.upper(), raw, base.preset, preset_value,
                 )
+    if model == "V":
+        from .weights import active_profile, load_weights
+        requested = str(updates.get("profile") or "moderate")
+        try:
+            updates.update(active_profile(load_weights(updates.get("weights_path")), requested))
+        except (OSError, ValueError) as exc:
+            LOG.error("Weights profile not loaded (%s); using settings defaults", type(exc).__name__)
+            updates["profile"] = "moderate"
     return replace(base, **updates)
 
 
@@ -298,9 +330,11 @@ def main():
              'configured' if os.getenv('DISCORD_LOTTO_SECONDARY_WEBHOOK') else 'internal',
              ','.join(sorted(engine.quality.disabled_rules)) or 'none')
     handoff_fallback_status(stock_first.enabled, os.getenv("LOTTO_STOCK_FIRST_MODE"))
+    profile_status(engine.settings)
     fallback_rule_status(engine.settings)
     strong_score_status(engine.settings)
     freshness_status(engine.settings)
+    weights_file_status(engine.settings)
     atr_window_status(engine.settings)
     from .model_v import scan_budget
     LOG.info("Model %s score_mode=%s preset=%s standby_names=%s standby=%s",

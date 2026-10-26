@@ -8,6 +8,26 @@
   "note": "bolt = score>=20 AND >=10 positive-point features firing"
  },
  "bypass_threshold": 40,
+ "profiles": {
+  "loose": {
+   "post_threshold": 45,
+   "bypass_threshold": 40,
+   "min_positive_features": 0,
+   "bolt_min_positive_features": 10
+  },
+  "moderate": {
+   "post_threshold": 60,
+   "bypass_threshold": 40,
+   "min_positive_features": 0,
+   "bolt_min_positive_features": 10
+  },
+  "conservative": {
+   "post_threshold": 60,
+   "bypass_threshold": 40,
+   "min_positive_features": 10,
+   "bolt_min_positive_features": 10
+  }
+ },
  "blockers": {
   "spread_max": 0.15,
   "opt_vol5_min": 50,
@@ -264,7 +284,8 @@
   "open_reclaim": "fit coef minus 15",
   "spy10": "capped at 15",
   "fit": "joint L2 logistic C=0.1, penalties x0.25, fit<2026-07-20 test>=2026-07-20",
-  "v4c": "adds Nia EMA terms as stacked interactions only; ~400 combinations tested by Nia -> shadow-check sized; default cutoff 60"
+  "v4c": "adds Nia EMA terms as stacked interactions only; ~400 combinations tested by Nia -> shadow-check sized; default profile moderate posts at 60",
+  "profiles": "LOTTO_PROFILE selects loose, moderate, or conservative. post_threshold is not capped. A card also needs min_positive_features positive-point rows. No daily cap, top-N, or cooldown."
  },
  "definitions": {
   "flow85": "option vol5 (m-4..m) >=85",

@@ -93,9 +93,13 @@ class Settings:
     fb_min_minutes: int = 0
     fb_max_spread_pct: float = 15
     weights_path: str = WEIGHTS_PATH
-    # POST_THRESHOLD. One-line change to 45 lowers the post line.
+    # LOTTO_PROFILE names a block in the weights book. Defaults match moderate.
+    profile: str = "moderate"
+    # Additive post line from the active profile. Not capped.
     post_threshold: float = 60
     bypass_threshold: float = 40
+    # A card posts only when at least this many features contribute points.
+    min_positive_features: int = 0
     # ⚡ when the card scores at least bolt_min_score AND at least this many
     # features contribute positive points.
     bolt_min_score: float = 20
@@ -323,7 +327,8 @@ class Settings:
         if self.blocker_spread <= 0 or self.blocker_spread_override_points < 0:
             raise ValueError("Invalid blocker setting")
         if (self.post_threshold < 0 or self.bypass_threshold < 0
-                or self.strong_feature_min < 0 or self.bolt_min_score < 0):
+                or self.strong_feature_min < 0 or self.bolt_min_score < 0
+                or self.min_positive_features < 0):
             raise ValueError("Invalid post or bypass threshold")
         if self.blocker_bid < 0 or self.blocker_option_volume_5m < 0:
             raise ValueError("Invalid bid or option-volume blocker")

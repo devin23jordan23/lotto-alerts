@@ -14,14 +14,23 @@ On the bypass path the gate count includes primary positives. The bypass
 score does not.
 """
 import json
+import logging
 from functools import lru_cache
 from math import isfinite
 from pathlib import Path
 
 from .config import WEIGHTS_PATH
 
+LOG = logging.getLogger(__name__)
+
 # Nia STOCK_NCONF. Counted even when the book assigns the name no points.
 CONF_FEATURES = ("level_break", "rvol15", "spy_with", "flow200")
+# Research counted these as on/off at 0.5. A 0.2 match is not a partial positive.
+BINARY_AT_HALF = {
+    "e1_ema9_2m_pullin_x_rvol15",
+    "e1_ema9_2m_pullin_pre10",
+    "e2_ema9_5m_pullin",
+}
 
 
 def clamp01(value) -> float:
@@ -40,6 +49,53 @@ def load_weights(path: str | None = None) -> dict:
     if not isinstance(book, dict):
         raise ValueError("weights file must be an object")
     return book
+
+
+def _number(value, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not isfinite(number):
+        return float(default)
+    return number
+
+
+def _whole(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def active_profile(book: dict | None = None, name: str | None = None) -> dict:
+    """The profile LOTTO_PROFILE selected.
+
+    post_threshold is used as written. A value above 60 stays. An unknown
+    name falls back to moderate.
+    """
+    if book is None:
+        book = load_weights()
+    profiles = book.get("profiles") if isinstance(book, dict) else None
+    if not isinstance(profiles, dict):
+        profiles = {}
+    requested = str(name or "moderate").strip().lower() or "moderate"
+    if requested not in profiles:
+        if requested != "moderate":
+            LOG.error("Unknown LOTTO_PROFILE %s; using moderate", requested)
+        requested = "moderate"
+    raw = profiles.get(requested)
+    if not isinstance(raw, dict):
+        raw = {}
+    chosen = {
+        "profile": requested,
+        "post_threshold": _number(raw.get("post_threshold"), 60),
+        "bypass_threshold": _number(raw.get("bypass_threshold"), 40),
+        "min_positive_features": max(0, _whole(raw.get("min_positive_features"), 0)),
+    }
+    if "bolt_min_positive_features" in raw:
+        chosen["strong_feature_min"] = max(0, _whole(raw.get("bolt_min_positive_features"), 10))
+    return chosen
 
 
 def _side_weight(spec, side: str) -> float:
@@ -81,6 +137,8 @@ def _contributions(table: dict, features: dict, side: str) -> dict:
         if not isinstance(spec, dict):
             continue
         value = clamp01((features or {}).get(name) or 0)
+        if name in BINARY_AT_HALF:
+            value = 1.0 if value >= 0.5 else 0.0
         raw = _side_weight(spec, side) * value
         other = _field_count(spec, "requires_min_other_positive")
         conf = _field_count(spec, "requires_min_conf")

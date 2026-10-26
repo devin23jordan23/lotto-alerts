@@ -10,16 +10,18 @@ from unittest.mock import patch
 from lotto.config import CONFLUENCE_TABLE, HANDOFF_SPEC_PATH, Settings, model_v_settings
 from lotto.demo import demo_frames
 from lotto.discord import deliver_stock_pending
-from lotto.engine import Engine
-from lotto.confluence import (DRC_EMA21_2M, DRP_510, SHADOW_EMA_FEATURES, band_score, card_gate,
-                              detect_drc_ema21_2m, detect_drp_510, detect_ema9_2m_before_10,
-                              detect_ema_pullback, detect_fashionably_late, detect_flag, detect_m, detect_w,
-                              nia_dip_reclaim, pattern_match, primary_strength_marker, tiered_points)
-from lotto.weights import load_weights, score_path
+from lotto.engine import Engine, dedupe_ready_cards
+from lotto.confluence import (DRC_EMA21_2M, DRP_510, SHADOW_EMA_FEATURES, additive_features, band_score,
+                              card_gate, detect_ace_drive, detect_drc_ema21_2m, detect_drp_510,
+                              detect_ema9_2m_before_10, detect_ema_pullback, detect_fashionably_late, detect_flag,
+                              detect_flushpop, detect_m, detect_open_reclaim, detect_pmx_reclaim, detect_spike_rev,
+                              detect_spy10, detect_vwap_slap, detect_w, nia_dip_reclaim, pattern_match,
+                              primary_strength_marker, tiered_points)
+from lotto.weights import active_profile, load_weights, score_path
 from lotto.features import Candidate
 from lotto.discord import alert_payload
 from lotto.main import (env_settings, fallback_rule_status, freshness_status, handoff_fallback_status,
-                         standby_symbols, strong_score_status)
+                         profile_status, standby_symbols, strong_score_status, weights_file_status)
 from lotto.model_v import (apply_v2, atr21_value, build_handoff_features, cap_stock, stock_terms,
                            choose_fallback_contract, classify_runner, due_standby,
                            evaluate_fallback, exceptional_stock, fallback_push, fallback_rvol_value,
@@ -32,7 +34,7 @@ from lotto.models import Bar, ET, Option, Snapshot
 from lotto.patterns import Setup
 from lotto.quality import evaluate
 from lotto.replay_v import replay
-from lotto.stock_first import StockFirst, StockIdea
+from lotto.stock_first import StockFirst, StockIdea, stock_payload
 from lotto.store import Store
 
 
@@ -53,7 +55,8 @@ class ModelVTests(unittest.TestCase):
             for name in ("LOTTO_MODEL", "LOTTO_MIN_SCORE", "LOTTO_SCORE_MODE", "LOTTO_PRESET",
                          "LOTTO_STANDBY_NAMES", "LOTTO_HANDOFF_MODEL_PATH",
                          "LOTTO_STRENGTH_DISTRIBUTION_PATH", "LOTTO_ATR_DAYS",
-                         "LOTTO_FALLBACK_RULE", "LOTTO_STRONG_SCORE", "LOTTO_FB_PUSH_ATR_MIN"):
+                         "LOTTO_FALLBACK_RULE", "LOTTO_STRONG_SCORE", "LOTTO_FB_PUSH_ATR_MIN",
+                         "LOTTO_PROFILE", "LOTTO_POST_THRESHOLD", "LOTTO_MIN_POSITIVE_FEATURES"):
                 os.environ.pop(name, None)
             live = env_settings()
         self.assertEqual(live.model, "V")
@@ -63,7 +66,10 @@ class ModelVTests(unittest.TestCase):
         self.assertEqual((live.fb_rvol_min, live.fb_push_atr_min, live.fb_room_atr_max, live.fb_max_spread_pct),
                          (0, 0.75, 1.0, 15))
         self.assertEqual(live.post_threshold, 60)
+        self.assertEqual(live.profile, "moderate")
+        self.assertEqual(live.min_positive_features, 0)
         self.assertEqual(model_v_settings(post_threshold=45).post_threshold, 45)
+        self.assertEqual(model_v_settings(post_threshold=75).post_threshold, 75)
         self.assertEqual(live.bypass_threshold, 40)
         self.assertEqual(live.strong_feature_min, 10)
         self.assertEqual(live.bolt_min_score, 20)
@@ -235,6 +241,7 @@ class ModelVTests(unittest.TestCase):
         for symbol in ("AAA", "BBB"):
             snap = replace(base, symbol=symbol, options=tuple(replace(o, symbol=symbol + o.symbol) for o in base.options))
             frames.append(snap)
+            _seed_history(engine, snap)
         with patch("lotto.engine.candidates", side_effect=fake):
             alerts = engine.process(frames)
         self.assertEqual(len(alerts), 2)
@@ -275,6 +282,7 @@ class ModelVTests(unittest.TestCase):
 
         first_snap = replace(base, options=(option,))
         second_snap = advance(first_snap, 2)
+        _seed_history(engine, first_snap)
         with patch("lotto.engine.candidates", side_effect=lambda snap, history, cfg: fake(snap, history, cfg, 100)):
             first = engine.process([first_snap])
             second = engine.process([second_snap])
@@ -307,7 +315,8 @@ class ModelVTests(unittest.TestCase):
         self.assertEqual(none, [])
         self.assertEqual(store.db.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 0)
         reasons = [row["reason"] for row in store.db.execute("SELECT reason FROM decisions")]
-        self.assertTrue(any("below bar" in reason or "no v2 tier" in reason for reason in reasons), reasons)
+        self.assertTrue(any(
+            "below bar" in reason or "no v2 tier" in reason or "card gate" in reason for reason in reasons), reasons)
         # The handoff was scored or explicitly logged. Either way nothing posted.
         logged = store.db.execute("SELECT COUNT(*) FROM candidate_evaluations").fetchone()[0]
         decisions = store.db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
@@ -317,6 +326,7 @@ class ModelVTests(unittest.TestCase):
                                                           fallback_rule="off"), dry_run=False)
         self.addCleanup(loud.store.db.close)
         loud.remember_stock_events([idea])
+        _seed_history(loud, base)
         with patch("lotto.engine.candidates", return_value=[]):
             posted = loud.process([base])
         self.assertEqual(len(posted), 1)
@@ -424,6 +434,7 @@ class ModelVTests(unittest.TestCase):
                                 fallback_rule="off")
         engine = Engine(store, rare, dry_run=False)
         engine.remember_stock_events([idea])
+        _seed_history(engine, base)
         with patch("lotto.engine.candidates", return_value=[]):
             posted = engine.process([base])
         self.assertEqual(len(posted), 1)
@@ -577,6 +588,7 @@ class ModelVTests(unittest.TestCase):
         ), dry_run=False)
         self.addCleanup(engine.store.db.close)
         engine.remember_stock_events(ideas)
+        _seed_history(engine, snap)
         with patch("lotto.engine.candidates", return_value=[]):
             posted = engine.process([snap])
         self.assertEqual(len(posted), 1)
@@ -592,6 +604,31 @@ class ModelVTests(unittest.TestCase):
         posted_log = "\n".join(on.output)
         self.assertIn("Handoff fallback state: posting", posted_log)
         self.assertIn("Stock-only cards never post", posted_log)
+
+
+def _volume_history(snap, prior_volume=0, minutes=6):
+    """One print far enough back that 5-minute option volume is a real delta."""
+    prior_at = snap.at - timedelta(minutes=minutes)
+    options = tuple(replace(option, volume=prior_volume, quote_time=prior_at) for option in snap.options)
+    return [replace(snap, at=prior_at, spot_time=prior_at, options=options)]
+
+
+def _seed_history(engine, snap, prior_volume=0):
+    engine.history[(snap.day, snap.symbol)] = _volume_history(snap, prior_volume)
+
+
+def _clocked_volume(snap, base=200, per_minute=40):
+    """Session volume that rises every minute, so a five-minute delta stays real."""
+    opened = datetime(2026, 10, 26, 9, 31, tzinfo=ET)
+    minutes = max(0, int((snap.at - opened).total_seconds() // 60))
+    volume = base + minutes * per_minute
+    options = tuple(replace(option, volume=volume) for option in snap.options)
+    clocked = replace(snap, options=options)
+    for name in ("prior_atr21", "prior_full_days", "rvol_base",
+                 "fallback_rvol_sessions", "fallback_rvol_base"):
+        if hasattr(snap, name):
+            object.__setattr__(clocked, name, getattr(snap, name))
+    return clocked
 
 
 def _liquid(snap):
@@ -693,6 +730,11 @@ class FallbackRuleTests(unittest.TestCase):
                                    q_false_since=False, candidate=True, side="CALL"))
 
         settings = model_v_settings(fallback_rule="log")
+        from lotto.model_v import evaluate_fallback as real_eval
+
+        def evaluate_fallback(snap, side, settings, state, option_skip=None):
+            return real_eval(snap, side, settings, state, option_skip, history=_volume_history(snap))
+
         # A 3-bar push with a level break clears the bypass line. One bar does not.
         opened = evaluate_fallback(
             _fallback_snap(_session([100, 101, 102], volume=600)), "CALL", settings, new_fallback_state())
@@ -760,8 +802,9 @@ class FallbackRuleTests(unittest.TestCase):
         wide = _contract(at, 101, bid=0.1, ask=2)
         tight = _contract(at, 102, bid=1.0, ask=1.1)
         snap = Snapshot("DEMO", at, 100, at, 100, (), (wide, tight), source="replay")
-        chosen = choose_fallback_contract(snap, "CALL")
+        chosen = choose_fallback_contract(snap, "CALL", history=_volume_history(snap))
         self.assertEqual(chosen["strike"], 102)
+        self.assertIsNone(choose_fallback_contract(snap, "CALL")["option"])
         self.assertEqual(quote_spread_fail(wide.bid, wide.ask, 30)[0], 1)
         no_ask = _contract(at, 105, bid=0, ask=0)
         later = _contract(at, 106, bid=1, ask=1.1, dte=1)
@@ -788,10 +831,15 @@ class FallbackRuleTests(unittest.TestCase):
         closes = [100] * 14 + [101, 102, 102, 102]
         frames = [closes[:index] for index in (16, 17, 18)]
         with self.assertLogs("lotto.main", level="WARNING") as caught:
+            self.assertEqual(profile_status(model_v_settings()), "moderate")
             self.assertEqual(fallback_rule_status(model_v_settings()), "post")
             strong_score_status(model_v_settings())
             freshness_status(model_v_settings())
+            weights_file_status(model_v_settings())
         logged = "\n".join(caught.output)
+        self.assertIn(
+            "Profile: moderate post>=60 bypass>=40 min_positive_features>=0 bolt_features>=10",
+            logged)
         self.assertIn(
             "Fallback rule: post post>=60 bypass>=40 atr=21 contract=roll spread<=15% bid>0.05 opt_vol>=50",
             logged)
@@ -799,12 +847,14 @@ class FallbackRuleTests(unittest.TestCase):
         self.assertIn(
             "Freshness: quote_age_s bar_age_s min_since_trigger logged; stale quote >5s is a flag and -4, not a gate",
             logged)
+        self.assertIn("Weights file: vince_additive_weights_v4c.json", logged)
 
         def run(mode, directory):
             store = Store(":memory:")
             self.addCleanup(store.db.close)
             engine = Engine(store, model_v_settings(fallback_rule=mode))
             engine.fallback_log = Path(directory) / "fallback-rule.jsonl"
+            _seed_history(engine, _fallback_snap(_session(frames[0])))
             def candidates(snap, history, settings):
                 option = snap.options[0]
                 return [Candidate(snap, option, 80, {}, {"cluster_size": 2}, ["option side"], True)]
@@ -868,10 +918,16 @@ class FallbackRuleTests(unittest.TestCase):
                 prime(store)
             engine = Engine(store, model_v_settings(fallback_rule=mode))
             engine.fallback_log = Path(directory) / "fallback-rule.jsonl"
+
+            def snap_for(closes):
+                return _clocked_volume(_fallback_snap(_session(closes)))
+
+            if closes_list:
+                _seed_history(engine, snap_for(closes_list[0]))
             posted = []
             with patch("lotto.engine.candidates", return_value=[]):
                 for closes in closes_list:
-                    posted.extend(engine.process([_fallback_snap(_session(closes))]))
+                    posted.extend(engine.process([snap_for(closes)]))
             text = engine.fallback_log.read_text().strip().splitlines() if engine.fallback_log.exists() else []
             return posted, [json.loads(line) for line in text if line]
 
@@ -941,6 +997,7 @@ class FallbackRuleTests(unittest.TestCase):
             self.addCleanup(store.db.close)
             engine = Engine(store, model_v_settings(fallback_rule="log"))
             engine.fallback_log = Path(directory) / "fallback-rule.jsonl"
+            _seed_history(engine, _fallback_snap(_session(frames[0])))
             posted = []
             with patch("lotto.engine.candidates", candidates), patch("lotto.model_v.apply_v2", fake_apply):
                 for prefix in frames:
@@ -1022,7 +1079,25 @@ class ConfluenceGateTests(unittest.TestCase):
         self.assertEqual(score_path(four, "PUT", book, "bypass")[0]["e2_ema9_5m_pullin"], 0)
         half = dict(four)
         half["e2_ema9_5m_pullin"] = 0.5
-        self.assertAlmostEqual(score_path(half, "CALL", book, "bypass")[0]["e2_ema9_5m_pullin"], 4.5)
+        self.assertEqual(score_path(half, "CALL", book, "bypass")[0]["e2_ema9_5m_pullin"], 9)
+        partial = dict(four)
+        partial["e2_ema9_5m_pullin"] = 0.49
+        self.assertEqual(score_path(partial, "CALL", book, "bypass")[0]["e2_ema9_5m_pullin"], 0)
+        self.assertEqual(score_path({"e1_ema9_2m_pullin_x_rvol15": 0.5}, "CALL", book, "primary")[0][
+            "e1_ema9_2m_pullin_x_rvol15"], 6)
+        self.assertEqual(score_path({"e1_ema9_2m_pullin_x_rvol15": 0.2}, "CALL", book, "primary")[0][
+            "e1_ema9_2m_pullin_x_rvol15"], 0)
+        weak_e1 = {
+            "e2_ema9_5m_pullin": 1,
+            "room_used_le_1atr": 1,
+            "push30_ge_0.75atr": 1,
+            "w_bottom_ace": 1,
+            "e1_ema9_2m_pullin_x_rvol15": 0.2,
+        }
+        self.assertEqual(score_path(weak_e1, "CALL", book, "bypass")[0]["e2_ema9_5m_pullin"], 0)
+        counted = dict(weak_e1)
+        counted["e1_ema9_2m_pullin_x_rvol15"] = 0.5
+        self.assertEqual(score_path(counted, "CALL", book, "bypass")[0]["e2_ema9_5m_pullin"], 9)
         primary = score_path(four, "CALL", book, "primary")[0]
         self.assertEqual(primary.get("e2_ema9_5m_pullin", 0), 0)
         for name in SHADOW_EMA_FEATURES:
@@ -1116,8 +1191,10 @@ class ConfluenceGateTests(unittest.TestCase):
         self.addCleanup(store.db.close)
         engine = Engine(store, model_v_settings(fallback_rule="post"))
         engine.fallback_log = Path(tempfile.mkdtemp()) / "fallback-rule.jsonl"
+        strong_snap = _fallback_snap(_session(strong))
+        _seed_history(engine, strong_snap)
         with patch("lotto.engine.candidates", return_value=[]):
-            posted = engine.process([_fallback_snap(_session(strong))])
+            posted = engine.process([strong_snap])
         self.assertEqual(len(posted), 1)
         description = posted[0]["payload"]["embeds"][0]["description"]
         self.assertIn("stock bypass", description)
@@ -1145,8 +1222,10 @@ class ConfluenceGateTests(unittest.TestCase):
         put_engine = Engine(puts, model_v_settings(fallback_rule="post"))
         put_engine.fallback_log = Path(tempfile.mkdtemp()) / "fallback-rule.jsonl"
         put_bars = _session([100] * 14 + [99, 98], high_pad=0.2, low_pad=1)
+        put_snap = _fallback_snap(put_bars, side="PUT")
+        _seed_history(put_engine, put_snap)
         with patch("lotto.engine.candidates", return_value=[]):
-            posted = put_engine.process([_fallback_snap(put_bars, side="PUT")])
+            posted = put_engine.process([put_snap])
         self.assertEqual(len(posted), 1)
         row = puts.db.execute("SELECT side, contract FROM alerts").fetchone()
         self.assertEqual(row["side"], "PUT")
@@ -1393,6 +1472,335 @@ def _grind_ohlc():
         rows.append((price, nxt + 0.70, price - 0.70, nxt))
         price = nxt
     return rows
+
+
+def _ohlc(start, rows, volume=20000):
+    bars = []
+    for index, (open_, high, low, close) in enumerate(rows):
+        end = start + timedelta(minutes=index + 1)
+        bars.append(Bar(end, open_, high, low, close, volume, None))
+    return tuple(bars)
+
+
+class ReviewFixTests(unittest.TestCase):
+    """Vince's re-review of 8faaa6e. Each blocking item has a failing case."""
+
+    def _component(self, name, value, side):
+        book = load_weights()
+        key = "call" if side == "CALL" else "put"
+        points = score_path({name: value}, side, book, "primary")[0]
+        weight = book["weights"][name][key]
+        self.assertEqual(value, 1.0)
+        self.assertGreater(weight, 0)
+        self.assertEqual(points[name], weight)
+        return weight
+
+    def _wired(self, name, bars, side="CALL", spy_bars=None, metrics=None, premarket_high=None,
+               premarket_low=None):
+        at = bars[-1].end
+        option = _contract(at, bars[-1].close, side, bid=1.0, ask=1.05)
+        snap = Snapshot(
+            "DEMO", at, bars[-1].close, at, bars[0].open, bars, (option,),
+            prior_atr=2.0, source="replay",
+            premarket_high=premarket_high, premarket_low=premarket_low,
+        )
+        features = additive_features(snap, option, model_v_settings(), metrics or {}, spy_bars=spy_bars)
+        self.assertEqual(features[name], 1.0)
+        self._component(name, features[name], side)
+
+    def test_ace_setups_and_spy10_score_their_weights_when_they_fire(self):
+        start = datetime(2026, 10, 26, 9, 30, tzinfo=ET)
+        atr = 2.0
+        drive = _bars(start, 10, lambda minute: 100 + minute * 0.4, high_pad=0.1, low_pad=0.1)
+        self.assertEqual(detect_ace_drive(drive, 1, atr), 1.0)
+        self.assertEqual(detect_ace_drive(drive, -1, atr), 0.0)
+        crash_end = drive[-1].end + timedelta(minutes=1)
+        crash = Bar(crash_end, drive[-1].close, drive[-1].close + 0.1,
+                    drive[-1].close - 4.2, drive[-1].close - 4, 20000, None)
+        extended = tuple(drive) + (crash,)
+        self.assertEqual(detect_ace_drive(extended, 1, atr, trigger_end=drive[-1].end), 1.0)
+        self.assertEqual(detect_ace_drive(extended, 1, atr), 0.0)
+        self._wired("a_drive", drive, "CALL")
+        put_points = score_path({"a_drive": detect_ace_drive(drive, -1, atr)}, "PUT", load_weights())[0]
+        self.assertEqual(put_points["a_drive"], 0)
+
+        reclaim = _ohlc(start, [
+            (100.0, 100.2, 99.5, 99.7),
+            (99.7, 100.6, 99.6, 100.3),
+        ])
+        self.assertEqual(detect_open_reclaim(reclaim, 1, atr), 1.0)
+        self.assertEqual(detect_open_reclaim(reclaim, -1, atr), 0.0)
+        self.assertEqual(detect_open_reclaim(reclaim, 1, atr, trigger_end=reclaim[0].end), 0.0)
+        self._wired("a_open_reclaim", reclaim, "CALL")
+        put_reclaim = _ohlc(start, [
+            (100.0, 100.6, 99.7, 100.4),
+            (100.4, 100.5, 99.2, 99.4),
+        ])
+        self.assertEqual(detect_open_reclaim(put_reclaim, -1, atr), 1.0)
+        self._wired("a_open_reclaim", put_reclaim, "PUT")
+
+        pmx = _ohlc(start, [
+            (101.2, 101.4, 100.8, 101.0),
+            (101.0, 103.2, 100.9, 103.0),
+        ])
+        self.assertEqual(detect_pmx_reclaim(pmx, 1, 102.0), 1.0)
+        self.assertEqual(detect_pmx_reclaim(pmx, -1, 102.0), 0.0)
+        self.assertEqual(detect_pmx_reclaim(pmx, 1, 102.0, trigger_end=pmx[0].end), 0.0)
+        self._wired("a_pmx_reclaim", pmx, "CALL", premarket_high=102.0)
+        put_pmx = _ohlc(start, [
+            (102.4, 102.8, 102.1, 102.5),
+            (102.5, 102.6, 100.8, 101.0),
+        ])
+        self.assertEqual(detect_pmx_reclaim(put_pmx, -1, 102.0), 1.0)
+        self._wired("a_pmx_reclaim", put_pmx, "PUT", premarket_low=102.0)
+
+        flush = _ohlc(start, [
+            (100.0, 100.2, 99.9, 100.0),
+            (100.0, 100.1, 99.0, 99.2),
+            (99.2, 100.8, 99.1, 100.5),
+        ])
+        self.assertEqual(detect_flushpop(flush, 1, atr), 1.0)
+        self.assertEqual(detect_flushpop(flush, -1, atr), 0.0)
+        undone = flush + (Bar(flush[-1].end + timedelta(minutes=1), 100.5, 100.6, 98.8, 99.0, 20000, None),)
+        self.assertEqual(detect_flushpop(undone, 1, atr, trigger_end=flush[-1].end), 1.0)
+        self.assertEqual(detect_flushpop(undone, 1, atr), 0.0)
+        self._wired("a_flushpop", flush, "CALL")
+
+        slap = _ohlc(start, [
+            (100.4, 100.7, 100.3, 100.5),
+            (100.5, 100.8, 99.9, 100.6),
+        ])
+        self.assertEqual(detect_vwap_slap(slap, 1, atr, vwap=100.0), 1.0)
+        self.assertEqual(detect_vwap_slap(slap, -1, atr, vwap=100.0), 0.0)
+        self.assertEqual(detect_vwap_slap(slap, 1, atr, vwap=100.0, trigger_end=slap[0].end), 0.0)
+        self._wired("a_vwap_slap", slap, "CALL", metrics={"vwap": 100.0})
+
+        spike = _ohlc(start, [
+            (100.2, 100.4, 100.0, 100.2),
+            (100.0, 100.2, 98.5, 99.0),
+            (99.0, 100.8, 98.9, 100.5),
+        ])
+        self.assertEqual(detect_spike_rev(spike, 1, atr), 1.0)
+        self.assertEqual(detect_spike_rev(spike, -1, atr), 0.0)
+        self.assertEqual(detect_spike_rev(spike, 1, atr, trigger_end=spike[1].end), 0.0)
+        self._wired("a_spike_rev", spike, "CALL")
+
+        def morning(minute):
+            return 100 + minute * 0.15 if minute <= 30 else 104.5
+
+        spy = _bars(start, 35, morning, high_pad=0.05, low_pad=0.05)
+        self.assertEqual(detect_spy10(spy, 1, atr), 1.0)
+        self.assertEqual(detect_spy10(spy, -1, atr), 0.0)
+        self.assertEqual(detect_spy10(spy, 1, atr, trigger_end=spy[20].end), 0.0)
+        dumped = spy + (Bar(spy[-1].end + timedelta(minutes=1), 104.5, 104.6, 100.0, 100.2, 20000, None),)
+        self.assertEqual(detect_spy10(dumped, 1, atr, trigger_end=spy[-1].end), 1.0)
+        self.assertEqual(detect_spy10(dumped, 1, atr), 0.0)
+        self._wired("spy10", spy, "CALL", spy_bars=spy)
+
+        def falling(minute):
+            return 110 - minute * 0.15 if minute <= 30 else 105.5
+
+        put_spy = _bars(start, 35, falling, high_pad=0.05, low_pad=0.05)
+        self.assertEqual(detect_spy10(put_spy, -1, atr), 1.0)
+        self.assertEqual(detect_spy10(put_spy, 1, atr), 0.0)
+        self._wired("spy10", put_spy, "PUT", spy_bars=put_spy)
+
+    def test_no_five_minute_volume_blocks_the_card_and_the_roll(self):
+        start = datetime(2026, 10, 26, 10, 30, tzinfo=ET)
+        bars = _bars(start, 6, lambda _minute: 100.0, high_pad=0.05, low_pad=0.05, volume=5000)
+        at = bars[-1].end
+        option = replace(_contract(at, 100, "CALL", bid=1.0, ask=1.05, dte=0), volume=250, quote_time=at)
+        snap = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (option,), prior_atr=50, source="replay")
+        scored = apply_v2(Candidate(snap, option, 30, {}, {}, [], False), model_v_settings(), [])
+        self.assertFalse(scored.qualifying)
+        self.assertIn("option_volume", scored.metrics["gate_blocked_by"])
+        self.assertGreaterEqual(option.volume, 200)
+        self.assertIsNone(choose_fallback_contract(snap, "CALL")["option"])
+
+        settings = model_v_settings(fallback_rule="log")
+        tape = _fallback_snap(_session([100, 101, 102], volume=600))
+        self.assertIsNone(evaluate_fallback(tape, "CALL", settings, new_fallback_state()))
+        fired = evaluate_fallback(
+            tape, "CALL", settings, new_fallback_state(), history=_volume_history(tape))
+        self.assertEqual(fired["gate_post"], 1)
+
+        tight = _contract(at, 102, bid=1.0, ask=1.05)
+        roll = Snapshot("DEMO", at, 100, at, 100, (), (tight,), source="replay")
+        self.assertIsNone(choose_fallback_contract(
+            roll, "CALL", history=_volume_history(roll, prior_volume=151))["option"])
+        self.assertEqual(choose_fallback_contract(
+            roll, "CALL", history=_volume_history(roll, prior_volume=150))["strike"], 102)
+
+    def test_one_dte_posts_at_the_additive_line_below_the_s12_bar(self):
+        start = datetime(2026, 10, 26, 10, 30, tzinfo=ET)
+        bars = _bars(start, 6, lambda _minute: 100.0, high_pad=0.05, low_pad=0.05, volume=5000)
+        at = bars[-1].end
+        option = replace(_contract(at, 100, "CALL", bid=1.0, ask=1.05, dte=1), volume=250, quote_time=at)
+        snap = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (option,), prior_atr=50, source="replay")
+        scored = apply_v2(
+            Candidate(snap, option, 30, {}, {}, [], False),
+            model_v_settings(), _volume_history(snap, prior_volume=0))
+        self.assertTrue(scored.qualifying)
+        self.assertGreaterEqual(scored.metrics["card_score"], 60)
+        self.assertLess(scored.metrics["option_v2"], 61)
+        self.assertEqual(scored.metrics["s12_qualifying"], 0)
+        self.assertEqual(scored.metrics["gate_blocked_by"], [])
+
+    def _quiet_call(self, dte=0):
+        start = datetime(2026, 10, 26, 10, 30, tzinfo=ET)
+        bars = _bars(start, 6, lambda _minute: 100.0, high_pad=0.05, low_pad=0.05, volume=5000)
+        at = bars[-1].end
+        option = replace(_contract(at, 100, "CALL", bid=1.0, ask=1.05, dte=dte), volume=250, quote_time=at)
+        snap = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (option,), prior_atr=50, source="replay")
+        return snap, option
+
+    def test_profile_selection_and_an_uncapped_post_line(self):
+        book = load_weights()
+        self.assertEqual(set(book["profiles"]), {"loose", "moderate", "conservative"})
+        self.assertEqual(active_profile(book, "loose")["post_threshold"], 45)
+        self.assertEqual(active_profile(book, "moderate")["min_positive_features"], 0)
+        conservative = active_profile(book, "conservative")
+        self.assertEqual(conservative["post_threshold"], 60)
+        self.assertEqual(conservative["min_positive_features"], 10)
+        saved = {key: os.environ.pop(key) for key in list(os.environ) if key.startswith("LOTTO_")}
+        try:
+            moderate = env_settings()
+            self.assertEqual(moderate.profile, "moderate")
+            self.assertEqual((moderate.post_threshold, moderate.bypass_threshold, moderate.min_positive_features),
+                             (60, 40, 0))
+            os.environ["LOTTO_PROFILE"] = "loose"
+            loose = env_settings()
+            self.assertEqual(loose.profile, "loose")
+            self.assertEqual((loose.post_threshold, loose.bypass_threshold, loose.min_positive_features),
+                             (45, 40, 0))
+            os.environ["LOTTO_PROFILE"] = "conservative"
+            strict = env_settings()
+            self.assertEqual(strict.profile, "conservative")
+            self.assertEqual(strict.min_positive_features, 10)
+            self.assertEqual(strict.strong_feature_min, 10)
+        finally:
+            os.environ.update(saved)
+
+        high = active_profile({
+            "profiles": {
+                "moderate": {
+                    "post_threshold": 75,
+                    "bypass_threshold": 40,
+                    "min_positive_features": 0,
+                    "bolt_min_positive_features": 10,
+                },
+            },
+        }, "moderate")
+        self.assertEqual(high["post_threshold"], 75)
+        settings = model_v_settings(
+            profile="moderate", post_threshold=75, bypass_threshold=40,
+            min_positive_features=0, strong_feature_min=10,
+        )
+        with self.assertLogs("lotto.main", level="WARNING") as logs:
+            self.assertEqual(profile_status(settings), "moderate")
+        self.assertIn(
+            "Profile: moderate post>=75 bypass>=40 min_positive_features>=0 bolt_features>=10",
+            "\n".join(logs.output),
+        )
+        snap, option = self._quiet_call()
+        above = apply_v2(
+            Candidate(snap, option, 30, {}, {}, [], False),
+            model_v_settings(post_threshold=200), _volume_history(snap))
+        self.assertGreater(above.metrics["card_score"], 60)
+        self.assertLess(above.metrics["card_score"], 200)
+        self.assertFalse(above.qualifying)
+        self.assertEqual(above.metrics["s12_qualifying"], 0)
+
+    def test_min_positive_features_blocks_a_high_score_with_too_few_rows(self):
+        snap, option = self._quiet_call()
+        blocked = apply_v2(
+            Candidate(snap, option, 30, {}, {}, [], False),
+            model_v_settings(min_positive_features=10), _volume_history(snap))
+        self.assertGreaterEqual(blocked.metrics["card_score"], 60)
+        self.assertLess(blocked.metrics["positive_features"], 10)
+        self.assertGreater(blocked.metrics["positive_features"], 0)
+        self.assertEqual(blocked.metrics["positive_features_met"], 0)
+        self.assertFalse(blocked.qualifying)
+        self.assertEqual(blocked.metrics["s12_qualifying"], 0)
+
+    def test_card_layer_exception_and_a_missing_weights_file_do_not_post(self):
+        start = datetime(2026, 10, 26, 10, 30, tzinfo=ET)
+        bars = _bars(start, 6, lambda _minute: 100.0, high_pad=0.05, low_pad=0.05, volume=5000)
+        at = bars[-1].end
+        option = replace(_contract(at, 100, "CALL", bid=1.0, ask=1.05), volume=250, quote_time=at)
+        snap = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (option,), prior_atr=50, source="replay")
+        candidate = Candidate(snap, option, 90, {}, {}, [], True)
+        with patch("lotto.confluence.apply_card_layers", side_effect=RuntimeError("boom")):
+            with self.assertLogs("lotto.model_v", level="ERROR") as logs:
+                scored = apply_v2(candidate, model_v_settings(), _volume_history(snap))
+        self.assertFalse(scored.qualifying)
+        self.assertEqual(scored.metrics["card_layers_failed"], "RuntimeError")
+        self.assertIn("card not posted", "\n".join(logs.output))
+
+        missing = model_v_settings(weights_path="/tmp/no-such-v4c-weights.json")
+        with self.assertLogs("lotto.model_v", level="ERROR") as logs:
+            scored = apply_v2(
+                Candidate(snap, option, 90, {}, {}, [], True), missing, _volume_history(snap))
+        text = "\n".join(logs.output)
+        self.assertFalse(scored.qualifying)
+        self.assertIn("WEIGHTS FILE MISSING", text)
+        self.assertIn("card not posted", text)
+        with self.assertLogs("lotto.main", level="ERROR") as startup:
+            self.assertFalse(weights_file_status(missing))
+        self.assertIn("WEIGHTS FILE MISSING", "\n".join(startup.output))
+        self.assertIn("No card will post until this file is present.", "\n".join(startup.output))
+
+    def test_duplicate_contracts_keep_the_higher_score_and_the_insert_is_safe(self):
+        at = datetime(2026, 10, 26, 10, 30, tzinfo=ET)
+        option = _contract(at, 100, bid=1.0, ask=1.05)
+        bars = _bars(at - timedelta(minutes=6), 4, lambda _minute: 100.0)
+        snap = Snapshot("DEMO", at, 100, at, 100, bars, (option,), source="replay")
+        low = Candidate(snap, option, 60, {}, {"card_score": 60}, [], True)
+        high = Candidate(snap, option, 70, {}, {"card_score": 90}, [], True)
+        other = Candidate(snap, replace(option, symbol="OTHER"), 40, {}, {"card_score": 40}, [], True)
+        kept = dedupe_ready_cards([low, high, other])
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(kept[0].metrics["card_score"], 90)
+        self.assertEqual(kept[1].option.symbol, "OTHER")
+        self.assertEqual(dedupe_ready_cards([high, low])[0].metrics["card_score"], 90)
+
+        store = Store(":memory:")
+        self.addCleanup(store.db.close)
+        payload = {"embeds": [{"title": "t", "description": "d"}]}
+        store.queue(low, payload, True, "ACTIVE")
+        store.queue(high, {"embeds": [{"title": "t", "description": "d"}]}, True, "ACTIVE")
+        self.assertEqual(store.db.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 1)
+
+    def test_bounce_does_not_copy_a_vwap_tag(self):
+        start = datetime(2026, 10, 26, 10, 0, tzinfo=ET)
+        bars = _ohlc(start, [
+            (100.1, 100.4, 100.0, 100.2),
+            (100.2, 100.4, 100.0, 100.2),
+            (100.2, 100.4, 100.0, 100.2),
+        ])
+        at = bars[-1].end
+        option = _contract(at, 100, bid=1.0, ask=1.05)
+        snap = Snapshot("DEMO", at, 100.2, at, bars[0].open, bars, (option,), prior_atr=2.0, source="replay")
+        settings = model_v_settings()
+        tagged = additive_features(
+            snap, option, settings, {"vwap": 100.0}, setup=Setup("CONTINUATION", 100, 99))
+        self.assertGreater(tagged["vwap_pb"], 0)
+        self.assertEqual(tagged["bounce"], 0.0)
+        points = score_path(tagged, "CALL", load_weights(), "primary")[0]
+        self.assertEqual(points["bounce"], 0)
+        self.assertGreater(points["vwap_pb"], 0)
+        reversal = additive_features(
+            snap, option, settings, {"vwap": 100.0}, setup=Setup("REVERSAL", 100, 99))
+        self.assertEqual(reversal["bounce"], 1.0)
+        self.assertEqual(score_path(reversal, "CALL", load_weights(), "primary")[0]["bounce"], 11)
+
+        idea = StockIdea(
+            "DEMO", "2026-10-26", at, "CALL", 100.0, 99.0, 98.0, "OPENING_DRIVE", "WATCH",
+            {"quote_age_seconds": 1, "move_from_open": 0.01, "recent_return": 0.02},
+        )
+        title = stock_payload(idea)["embeds"][0]["title"]
+        self.assertIn("STOCK-LED", title)
+        self.assertNotIn("⚡", title)
 
 
 if __name__ == "__main__":

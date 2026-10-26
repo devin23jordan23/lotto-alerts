@@ -869,6 +869,169 @@ def _on(value) -> float:
     return 1.0 if value else 0.0
 
 
+def _causal_bars(bars, trigger_end=None) -> list:
+    """Completed bars only, and nothing after the trigger minute."""
+    rows = [bar for bar in (bars or []) if getattr(bar, "end", None) is not None]
+    if trigger_end is not None:
+        rows = [bar for bar in rows if bar.end <= trigger_end]
+    return rows
+
+
+def _session_vwap(bars) -> float | None:
+    volume = 0.0
+    total = 0.0
+    for bar in bars:
+        if bar.volume <= 0:
+            continue
+        volume += bar.volume
+        total += (bar.high + bar.low + bar.close) / 3 * bar.volume
+    if volume <= 0:
+        return None
+    return total / volume
+
+
+def detect_ace_drive(bars, direction: int, atr: float | None, trigger_end=None) -> float:
+    """Opening drive. Calls grind up off the open; puts grind down. 0 or 1."""
+    rows = _causal_bars(bars, trigger_end)
+    if atr is None or atr <= 0 or direction not in (1, -1) or len(rows) < 8:
+        return 0.0
+    minute = _session_minute(rows[-1])
+    if minute is None or minute > 29:
+        return 0.0
+    net = direction * (rows[-1].close - rows[0].open)
+    if net < 0.35 * atr:
+        return 0.0
+    path = sum(abs(rows[i].close - rows[i - 1].close) for i in range(1, len(rows)))
+    if path <= 0 or net / path < 0.55:
+        return 0.0
+    held = sum(direction * (bar.close - rows[0].open) > 0 for bar in rows) / len(rows)
+    if held < 0.7:
+        return 0.0
+    if direction * (rows[-1].close - rows[-2].close) <= 0:
+        return 0.0
+    return 1.0
+
+
+def detect_open_reclaim(bars, direction: int, atr: float | None, trigger_end=None) -> float:
+    """Price loses the session open, then the latest close takes it back."""
+    rows = _causal_bars(bars, trigger_end)
+    if atr is None or atr <= 0 or direction not in (1, -1) or len(rows) < 2:
+        return 0.0
+    open_ = rows[0].open
+    if direction == 1:
+        pierced = any(open_ - bar.low >= 0.05 * atr for bar in rows)
+    else:
+        pierced = any(bar.high - open_ >= 0.05 * atr for bar in rows)
+    lost = any(direction * (bar.close - open_) <= 0 for bar in rows[:-1])
+    back = direction * (rows[-1].close - open_) > 0
+    return 1.0 if pierced and lost and back else 0.0
+
+
+def detect_pmx_reclaim(bars, direction: int, level, trigger_end=None) -> float:
+    """Latest close reclaims the premarket extreme after trading through it."""
+    rows = _causal_bars(bars, trigger_end)
+    if level is None or not isinstance(level, (int, float)) or not isfinite(level) or len(rows) < 2:
+        return 0.0
+    if direction not in (1, -1):
+        return 0.0
+    if direction * (rows[-2].close - level) > 0:
+        return 0.0
+    if direction * (rows[-1].close - level) <= 0:
+        return 0.0
+    return 1.0
+
+
+def detect_flushpop(bars, direction: int, atr: float | None, trigger_end=None) -> float:
+    """A fast flush against the trade, then the latest close back through it."""
+    rows = _causal_bars(bars, trigger_end)
+    if atr is None or atr <= 0 or direction not in (1, -1) or len(rows) < 3:
+        return 0.0
+    last = len(rows) - 1
+    for flush_i in range(max(1, last - 3), last):
+        origin = rows[flush_i - 1].close
+        if direction == 1:
+            depth = (origin - rows[flush_i].low) / atr
+            popped = rows[last].close > origin and rows[last].close > rows[flush_i].close
+        else:
+            depth = (rows[flush_i].high - origin) / atr
+            popped = rows[last].close < origin and rows[last].close < rows[flush_i].close
+        if depth >= 0.30 and popped:
+            return 1.0
+    return 0.0
+
+
+def detect_vwap_slap(bars, direction: int, atr: float | None, vwap=None, trigger_end=None) -> float:
+    """Latest bar tags VWAP from the trade side and closes back off it."""
+    rows = _causal_bars(bars, trigger_end)
+    if atr is None or atr <= 0 or direction not in (1, -1) or len(rows) < 2:
+        return 0.0
+    if vwap is None:
+        vwap = _session_vwap(rows)
+    if vwap is None:
+        return 0.0
+    bar = rows[-1]
+    tagged = bar.low <= vwap <= bar.high
+    if direction == 1:
+        rejected = bar.close > vwap and (bar.close - vwap) >= 0.02 * atr
+        held_side = rows[-2].close > vwap
+    else:
+        rejected = bar.close < vwap and (vwap - bar.close) >= 0.02 * atr
+        held_side = rows[-2].close < vwap
+    return 1.0 if tagged and rejected and held_side else 0.0
+
+
+def detect_spike_rev(bars, direction: int, atr: float | None, trigger_end=None) -> float:
+    """A spike against the trade, then the latest close back through the spike open."""
+    rows = _causal_bars(bars, trigger_end)
+    if atr is None or atr <= 0 or direction not in (1, -1) or len(rows) < 3:
+        return 0.0
+    last = rows[-1]
+    for spike in rows[-4:-1]:
+        if direction == 1:
+            depth = (spike.open - spike.low) / atr
+            reversed_ = last.close > spike.open and last.close > spike.close
+        else:
+            depth = (spike.high - spike.open) / atr
+            reversed_ = last.close < spike.open and last.close < spike.close
+        if depth >= 0.50 and reversed_:
+            return 1.0
+    return 0.0
+
+
+def detect_spy10(spy_bars, direction: int, atr: float | None, trigger_end=None) -> float:
+    """SPY 10:00 pause or turn, in the trade direction. Bars after the trigger are ignored.
+
+    The cut is ATR21. A print before 10:00 ET does not score.
+    """
+    rows = _causal_bars(spy_bars, trigger_end)
+    if atr is None or atr <= 0 or direction not in (1, -1) or len(rows) < 5:
+        return 0.0
+    last_local = rows[-1].end.astimezone(ET)
+    if (last_local.hour, last_local.minute) < (10, 0):
+        return 0.0
+    ten = None
+    for bar in rows:
+        local = bar.end.astimezone(ET)
+        if (local.hour, local.minute) <= (10, 0):
+            ten = bar
+        else:
+            break
+    if ten is None:
+        return 0.0
+    if direction * (ten.close - rows[0].open) < 0.20 * atr:
+        return 0.0
+    after = [bar for bar in rows if bar.end >= ten.end]
+    if direction == 1:
+        adverse = ten.close - min(bar.low for bar in after)
+        turned = rows[-1].close >= ten.close and any(bar.low <= ten.close - 0.10 * atr for bar in after)
+        paused = adverse <= 0.35 * atr and rows[-1].close >= rows[0].open
+    else:
+        adverse = max(bar.high for bar in after) - ten.close
+        turned = rows[-1].close <= ten.close and any(bar.high >= ten.close + 0.10 * atr for bar in after)
+        paused = adverse <= 0.35 * atr and rows[-1].close <= rows[0].open
+    return 1.0 if paused or turned else 0.0
+
+
 def _level_break(snap, bars, direction: int) -> float:
     """1 when price has traded through PM or prior-day level, including a gap."""
     if not bars or direction not in (1, -1):
@@ -887,7 +1050,8 @@ def _level_break(snap, bars, direction: int) -> float:
     return 0.0
 
 
-def additive_features(snap, option, settings: Settings, metrics=None, history=None, setup=None) -> dict:
+def additive_features(snap, option, settings: Settings, metrics=None, history=None, setup=None,
+                      spy_bars=None) -> dict:
     """0-1 values for the weights book. Unlisted names still get measured.
 
     The book decides the points. EMA rows are logged even at weight 0.
@@ -927,10 +1091,8 @@ def additive_features(snap, option, settings: Settings, metrics=None, history=No
     vwap = metrics.get("vwap")
     if vwap is not None and atr and bars:
         vwap_pb = _bounce_score(bars, direction, vwap, atr, settings)
-    if setup_name in {"REVERSAL", "INTRADAY_REVERSAL"}:
-        bounce = 1.0
-    else:
-        bounce = vwap_pb
+    # bounce is the reversal setup only. A VWAP tag stays on vwap_pb.
+    bounce = 1.0 if setup_name in {"REVERSAL", "INTRADAY_REVERSAL"} else 0.0
     spy_open = snap.market_return_from_open
     spy_5 = snap.market_return_5m
     spy_with = spy_vs = 0.0
@@ -939,6 +1101,12 @@ def additive_features(snap, option, settings: Settings, metrics=None, history=No
         spy_vs = _on(direction * spy_open < 0 and direction * spy_5 < 0)
     pull2 = detect_ema_pullback(bars, 2, direction, atr, settings, period=9, frames=[2]) if bars else 0.0
     pull5 = detect_ema_pullback(bars, 5, direction, atr, settings, period=9, frames=[5]) if bars else 0.0
+    pull2 = 1.0 if pull2 >= 0.5 else 0.0
+    pull5 = 1.0 if pull5 >= 0.5 else 0.0
+    trigger_end = bars[-1].end if bars else None
+    level = snap.premarket_high if direction == 1 else snap.premarket_low
+    if spy_bars is None and getattr(snap, "symbol", "") == "SPY":
+        spy_bars = bars
     w_score = detect_w(bars, None, direction, atr, settings) if bars else 0.0
     m_score = detect_m(bars, None, direction, atr, settings) if bars else 0.0
     gap = 0.0
@@ -953,17 +1121,17 @@ def additive_features(snap, option, settings: Settings, metrics=None, history=No
         "sp5": sp5,
         "ask_mid": _on(ask is not None and 0.50 <= ask <= 1.75),
         "bounce": bounce,
-        "spy10": 0.0,
+        "spy10": detect_spy10(spy_bars, direction, atr, trigger_end) if spy_bars else 0.0,
         "spy_with": spy_with,
         "vwap_pb": vwap_pb,
         "reclaim": _on(setup_name == "LEVEL_RECLAIM"),
-        "a_drive": 0.0,
-        "a_flushpop": 0.0,
-        "a_open_reclaim": 0.0,
-        "a_pmx_reclaim": 0.0,
-        "a_vwap_slap": 0.0,
+        "a_drive": detect_ace_drive(bars, direction, atr, trigger_end) if bars else 0.0,
+        "a_flushpop": detect_flushpop(bars, direction, atr, trigger_end) if bars else 0.0,
+        "a_open_reclaim": detect_open_reclaim(bars, direction, atr, trigger_end) if bars else 0.0,
+        "a_pmx_reclaim": detect_pmx_reclaim(bars, direction, level, trigger_end) if bars else 0.0,
+        "a_vwap_slap": detect_vwap_slap(bars, direction, atr, vwap, trigger_end) if bars else 0.0,
         "a_wm": w_score if direction == 1 else m_score,
-        "a_spike_rev": 0.0,
+        "a_spike_rev": detect_spike_rev(bars, direction, atr, trigger_end) if bars else 0.0,
         "e1_ema9_2m_pullin_x_rvol15": pull2 if rvol is not None and rvol >= 1.5 else 0.0,
         "e2_ema9_5m_pullin": pull5,
         "ema50_touch": 0.0,
@@ -996,31 +1164,37 @@ def spread_fraction(option) -> float | None:
     return (option.ask - option.bid) / option.ask
 
 
-def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: float, history=None) -> bool:
+def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: float, history=None,
+                      spy_bars=None) -> bool:
     """Score the weights book, roll a failing contract, and set the ⚡ marker.
 
-    S12 still has to clear. The additive score has to clear post_threshold.
-    Blockers run on the contract that would post. A stale quote subtracts
-    points and does not block by itself.
+    The additive score is the post decision. It has to clear the profile
+    post_threshold, at least min_positive_features rows have to contribute
+    points, and the contract that would post has to pass the blockers,
+    including a real 5-minute volume reading. s12_ok is stored as a label
+    and does not vote. A stale quote subtracts points and does not block
+    by itself. The post line is not capped.
     """
     from .model_v import choose_fallback_contract
     from .weights import load_weights, score_path
 
     snap, option = candidate.snapshot, candidate.option
     volume = snap.bars[-1].volume if snap.bars else 0
-    features = additive_features(snap, option, settings, candidate.metrics, history, candidate.setup)
+    features = additive_features(
+        snap, option, settings, candidate.metrics, history, candidate.setup, spy_bars=spy_bars)
     vol5 = features.get("_vol5")
     gate = card_gate(
         option.side, volume, spread_fraction(option), settings,
         bid=getattr(option, "bid", None), option_volume_5m=vol5,
     )
     if any(name in gate["blocked_by"] for name in ("wide_spread", "low_bid", "option_volume")):
-        rolled = choose_fallback_contract(snap, option.side, settings)
+        rolled = choose_fallback_contract(snap, option.side, settings, history)
         rolled_option = rolled.get("option")
         if rolled_option is not None and rolled_option is not option:
             option = rolled_option
             candidate.option = option
-            features = additive_features(snap, option, settings, candidate.metrics, history, candidate.setup)
+            features = additive_features(
+                snap, option, settings, candidate.metrics, history, candidate.setup, spy_bars=spy_bars)
             vol5 = features.get("_vol5")
             gate = card_gate(
                 option.side, volume, spread_fraction(option), settings,
@@ -1039,7 +1213,8 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     penalty = float(settings.stale_quote_penalty) if stale else 0.0
     marked = score - penalty
     card_score = round(marked, 2)
-    post_ok = bool(s12_ok) and gate["post_ok"] and marked >= settings.post_threshold
+    enough = positive >= settings.min_positive_features
+    post_ok = gate["post_ok"] and marked >= settings.post_threshold and enough
     metrics = candidate.metrics
     metrics.update(ages)
     metrics["confluence_flags"] = features
@@ -1047,6 +1222,8 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     metrics["confluence_score"] = score
     metrics["confluence_count"] = positive
     metrics["positive_features"] = positive
+    metrics["min_positive_features"] = settings.min_positive_features
+    metrics["positive_features_met"] = int(enough)
     metrics["confluence_total"] = len(points)
     metrics["base"] = gate["base"]
     metrics["blockers"] = gate["blockers"]
