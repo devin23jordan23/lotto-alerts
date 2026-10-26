@@ -10,19 +10,19 @@
  "bypass_threshold": 40,
  "profiles": {
   "loose": {
-   "post_threshold": 20,
+   "post_threshold": 5,
    "bypass_threshold": 40,
    "min_positive_features": 0,
    "bolt_min_features": 10
   },
   "moderate": {
-   "post_threshold": 110,
+   "post_threshold": 90,
    "bypass_threshold": 40,
    "min_positive_features": 0,
    "bolt_min_features": 10
   },
   "conservative": {
-   "post_threshold": 140,
+   "post_threshold": 95,
    "bypass_threshold": 40,
    "min_positive_features": 0,
    "bolt_min_features": 10
@@ -55,8 +55,8 @@
    "put": 11
   },
   "spy10": {
-   "call": 15,
-   "put": 15
+   "call": 1,
+   "put": 1
   },
   "spy_with": {
    "call": 7,
@@ -71,32 +71,32 @@
    "put": 6
   },
   "a_drive": {
-   "call": 23,
-   "put": 23
+   "call": 15,
+   "put": 15
   },
   "a_flushpop": {
-   "call": 13,
-   "put": 13
+   "call": 0,
+   "put": 0
   },
   "a_open_reclaim": {
-   "call": 20,
-   "put": 20
-  },
-  "a_pmx_reclaim": {
-   "call": 11,
-   "put": 11
-  },
-  "a_vwap_slap": {
-   "call": 8,
-   "put": 8
-  },
-  "a_wm": {
-   "call": 2,
-   "put": 2
-  },
-  "a_spike_rev": {
    "call": 18,
    "put": 18
+  },
+  "a_pmx_reclaim": {
+   "call": 0,
+   "put": 0
+  },
+  "a_vwap_slap": {
+   "call": 0,
+   "put": 0
+  },
+  "a_wm": {
+   "call": 0,
+   "put": 0
+  },
+  "a_spike_rev": {
+   "call": 36,
+   "put": 36
   },
   "e1_ema9_2m_pullin_x_rvol15": {
    "call": 6,
@@ -451,5 +451,6 @@
    "note": "MIN60 test drops 42.43->42.38 (undeduped 681/1605 -> 681/1607), so e1_pre10 and primary drp held at 0"
   }
  },
- "posting_threshold_volume_alt": 45
+ "posting_threshold_volume_alt": 45,
+ "refit_note": "Variant A: v4c weights frozen except Ace/spy10 (refit median of 5 draw fits on live 851b4b7a flags)."
 }

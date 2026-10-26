@@ -66,7 +66,7 @@ class ModelVTests(unittest.TestCase):
         self.assertEqual(live.fallback_rule, "post")
         self.assertEqual((live.fb_rvol_min, live.fb_push_atr_min, live.fb_room_atr_max, live.fb_max_spread_pct),
                          (0, 0.75, 1.0, 15))
-        self.assertEqual(live.post_threshold, 110)
+        self.assertEqual(live.post_threshold, 90)
         self.assertEqual(live.profile, "moderate")
         self.assertEqual(live.min_positive_features, 0)
         self.assertEqual(model_v_settings(post_threshold=45).post_threshold, 45)
@@ -1530,7 +1530,14 @@ class ReviewFixTests(unittest.TestCase):
         )
         features = additive_features(snap, option, model_v_settings(), metrics or {}, spy_bars=spy_bars)
         self.assertEqual(features[name], 1.0)
-        self._component(name, features[name], side)
+        book = load_weights()
+        key = "call" if side == "CALL" else "put"
+        weight = book["weights"][name][key]
+        points = score_path({name: features[name]}, side, book, "primary")[0]
+        if weight > 0:
+            self._component(name, features[name], side)
+        else:
+            self.assertEqual(points[name], 0.0)
 
     def test_ace_setups_and_spy10_score_their_weights_when_they_fire(self):
         start = datetime(2026, 10, 26, 9, 30, tzinfo=ET)
@@ -1738,11 +1745,11 @@ class ReviewFixTests(unittest.TestCase):
     def test_profile_selection_and_an_uncapped_post_line(self):
         book = load_weights()
         self.assertEqual(set(book["profiles"]), {"loose", "moderate", "conservative"})
-        self.assertEqual(active_profile(book, "loose")["post_threshold"], 20)
+        self.assertEqual(active_profile(book, "loose")["post_threshold"], 5)
         self.assertEqual(active_profile(book, "moderate")["min_positive_features"], 0)
         self.assertEqual(active_profile(book, "moderate")["strong_feature_min"], 10)
         conservative = active_profile(book, "conservative")
-        self.assertEqual(conservative["post_threshold"], 140)
+        self.assertEqual(conservative["post_threshold"], 95)
         self.assertEqual(conservative["min_positive_features"], 0)
         self.assertEqual(conservative["strong_feature_min"], 10)
         self.assertNotIn("conservative_alt_confluence", book["profiles"])
@@ -1757,23 +1764,23 @@ class ReviewFixTests(unittest.TestCase):
         with self.assertLogs("lotto.weights", level="WARNING") as unknown:
             fallback = active_profile(book, "conservativ")
         self.assertEqual(fallback["profile"], "moderate")
-        self.assertEqual(fallback["post_threshold"], 110)
+        self.assertEqual(fallback["post_threshold"], 90)
         self.assertIn("Unknown LOTTO_PROFILE", "\n".join(unknown.output))
         saved = {key: os.environ.pop(key) for key in list(os.environ) if key.startswith("LOTTO_")}
         try:
             moderate = env_settings()
             self.assertEqual(moderate.profile, "moderate")
             self.assertEqual((moderate.post_threshold, moderate.bypass_threshold, moderate.min_positive_features),
-                             (110, 40, 0))
+                             (90, 40, 0))
             os.environ["LOTTO_PROFILE"] = "loose"
             loose = env_settings()
             self.assertEqual(loose.profile, "loose")
             self.assertEqual((loose.post_threshold, loose.bypass_threshold, loose.min_positive_features),
-                             (20, 40, 0))
+                             (5, 40, 0))
             os.environ["LOTTO_PROFILE"] = "conservative"
             strict = env_settings()
             self.assertEqual(strict.profile, "conservative")
-            self.assertEqual(strict.post_threshold, 140)
+            self.assertEqual(strict.post_threshold, 95)
             self.assertEqual(strict.min_positive_features, 0)
             self.assertEqual(strict.strong_feature_min, 10)
             os.environ["LOTTO_PROFILE"] = "moderate"
@@ -1781,7 +1788,7 @@ class ReviewFixTests(unittest.TestCase):
             os.environ["LOTTO_BYPASS_THRESHOLD"] = "15"
             with self.assertLogs("lotto.main", level="WARNING") as overridden:
                 forced = env_settings()
-            self.assertEqual(forced.post_threshold, 110)
+            self.assertEqual(forced.post_threshold, 90)
             self.assertEqual(forced.bypass_threshold, 40)
             self.assertIn("overrides LOTTO_POST_THRESHOLD", "\n".join(overridden.output))
         finally:
@@ -2046,6 +2053,52 @@ class ReviewFixTests(unittest.TestCase):
                      "a_vwap_slap", "a_wm", "a_spike_rev", "spy10"):
             self.assertIn(f"{name}=", text)
         self.assertIn("a_vwap_slap=0.0000", text)
+        with self.assertLogs("lotto.confluence", level="DEBUG") as fired:
+            apply_v2(
+                Candidate(slap_snap, slap_option, 30, {}, {}, [], False),
+                model_v_settings(post_threshold=20),
+                [],
+            )
+        fired_text = "\n".join(fired.output)
+        self.assertIn("a_vwap_slap=1.0000", fired_text)
+        self.assertEqual(load_weights()["weights"]["a_vwap_slap"], {"call": 0, "put": 0})
+
+    def test_variant_a_refit_scores_spike_from_the_book(self):
+        book = load_weights()
+        for name, weight in {
+            "a_drive": 15,
+            "a_open_reclaim": 18,
+            "a_spike_rev": 36,
+            "spy10": 1,
+            "a_flushpop": 0,
+            "a_pmx_reclaim": 0,
+            "a_vwap_slap": 0,
+            "a_wm": 0,
+        }.items():
+            self.assertEqual(book["weights"][name], {"call": weight, "put": weight})
+        for name, line in {
+            "loose": (5, 40, 0, 10),
+            "moderate": (90, 40, 0, 10),
+            "conservative": (95, 40, 0, 10),
+        }.items():
+            row = book["profiles"][name]
+            self.assertEqual(
+                (row["post_threshold"], row["bypass_threshold"],
+                 row["min_positive_features"], row["bolt_min_features"]),
+                line,
+            )
+        points, score, positive = score_path({"a_spike_rev": 1}, "CALL", book)
+        self.assertEqual(points["a_spike_rev"], 36)
+        self.assertEqual(score, 36)
+        self.assertEqual(positive, 1)
+        zero_points, zero_score, zero_positive = score_path(
+            {"a_flushpop": 1, "a_pmx_reclaim": 1, "a_vwap_slap": 1, "a_wm": 1},
+            "PUT",
+            book,
+        )
+        self.assertEqual(zero_points["a_flushpop"], 0)
+        self.assertEqual(zero_score, 0)
+        self.assertEqual(zero_positive, 0)
 
 
 if __name__ == "__main__":
