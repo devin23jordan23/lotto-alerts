@@ -59,7 +59,7 @@ def base_break(bars, direction, base_minutes):
         return b.high if direction == 1 else -b.low
     running, new_flags = extreme(bars[0]), [False]
     for b in bars[1:]:
-        new_flags.append(extreme(b) >= running)
+        new_flags.append(extreme(b) > running)
         running = max(running, extreme(b))
     if not new_flags[-1]:
         return False
@@ -71,6 +71,8 @@ def spy_move15(engine, snap):
     """SPY percent change over its last 15 completed minutes, or None when unavailable."""
     bars = engine.spy_bars.get(snap.day)
     if not bars:
+        return None
+    if not 0 <= (snap.at - bars[-1].end).total_seconds() <= 180:
         return None
     ref = _ref_close(bars, 15)
     if ref is None or ref <= 0:
@@ -86,6 +88,11 @@ def _valid_stock(snap):
     if local.weekday() >= 5 or not time(9, 31) <= local.time() < time(16):
         return False
     last = snap.bars[-1]
+    if any(b.end > snap.at or b.end.astimezone(ET).date() != local.date()
+           or not b.valid() for b in snap.bars):
+        return False
+    if any(b.end <= a.end for a, b in zip(snap.bars, snap.bars[1:])):
+        return False
     # Tolerate a late bar or quote (Schwab throttling) instead of dropping the name for the minute.
     if not 0 <= (snap.at - last.end).total_seconds() <= 180 or not 0 <= (snap.at - snap.spot_time).total_seconds() <= 180:
         return False
@@ -100,19 +107,20 @@ def pick_contract(snap, direction, settings):
     today = snap.at.astimezone(ET).date()
     side = "CALL" if direction == 1 else "PUT"
     pool = [o for o in snap.options
-            if o.side == side and o.ask and o.ask >= .15 and o.bid is not None and o.bid > 0 and o.bid <= o.ask
+            if o.side == side and o.ask and o.ask >= .15 and o.bid is not None and o.bid > 0 and o.bid < o.ask
             and 0 <= (o.expiry - today).days <= settings.max_dte]
     if not pool:
         return None
-    nearest = min(o.expiry for o in pool)
-    pool = [o for o in pool if o.expiry == nearest and -.02 <= direction * (o.strike / snap.spot - 1) <= .08]
+    pool = [o for o in pool if -.02 <= direction * (o.strike / snap.spot - 1) <= .08]
     if not pool:
         return None
-
     pool = [o for o in pool if quote_ok(o, snap, settings)
             and ((o.ask - o.bid) / o.ask <= .35 or o.ask - o.bid <= .05)]
     if not pool:
         return None
+    # An untradable same-day chain must not hide a tradable next-day expiry.
+    nearest = min(o.expiry for o in pool)
+    pool = [o for o in pool if o.expiry == nearest]
 
     def rank(o):
         good_delta = o.delta is not None and isfinite(o.delta) and 0 < abs(o.delta) <= 1
@@ -136,7 +144,7 @@ def mover_candidates(engine, snap, settings):
     for direction in (1, -1):
         r15, mfo = stock_moves(snap.bars, atr, direction)
         key = (snap.day, snap.symbol, direction)
-        if spy15 is None or direction * spy15 < 0:
+        if spy15 is not None and direction * spy15 < 0:
             continue
         push = r15 >= settings.mover_r15_atr and mfo >= settings.mover_open_atr
         based = (settings.mover_base_break and mfo >= settings.mover_base_open_atr
@@ -155,13 +163,23 @@ def mover_candidates(engine, snap, settings):
             sent[key] = False          # a new move starts
             starts[key] = last.end
         if sent.get(key):
-            continue                   # same move already alerted: one alert per move
+            alert_id = getattr(engine, "mover_alert_id", {}).get(key)
+            if alert_id is not None:
+                row = engine.store.db.execute("SELECT delivery FROM alerts WHERE id=?", (alert_id,)).fetchone()
+                if row is not None and row["delivery"] in ("internal", "failed", "expired"):
+                    sent[key] = False  # An undelivered idea cannot consume the move.
+            if sent.get(key):
+                continue               # same move already alerted: one alert per move
         # Bypass lane only: if the option-led lane already alerted this side during this move,
         # the move is covered and the MOVER lane stays silent.
         side_name = "CALL" if direction == 1 else "PUT"
-        prior = engine.store.last_alert(snap.day, snap.symbol, "ACTIVE", side=side_name)
+        prior = engine.store.db.execute("""SELECT id, at FROM alerts
+            WHERE day=? AND symbol=? AND side=? AND phase='ACTIVE'
+              AND quality_tier!='C' AND delivery NOT IN ('internal','failed','expired')
+            ORDER BY at DESC LIMIT 1""", (snap.day, snap.symbol, side_name)).fetchone()
         if prior is not None and datetime.fromisoformat(prior["at"]) >= starts[key] - timedelta(minutes=settings.mover_gap_minutes):
             sent[key] = True
+            engine.mover_alert_id[key] = prior["id"]
             engine.store.decision(snap, "MOVER", "mover: move already alerted by the option-led lane")
             continue
         option = pick_contract(snap, direction, settings)
@@ -174,8 +192,8 @@ def mover_candidates(engine, snap, settings):
         spread = (option.ask - option.bid) / option.ask
         metrics = {"lane": "MOVER", "mover_trigger": "PUSH" if push else "BASE_BREAK", "mover_r15_atr": r15, "move_from_open_atr": mfo, "mover_spy15_pct": spy15,
                    "selected_spread_fraction": spread, "mover_quote_fresh": int(quote_ok(option, snap, settings))}
-        reasons = [f"Stock-led mover ({'15m push' if push else 'base break to new session extreme'}): {r15:+.2f} ATR in 15m, {mfo:+.2f} ATR from open, SPY 15m {spy15:+.2f}%"]
-        sent[key] = True
+        market = f"{spy15:+.2f}%" if spy15 is not None else "unknown"
+        reasons = [f"Stock-led mover ({'15m push' if push else 'base break to new session extreme'}): {r15:+.2f} ATR in 15m, {mfo:+.2f} ATR from open, SPY 15m {market}"]
         out.append(Candidate(snap, option, score, {"mover": score}, metrics, reasons, True,
                              state="IGNITION", setup=Setup("MOVER", snap.spot, invalidation)))
     return out
@@ -208,5 +226,7 @@ def decorate(payload, candidate):
     embed["title"] = "🚀 STOCK MOVER · ACTIVE TRADE IDEA"
     flags = [f"spread {spread:.0%}"]
     trig = "15m push" if m.get("mover_trigger") == "PUSH" else "base break to new session " + ("high" if candidate.option.side == "CALL" else "low")
+    spy = m['mover_spy15_pct']
+    market = f"{spy:+.2f}%" if spy is not None else "unknown"
     embed["description"] += (f"\nStock-led ({trig}): {m['mover_r15_atr']:+.2f} ATR in 15m · {m['move_from_open_atr']:+.2f} ATR from open"
-                             f" · SPY 15m {m['mover_spy15_pct']:+.2f}% · " + " · ".join(flags))
+                             f" · SPY 15m {market} · " + " · ".join(flags))

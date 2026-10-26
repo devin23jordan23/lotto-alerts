@@ -311,7 +311,8 @@ class Store:
         if phase not in {"POTENTIAL", "ACTIVE"}:
             raise ValueError("Alert phase must be POTENTIAL or ACTIVE")
         snap, option = candidate.snapshot, candidate.option
-        ident = sha256(f"{snap.day}:{snap.symbol}:{option.symbol}:{snap.at.isoformat()}".encode()).hexdigest()[:16]
+        lane = ":MOVER" if candidate.metrics.get("lane") == "MOVER" else ""
+        ident = sha256(f"{snap.day}:{snap.symbol}:{option.symbol}:{snap.at.isoformat()}{lane}".encode()).hexdigest()[:16]
         thesis_id = parent_id or ident
         payload["embeds"][0]["footer"] = {"text": f"{phase.title()} idea • Research score, not probability • {ident}"}
         with self.db:

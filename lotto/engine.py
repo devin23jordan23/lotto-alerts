@@ -85,6 +85,7 @@ class Engine:
         self.spy_bars = {}
         self.mover_last = {}
         self.mover_sent = {}
+        self.mover_alert_id = {}
 
     def process(self, snapshots: list[Snapshot]) -> list[dict]:
         ready = []
@@ -257,12 +258,20 @@ class Engine:
         alerts = []
         # Rank the whole scan cycle. Zero-valued count settings impose no budget.
         cycle_keys = set()
-        for candidate in sorted(ready, key=lambda c: (-(c.score + 2*min(8, max(-8, c.score_change))), -c.score, c.snapshot.symbol)):
+        cycle_alert_ids = {}
+        # Let a sendable option-led A/B idea cover the move first. An internal
+        # C-tier record must never consume the stock-mover bypass.
+        for candidate in sorted(ready, key=lambda c: (c.metrics.get("lane") == "MOVER",
+                -(c.score + 2*min(8, max(-8, c.score_change))), -c.score, c.snapshot.symbol)):
             snap = candidate.snapshot
             cycle_key = (snap.day, snap.symbol, candidate.option.side)
             if cycle_key in cycle_keys:
+                if candidate.metrics.get("lane") == "MOVER":
+                    mover_key = (snap.day, snap.symbol, 1 if candidate.option.side == "CALL" else -1)
+                    self.mover_sent[mover_key] = True
+                    self.mover_alert_id[mover_key] = cycle_alert_ids[cycle_key]
+                    self.store.decision(snap, "MOVER", "mover: covered by same-cycle option-led alert")
                 continue
-            cycle_keys.add(cycle_key)
             if ((cfg.max_alerts_per_cycle and len(alerts) >= cfg.max_alerts_per_cycle)
                     or (cfg.max_alerts_per_day and self.store.count(snap.day) >= cfg.max_alerts_per_day)
                     or (cfg.max_alerts_per_ticker and self.store.count(snap.day, snap.symbol) >= cfg.max_alerts_per_ticker)):
@@ -284,10 +293,18 @@ class Engine:
                 from .mover import decorate
                 decorate(payload, candidate)
             tier = candidate.metrics.get("tier") if cfg.hybrid else None
+            sendable = (not cfg.hybrid or candidate.metrics.get("lane") == "MOVER"
+                        or (tier is not None and tier in cfg.send_tiers))
             ident = self.store.queue(candidate, payload, self.dry_run, phase, parent_id,
                                      quality=policy, tier=tier,
-                                     sendable=(not cfg.hybrid or candidate.metrics.get("lane") == "MOVER"
-                                               or (tier is not None and tier in cfg.send_tiers)))
+                                     sendable=sendable)
+            if sendable and phase == "ACTIVE":
+                cycle_keys.add(cycle_key)
+                cycle_alert_ids[cycle_key] = ident
+            if candidate.metrics.get("lane") == "MOVER":
+                mover_key = (snap.day, snap.symbol, 1 if candidate.option.side == "CALL" else -1)
+                self.mover_sent[mover_key] = True
+                self.mover_alert_id[mover_key] = ident
             self.rearmed.discard((snap.day, snap.symbol))
             self.store.decision(snap, candidate.state, f"{phase.lower()} alert {ident}", candidate)
             alerts.append({"id": ident, "phase": phase, "parent_id": parent_id, "payload": payload})

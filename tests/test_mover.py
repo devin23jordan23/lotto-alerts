@@ -1,12 +1,16 @@
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import unittest
+from unittest.mock import patch
 
 from lotto.config import Settings
 from lotto.demo import demo_frames
 from lotto.engine import Engine
+from lotto.discord import mover_send_quote_ok, deliver_pending
+from lotto.features import Candidate
 from lotto.models import Bar, ET, Option
 from lotto.mover import keep_reason, mover_candidates, pick_contract
+from lotto.patterns import Setup
 from lotto.store import Store
 
 
@@ -48,6 +52,7 @@ class MoverTests(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].option.symbol, thin.symbol)
         self.assertEqual(out[0].setup.name, "MOVER")
+        engine.mover_sent[(snap.day, snap.symbol, 1)] = True  # set only after the engine queues it
         # same move one minute later: no second alert (one alert per move, not a cooldown)
         later = replace(snap, at=snap.at + timedelta(minutes=1))
         later = replace(later, bars=later.bars + (Bar(snap.bars[-1].end + timedelta(minutes=1), prices[-1], prices[-1] + .2,
@@ -97,6 +102,28 @@ class MoverTests(unittest.TestCase):
         c = self.option(snap.at, 105, .12, .14, delta=.15)   # ask below $0.15: excluded
         self.assertEqual(pick_contract(replace(snap, options=(a, b, c)), 1, Settings()).symbol, b.symbol)
         self.assertIsNone(pick_contract(replace(snap, options=(a, c)), 1, Settings()))
+
+    def test_picker_falls_back_to_listed_next_day_when_same_day_is_untradable(self):
+        snap = self.snap("NET", [100 + .05 * i for i in range(50)], 5)
+        wide = self.option(snap.at, 103, .50, 1.0)
+        later = replace(self.option(snap.at, 104, .80, 1.0),
+                        expiry=snap.at.astimezone(ET).date() + timedelta(days=1), symbol="NEXT")
+        self.assertEqual(pick_contract(replace(snap, options=(wide, later)), 1, Settings()).symbol, "NEXT")
+
+    def test_missing_spy_is_unknown_and_does_not_erase_stock_move(self):
+        settings, engine, _, snap = self._mover_setup()
+        engine.spy_bars.clear()
+        opt = self.option(snap.at, 103, .90, 1.05)
+        out = mover_candidates(engine, replace(snap, options=(opt,)), settings)
+        self.assertEqual(len(out), 1)
+        self.assertIsNone(out[0].metrics["mover_spy15_pct"])
+
+    def test_future_bar_cannot_trigger_mover(self):
+        settings, engine, _, snap = self._mover_setup()
+        opt = self.option(snap.at, 103, .90, 1.05)
+        future = replace(snap.bars[-1], end=snap.at + timedelta(minutes=1))
+        self.assertEqual(mover_candidates(engine, replace(snap, bars=snap.bars[:-1] + (future,),
+                                                        options=(opt,)), settings), [])
 
 
 class BaseBreakTests(unittest.TestCase):
@@ -151,3 +178,72 @@ class BypassTests(unittest.TestCase):
             c = type("C", (), {})()
             c.score, c.metrics, c.setup = 99, {}, Setup(name, 1, 0)
             self.assertEqual(hybrid_tier(c, policy, Settings()), want, name)
+
+    def test_internal_c_tier_does_not_silence_same_cycle_mover(self):
+        settings = replace(Settings(), mover_enabled=1, hybrid=1, soft_blocks=1, min_score=60)
+        engine = Engine(self.store, settings)
+        spy, snap = self._snap()
+        engine.spy_bars[spy.day] = spy.bars
+        option = snap.options[0]
+        legacy = Candidate(snap, option, 75, {}, {"opening_expansion": 1}, [], True,
+                           setup=Setup("CONTINUATION", snap.spot, snap.spot - 1))
+        with patch("lotto.engine.candidates", return_value=[legacy]):
+            engine.process([snap])
+        rows = self.store.db.execute("SELECT setup_name,quality_tier FROM alerts ORDER BY setup_name").fetchall()
+        self.assertEqual([(r["setup_name"], r["quality_tier"]) for r in rows],
+                         [("CONTINUATION", "C"), ("MOVER", "MAIN")])
+
+    def test_sendable_ab_idea_covers_same_cycle_mover(self):
+        settings = replace(Settings(), mover_enabled=1, hybrid=1, soft_blocks=1, min_score=60)
+        engine = Engine(self.store, settings)
+        spy, snap = self._snap()
+        engine.spy_bars[spy.day] = spy.bars
+        option = snap.options[0]
+        legacy = Candidate(snap, option, 96, {}, {"opening_expansion": 1}, [], True,
+                           setup=Setup("CONTINUATION", snap.spot, snap.spot - 1))
+        with patch("lotto.engine.candidates", return_value=[legacy]):
+            engine.process([snap])
+        rows = self.store.db.execute("SELECT setup_name,quality_tier FROM alerts").fetchall()
+        self.assertEqual([(r["setup_name"], r["quality_tier"]) for r in rows],
+                         [("CONTINUATION", "A")])
+
+    def test_failed_ab_delivery_releases_same_cycle_mover(self):
+        settings = replace(Settings(), mover_enabled=1, hybrid=1, soft_blocks=1, min_score=60)
+        engine = Engine(self.store, settings)
+        spy, snap = self._snap()
+        engine.spy_bars[spy.day] = spy.bars
+        legacy = Candidate(snap, snap.options[0], 96, {}, {"opening_expansion": 1}, [], True,
+                           setup=Setup("CONTINUATION", snap.spot, snap.spot - 1))
+        with patch("lotto.engine.candidates", return_value=[legacy]):
+            engine.process([snap])
+        with self.store.db:
+            self.store.db.execute("UPDATE alerts SET delivery='failed'")
+        self.assertEqual(len(mover_candidates(engine, snap, settings)), 1)
+
+
+class MoverDeliveryTests(unittest.TestCase):
+    def test_send_quote_requires_fresh_tradable_two_sided_market(self):
+        now = datetime.now(timezone.utc)
+        valid = {"realtime": True, "quote_time": now, "bid": .80, "ask": 1.0, "spot": 100.0}
+        self.assertTrue(mover_send_quote_ok(valid, now))
+        for change in ({"ask": 1.5}, {"bid": 0}, {"spot": None},
+                       {"quote_time": now - timedelta(seconds=91)}, {"realtime": False}):
+            self.assertFalse(mover_send_quote_ok({**valid, **change}, now), change)
+
+    def test_failed_mover_requote_stays_internal_without_discord_post(self):
+        helper = MoverTests("test_default_settings_change_nothing")
+        helper.setUp()
+        self.addCleanup(helper.store.db.close)
+        settings, engine, _, snap = helper._mover_setup()
+        snap = replace(snap, options=(helper.option(snap.at, 103, .90, 1.05),))
+        candidate = mover_candidates(engine, snap, settings)[0]
+        from lotto.discord import alert_payload
+        helper.store.queue(candidate, alert_payload(candidate, "ACTIVE"), dry_run=False,
+                           phase="ACTIVE", tier="MAIN")
+        with helper.store.db:
+            helper.store.db.execute("UPDATE alerts SET at=?", (datetime.now(timezone.utc).isoformat(),))
+        with patch("lotto.discord.urlopen") as send:
+            deliver_pending(helper.store, "https://discord.com/api/webhooks/test/test",
+                            quoter=lambda contract, symbol: None)
+            send.assert_not_called()
+        self.assertEqual(helper.store.db.execute("SELECT delivery FROM alerts").fetchone()[0], "internal")

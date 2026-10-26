@@ -110,6 +110,21 @@ def render_send_card(payload: dict, row, quote: dict | None, now: datetime) -> d
     return payload
 
 
+def mover_send_quote_ok(quote: dict | None, now: datetime) -> bool:
+    """The bypass only posts a priced card when its send-time quote is tradable."""
+    if not quote or quote.get("realtime") is not True:
+        return False
+    qt, bid, ask, spot = (quote.get("quote_time"), quote.get("bid"),
+                          quote.get("ask"), quote.get("spot"))
+    if (not isinstance(qt, datetime) or qt.tzinfo is None
+            or not isinstance(bid, (int, float)) or not isinstance(ask, (int, float))
+            or not isinstance(spot, (int, float))):
+        return False
+    age = (now - qt).total_seconds()
+    return (0 <= age <= 90 and spot > 0 and bid > 0 and ask > bid and ask >= .15
+            and ((ask - bid) / ask <= .35 or ask - bid <= .05))
+
+
 def deliver_pending(store, webhook: str, secondary_webhook: str | None = None, quoter=None) -> None:
     parsed = urlparse(webhook)
     if (parsed.scheme != "https" or parsed.hostname not in {"discord.com", "discordapp.com"}
@@ -124,7 +139,7 @@ def deliver_pending(store, webhook: str, secondary_webhook: str | None = None, q
     # Older queued watches must also stay internal after a deployment/restart.
     with store.db:
         store.db.execute("UPDATE alerts SET delivery='internal' WHERE phase='POTENTIAL' AND delivery='pending'")
-    for row in store.db.execute("""SELECT id, at, payload, quality_tier, contract, symbol,
+    for row in store.db.execute("""SELECT id, at, payload, quality_tier, contract, symbol, setup_name,
                                    entry_ask, snapshot FROM alerts WHERE phase='ACTIVE'
                                    AND delivery='pending' ORDER BY at""").fetchall():
         target = secondary_webhook if row['quality_tier']=='SECONDARY' else webhook
@@ -144,7 +159,17 @@ def deliver_pending(store, webhook: str, secondary_webhook: str | None = None, q
                 quote = quoter(row["contract"], row["symbol"])
             except Exception as exc:
                 LOG.warning("Send re-quote %s unavailable (%s)", row["id"], type(exc).__name__)
+            if row["setup_name"] == "MOVER" and not mover_send_quote_ok(quote, datetime.now(timezone.utc)):
+                with store.db:
+                    store.db.execute("UPDATE alerts SET delivery='internal' WHERE id=?", (row["id"],))
+                LOG.info("MOVER %s held: no fresh tradable send-time quote; retry on next stock observation", row["id"])
+                continue
             outgoing = render_send_card(outgoing,row,quote,datetime.now(timezone.utc))
+        elif row["setup_name"] == "MOVER":
+            with store.db:
+                store.db.execute("UPDATE alerts SET delivery='internal' WHERE id=?", (row["id"],))
+            LOG.info("MOVER %s held: send-time re-quote is disabled", row["id"])
+            continue
         encoded = json.dumps(outgoing)
         # Mark before sending: a crash after Discord accepts must not automatically resend.
         with store.db:
