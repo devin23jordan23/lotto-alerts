@@ -76,6 +76,8 @@ class Snapshot:
     market_return_5m: float | None = None
     market_time: datetime | None = None
     market_label: str = "SPY"
+    market_return_from_open: float | None = None  # Benchmark spot / 9:30 open - 1.
+    market_vwap_side: float | None = None  # +1 above session VWAP, -1 below, 0 on it.
     peer_return_5m: float | None = None
     peer_time: datetime | None = None
     peer_leaders: tuple[str, ...] = ()

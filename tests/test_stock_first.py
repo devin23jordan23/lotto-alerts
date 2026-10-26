@@ -35,8 +35,11 @@ class StockFirstTests(unittest.TestCase):
         self.assertEqual(ideas[0].symbol, "PANW")
         self.assertEqual(ideas[0].side, "CALL")
         row = self.store.db.execute("SELECT * FROM stock_ideas").fetchone()
-        self.assertEqual(row["delivery"], "pending")
+        self.assertEqual(row["delivery"], "internal")
         self.assertIn("No option contract or entry price validated", row["payload"])
+        with patch("lotto.discord.urlopen") as send:
+            deliver_stock_pending(self.store, "https://discord.com/api/webhooks/test/test")
+        send.assert_not_called()
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 0)
 
     def test_flat_stock_and_stale_quote_cannot_fire(self):
