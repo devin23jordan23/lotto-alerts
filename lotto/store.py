@@ -281,7 +281,10 @@ class Store:
                             (idea.symbol, idea.at.isoformat(), idea.side, reason, json.dumps(idea.metrics)))
 
     def queue_stock_idea(self, idea, payload: dict, dry_run: bool, mode: str):
-        delivery = "dry_run" if dry_run else "internal" if mode == "shadow" else "pending"
+        # Stock-only ideas are stored for grading and never posted. `mode` is ignored
+        # so an environment flag cannot turn stock cards back on.
+        del mode
+        delivery = "dry_run" if dry_run else "internal"
         with self.db:
             self.db.execute("""INSERT OR IGNORE INTO stock_ideas
                 (id,day,symbol,side,at,stock_price,trigger,invalidation,setup,metrics,payload,delivery,last_stock_quote)

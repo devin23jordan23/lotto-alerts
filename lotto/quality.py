@@ -18,6 +18,35 @@ DESCRIPTIONS = {
 }
 
 
+def spy_context_label(snap, direction: int) -> str | None:
+    """Day trend plus VWAP side. None when the day read was not recorded.
+
+    "Opposing" only when both the day return and the VWAP side are against the
+    trade. A five-minute dip on an up day above VWAP is "aligned · pulling back".
+    """
+    raw = getattr(snap, "market_return_from_open", None)
+    ret = raw if isinstance(raw, (int, float)) and not isinstance(raw, bool) and isfinite(raw) else None
+    if ret is None:
+        return None
+    name = getattr(snap, "market_label", None) or "SPY"
+    if abs(ret) < 0.0005:
+        return f"{name} flat"
+    side = getattr(snap, "market_vwap_side", None)
+    side = side if isinstance(side, (int, float)) and not isinstance(side, bool) and isfinite(side) else None
+    if side is None:
+        return f"{name} mixed"
+    day = direction * (1 if ret > 0 else -1 if ret < 0 else 0)
+    vwap = direction * side
+    tick = getattr(snap, "market_return_5m", None)
+    tick = tick if isinstance(tick, (int, float)) and not isinstance(tick, bool) and isfinite(tick) else None
+    pulling = tick is not None and direction * tick < 0
+    if day > 0 and vwap > 0:
+        return f"{name} aligned · pulling back" if pulling else f"{name} aligned"
+    if day < 0 and vwap < 0:
+        return f"{name} opposing"
+    return f"{name} mixed"
+
+
 def scalar(metrics, key):
     value = metrics.get(key)
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value) else None
@@ -95,8 +124,17 @@ def evaluate(candidate, policy='S', disabled=frozenset()):
         rules.append('CONTSTALL'); labels.append('Continuation losing acceleration')
     market = scalar({'market': snap.market_return_5m}, 'market')
     fresh = (snap.at - snap.market_time).total_seconds() if snap.market_time is not None else None
-    if market is not None and fresh is not None and 0 <= fresh <= 90:
-        direction = 1 if opt.side == 'CALL' else -1
+    direction = 1 if opt.side == 'CALL' else -1
+    day_label = spy_context_label(snap, direction)
+    if day_label is not None and fresh is not None and 0 <= fresh <= 90:
+        labels.append(day_label)
+        # Opposing means the day trend AND VWAP side are both against the trade.
+        # A five-minute dip while the day is with the trade is not LRSPY.
+        if setup == 'LEVEL_RECLAIM' and day_label.endswith('opposing'):
+            rules.append('LRSPY')
+    elif market is not None and fresh is not None and 0 <= fresh <= 90 and snap.market_return_from_open is None:
+        # Legacy five-minute label, used only when the day/VWAP read is absent
+        # (Model S rows and older snapshots).
         label = snap.market_label or 'Market'
         labels.append(f'{label} {"aligned" if direction*market > 0 else "opposing" if direction*market < 0 else "flat"}')
         if setup == 'LEVEL_RECLAIM' and direction*market < 0:

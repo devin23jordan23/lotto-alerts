@@ -76,6 +76,8 @@ class Snapshot:
     market_return_5m: float | None = None
     market_time: datetime | None = None
     market_label: str = "SPY"
+    market_return_from_open: float | None = None  # Benchmark spot / 9:30 open - 1.
+    market_vwap_side: float | None = None  # +1 above session VWAP, -1 below, 0 on it.
     peer_return_5m: float | None = None
     peer_time: datetime | None = None
     peer_leaders: tuple[str, ...] = ()
@@ -84,6 +86,8 @@ class Snapshot:
     premarket_high: float | None = None
     premarket_low: float | None = None
     volume_source: str | None = None  # SPX uses SPY share volume; never index volume.
+    prior_full_days: int | None = None  # Prior RTH sessions with at least 380 minute bars.
+    rvol_base: float | None = None  # Mean cumulative volume at this minute across up to 10 of those days.
 
     @property
     def day(self) -> str:

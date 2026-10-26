@@ -9,7 +9,7 @@ from dataclasses import asdict, fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .config import Settings, STRATEGY_VERSION
+from .config import Settings, STRATEGY_VERSION, model_v_settings
 from .demo import demo_frames
 from .discord import deliver_pending, deliver_stock_pending
 from .engine import Engine
@@ -34,6 +34,12 @@ DEFAULT_UNIVERSE = (
 )
 
 REQUIRED_UNIVERSE = {"CSCO", "HPE", "SPX", "SPCX"}
+# Runner names outside the default universe. Quoted always, chain-scanned only
+# while in play. Nia's year list plus the Oct 26 names that had no chain.
+DEFAULT_STANDBY = (
+    "IREN", "CRWV", "LITE", "TTMI", "HUT", "CORZ", "DKNG", "RIVN", "LUNR", "HIMS",
+    "MARA", "SOXL", "GME", "EWZ", "TLT", "RIOT", "XLI", "TEM", "STX", "IBIT", "U",
+)
 
 
 def universe_symbols(raw: str) -> list[str]:
@@ -41,14 +47,118 @@ def universe_symbols(raw: str) -> list[str]:
     return sorted(symbols | REQUIRED_UNIVERSE) if symbols else []
 
 
+def _env_on(name: str, default: str = "off") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "on", "true", "yes"}
+
+
+def standby_symbols() -> list[str]:
+    """Runner names. Empty unless LOTTO_STANDBY_NAMES is on.
+
+    When the switch is on, the named list is quoted and chain-scanned only
+    while in play. Those symbols are scored on the handoff A bar.
+    """
+    if not _env_on("LOTTO_STANDBY_NAMES", "off"):
+        return []
+    raw = os.getenv("LOTTO_STANDBY_UNIVERSE")
+    if raw is None:
+        named = list(DEFAULT_STANDBY)
+    else:
+        named = [s.strip().upper() for s in raw.split(",") if s.strip()]
+    include_uoa = os.getenv("LOTTO_STANDBY_INCLUDE_UOA", "1").strip().lower() not in {"0", "false", "no"}
+    extra = []
+    if include_uoa:
+        for key in ("UOA_CORE_UNIVERSE", "UOA_IN_PLAY", "UOA_PREMARKET_WATCHLIST"):
+            extra.extend(s.strip().upper() for s in os.getenv(key, "").split(",") if s.strip())
+    return sorted(set(named) | set(extra))
+
+
+# Floors belong to the preset. A copied .env must not put the old rounded
+# values back on top of S11 or S12.
+PWIN_FIELDS = (
+    "pwin_normal_0dte", "pwin_normal_1dte",
+    "pwin_quintile_0dte", "pwin_quintile_1dte",
+    "pwin_decile", "pwin_decile_1dte",
+)
+
+
+def fallback_rule_status(settings) -> str:
+    """One startup line naming the strong-stock fallback mode and thresholds."""
+    mode = settings.fallback_rule
+    LOG.warning(
+        "Fallback rule: %s rvol>=%s push>=%s atr=21 spread<=%s%% same_move=-%s/+%s",
+        mode, settings.fb_rvol_min, settings.fb_push_atr_min, settings.fb_max_spread_pct,
+        settings.fb_same_move_before_min, settings.fb_same_move_after_min,
+    )
+    return mode
+
+
+def handoff_fallback_status(enabled: bool, requested_mode: str | None) -> str:
+    """Whether stock-led option cards are built.
+
+    LOTTO_STOCK_FIRST_MODE is not read by the handoff lane. Shadow does not
+    hold those option cards. Turning stock-first off does. Stock-only cards
+    never post in either state.
+    """
+    mode = (requested_mode or "shadow").strip().lower() or "shadow"
+    if enabled:
+        LOG.warning(
+            "Handoff fallback state: posting. LOTTO_STOCK_FIRST_ENABLED=true builds stock-led option cards. "
+            "LOTTO_STOCK_FIRST_MODE=%s is not read by that lane. Stock-only cards never post.",
+            mode,
+        )
+        return "posting"
+    LOG.warning(
+        "Handoff fallback state: shadow. LOTTO_STOCK_FIRST_ENABLED=false disables the handoff lane, "
+        "so stock-led option cards will not post. Set LOTTO_STOCK_FIRST_ENABLED=true. "
+        "Stock-only cards never post in any mode.",
+    )
+    return "shadow"
+
+
 def env_settings() -> Settings:
-    defaults = Settings()
+    model = os.getenv("LOTTO_MODEL", "V").strip().upper()
+    if model not in {"V", "S"}:
+        raise SystemExit("LOTTO_MODEL must be V or S")
+    preset = os.getenv("LOTTO_PRESET", "S12").strip().upper()
+    base = (model_v_settings(preset=preset) if model == "V"
+            else Settings(model="S", min_score=70, send_requote=0, hybrid=0, soft_blocks=0))
     updates = {}
-    for field in fields(defaults):
+    for field in fields(base):
         raw = os.getenv("LOTTO_" + field.name.upper())
-        if raw is not None:
-            updates[field.name] = type(getattr(defaults, field.name))(raw)
-    return replace(defaults, **updates)
+        if raw is not None and field.name not in {"model", "preset", *PWIN_FIELDS}:
+            if field.name == "standby_names":
+                updates[field.name] = 1 if raw.strip().lower() in {"1", "on", "true", "yes"} else 0
+            else:
+                updates[field.name] = type(getattr(base, field.name))(raw)
+    if "score_mode" in updates:
+        updates["score_mode"] = str(updates["score_mode"]).lower()
+    if "fallback_rule" in updates:
+        updates["fallback_rule"] = str(updates["fallback_rule"]).strip().lower()
+    updates["model"] = model
+    if model == "V":
+        updates["preset"] = preset
+        if updates.get("min_score", base.min_score) > 60:
+            updates["min_score"] = 60
+        if updates.get("score_mode", base.score_mode) == "combined" and "preset_note" not in updates:
+            updates["preset_note"] = (
+                "Rollback: one combined score, bars 40/61, stock share cap 0.40, "
+                "plus the exceptional stock_override path."
+            )
+        for name in PWIN_FIELDS:
+            raw = os.getenv("LOTTO_" + name.upper())
+            if raw is None:
+                continue
+            preset_value = getattr(base, name)
+            try:
+                supplied = float(raw)
+            except ValueError:
+                supplied = None
+            if supplied != preset_value:
+                LOG.warning(
+                    "Ignoring LOTTO_%s=%s; LOTTO_PRESET=%s uses %s",
+                    name.upper(), raw, base.preset, preset_value,
+                )
+    return replace(base, **updates)
 
 
 def replay_frames(path):
@@ -107,9 +217,11 @@ def main():
     if live_delivery and not webhook:
         raise SystemExit("DISCORD_LOTTO_WEBHOOK is required when LOTTO_SEND_ALERTS=true")
     engine = Engine(store, env_settings(), dry_run=not live_delivery)
+    engine.fallback_log = data_dir / "fallback-rule.jsonl"
+    # Stock cards stay internal even if LOTTO_STOCK_FIRST_MODE=send.
     stock_first = StockFirst(store,
         enabled=os.getenv("LOTTO_STOCK_FIRST_ENABLED", "true").lower() == "true",
-        mode=os.getenv("LOTTO_STOCK_FIRST_MODE", "send").lower(),
+        mode="shadow",
         max_quote_age=engine.settings.max_quote_age_seconds)
     health_monitor = HealthMonitor(store, webhook)
     if args.mode in {"demo", "replay"}:
@@ -127,6 +239,8 @@ def main():
         # unusual-options scanner's universe variables.
         configured_universe = ",".join(filter(None, (os.getenv("UOA_CORE_UNIVERSE", ""), os.getenv("UOA_IN_PLAY", "")))) or DEFAULT_UNIVERSE
     symbols = universe_symbols(configured_universe)
+    standby = [s for s in standby_symbols() if s not in symbols]
+    engine.runner_names = frozenset(standby)
     if not symbols:
         raise SystemExit("LOTTO_UNIVERSE must contain at least one symbol")
     poll_seconds = max(30, int(os.getenv("LOTTO_POLL_SECONDS", "60")))
@@ -144,7 +258,16 @@ def main():
              engine.quality.mode,engine.quality.policy,
              'configured' if os.getenv('DISCORD_LOTTO_SECONDARY_WEBHOOK') else 'internal',
              ','.join(sorted(engine.quality.disabled_rules)) or 'none')
-    LOG.info("Stock-first: enabled=%s mode=%s", stock_first.enabled, stock_first.mode)
+    handoff_fallback_status(stock_first.enabled, os.getenv("LOTTO_STOCK_FIRST_MODE"))
+    fallback_rule_status(engine.settings)
+    from .model_v import scan_budget
+    LOG.info("Model %s score_mode=%s preset=%s standby_names=%s standby=%s",
+             engine.settings.model, engine.settings.score_mode, engine.settings.preset,
+             "on" if engine.settings.standby_names else "off", ",".join(standby) or "none")
+    LOG.info("Scan budget: %s", json.dumps(scan_budget(
+        len(symbols), len(standby), engine.settings.standby_scan_minutes,
+        engine.settings.quote_batch, client.min_request_interval,
+        scans_per_cycle=engine.settings.standby_scans_per_cycle)))
     LOG.info("Coverage plan: %d deep slots; continuous=%s; full-universe sweep target=%d minutes",
              client.discovery.capacity,",".join(sorted(client.discovery.always_deep)),client.coverage.interval.seconds//60)
     local_start = datetime.now(ET)
@@ -210,11 +333,14 @@ def main():
             def on_discovery(rows):
                 ideas = stock_first.process(rows, dry_run=not live_delivery)
                 for idea in ideas:
-                    LOG.info("Stock-first %s %s %s at %.2f", idea.symbol, idea.side, idea.setup, idea.price)
-                if live_delivery and stock_first.enabled and stock_first.mode == "send":
-                    deliver_stock_pending(store, webhook)
-            frame = client.poll(sorted(set(symbols) | set(tracked)), tracked,
-                                engine.settings.max_dte, on_discovery=on_discovery)
+                    LOG.info("Stock-first %s %s %s at %.2f (logged, not posted)", idea.symbol, idea.side, idea.setup, idea.price)
+                if engine.settings.model == "V":
+                    engine.remember_stock_events(ideas)
+                    return engine.handoff_symbols()
+                return []
+            frame = client.poll(sorted(set(symbols) | set(standby) | set(tracked)), tracked,
+                                engine.settings.max_dte, on_discovery=on_discovery, standby=standby,
+                                in_play_settings=engine.settings)
             store.record_discovery(client.discovery.observations)
             store.record_chain_coverage(client.coverage.rows)
             # Poll latency cannot turn an old candidate into a current alert.
@@ -226,6 +352,7 @@ def main():
             if live_delivery:
                 deliver_pending(store, webhook,
                                 quoter=client.send_quote if engine.settings.send_requote else None)
+                deliver_stock_pending(store, webhook)
             with store.db:
                 # Expire intraday trackers after the session even if no further quotes arrive.
                 store.db.execute("UPDATE alerts SET closed=1 WHERE day < ?", (today,))

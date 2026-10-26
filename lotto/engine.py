@@ -1,8 +1,11 @@
 from collections import defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
 import json
 import logging
 import os
+
+from dataclasses import replace
 
 from .config import Settings
 from .discord import alert_payload
@@ -79,8 +82,29 @@ class Engine:
         self.cool_since = {}
         self.last_cooling = {}
         self.rearmed = set()
+        self.stock_events = []
+        self.index_bars = {}
+        self.runner_names = frozenset()
+        self.fallback_log = None
+        self.fallback_state = {}
+        self.fallback_pending = []
+
+    def remember_stock_events(self, ideas) -> None:
+        self.stock_events.extend(ideas)
+        if not ideas:
+            return
+        newest = max(idea.at for idea in ideas)
+        self.stock_events = [idea for idea in self.stock_events if newest - idea.at <= timedelta(minutes=20)]
+
+    def handoff_symbols(self) -> list[str]:
+        if not self.stock_events:
+            return []
+        newest = max(idea.at for idea in self.stock_events)
+        return sorted({idea.symbol for idea in self.stock_events if newest - idea.at <= timedelta(minutes=15)})
 
     def process(self, snapshots: list[Snapshot]) -> list[dict]:
+        if self.settings.model == "V":
+            return self.process_model_v(snapshots)
         ready = []
         quality_decisions = {}
         cfg = self.settings
@@ -261,6 +285,294 @@ class Engine:
             self.store.decision(snap, candidate.state, f"{phase.lower()} alert {ident}", candidate)
             alerts.append({"id": ident, "phase": phase, "parent_id": parent_id, "payload": payload})
         return alerts
+
+    def process_model_v(self, snapshots: list[Snapshot]) -> list[dict]:
+        """Score every priced contract on v2. Post only when it clears its path bar.
+
+        Nothing else posts. No cap, cooldown, repeat penalty, or hard gate.
+        The only suppression is an exact duplicate: same contract and trigger
+        inside the dedupe window.
+        """
+        from .model_v import apply_v2, missing_v2, pick_one_otm, thin_candidate
+        from .patterns import Setup
+
+        cfg = self.settings
+        ready = []
+        for snap in snapshots:
+            key = (snap.day, snap.symbol)
+            if key not in self.history:
+                self.history[key] = [s for s in self.store.recent(snap.symbol, snap.day)
+                                     if not s.problems(cfg.max_quote_age_seconds, min_bars=1)]
+            history = self.history[key]
+            if history and snap.at <= history[-1].at:
+                continue
+            self.store.record(snap)
+            self.store.track(snap, cfg)
+            if snap.symbol in {"SPY", "QQQ"} and snap.bars:
+                self.index_bars[(snap.day, snap.symbol)] = snap.bars
+            problems = snap.problems(cfg.max_quote_age_seconds, min_bars=max(3, min(cfg.min_opening_bars, 3)))
+            if problems:
+                if not snap.problems(cfg.max_quote_age_seconds, min_bars=1):
+                    history.append(snap)
+                self._log_missing(snap, "snapshot not scoreable: " + "; ".join(problems))
+                continue
+            if self.last_bar.get(key) == snap.bars[-1].end:
+                continue
+            self.last_bar[key] = snap.bars[-1].end
+            evaluated = candidates(snap, history, replace(cfg, model="V", hybrid=1, soft_blocks=1,
+                                                            min_score=min(cfg.min_score, 60)))
+            events = [idea for idea in self.stock_events
+                      if idea.symbol == snap.symbol and idea.day == snap.day
+                      and timedelta(0) <= snap.at - idea.at <= timedelta(minutes=15)]
+            seen = {c.option.symbol for c in evaluated}
+            for idea in events:
+                option = pick_one_otm(snap, idea.side, cfg)
+                if option is None:
+                    self._log_missing(snap, "handoff has no priced 1-OTM contract")
+                    continue
+                if option.symbol in seen:
+                    for candidate in evaluated:
+                        if candidate.option.symbol == option.symbol:
+                            candidate.metrics["handoff_trigger"] = idea.trigger
+                    continue
+                setup = Setup(idea.setup, idea.trigger, idea.invalidation)
+                added = thin_candidate(snap, option, cfg, setup)
+                added.metrics["handoff_trigger"] = idea.trigger
+                evaluated.append(added)
+                seen.add(option.symbol)
+            if not evaluated:
+                priced_any = any(o.bid > 0 and o.ask > o.bid for o in snap.options)
+                reason = "option feature window missing" if priced_any else "no priced contract"
+                self._log_missing(snap, reason)
+                history.append(snap)
+                self.history[key] = [s for s in history if snap.at - s.at <= timedelta(minutes=25)]
+                if cfg.fallback_rule in {"log", "on"}:
+                    self._observe_fallback_safely(snap, ready)
+                continue
+            scored = []
+            for candidate in evaluated:
+                handoff = candidate.metrics.get("handoff_trigger") is not None
+                if handoff and candidate.setup is None and events:
+                    match = next(idea for idea in events if idea.side == candidate.option.side)
+                    candidate.setup = Setup(match.setup, match.trigger, match.invalidation)
+                apply_v2(candidate, cfg, history, self.index_bars, handoff=handoff,
+                         thin=not candidate.metrics.get("cluster_size"),
+                         a_bar=snap.symbol in self.runner_names)
+                if candidate.metrics.get("score_v2") is None:
+                    candidate.metrics.update(missing_v2("score did not compute"))
+                scored.append(candidate)
+            if cfg.score_mode == "combined":
+                self._apply_stock_override(snap, scored, cfg, history)
+            self.store.record_candidates(snap, scored, cfg)
+            history.append(snap)
+            self.history[key] = [s for s in history if snap.at - s.at <= timedelta(minutes=25)]
+            for candidate in scored:
+                if candidate.metrics.get("score_v2") is None:
+                    self.store.decision(snap, "RESEARCH", candidate.metrics.get("v2_reason") or "no v2 tier", candidate)
+                    continue
+                if self._duplicate_event(candidate):
+                    self.store.decision(snap, "RUNNER", "same contract and trigger inside 5 minutes", candidate)
+                    continue
+                if candidate.qualifying:
+                    candidate.state = "IGNITION"
+                    ready.append(candidate)
+                else:
+                    gap = candidate.metrics.get("below_by")
+                    self.store.decision(
+                        snap, "RESEARCH",
+                        f"below bar by {gap} ({candidate.metrics.get('score_mode')} {candidate.metrics.get('path')} "
+                        f"bar {candidate.metrics.get('post_bar')}; strength {candidate.metrics.get('stock_strength')}; "
+                        f"p {candidate.metrics.get('fitted_win_probability')})",
+                        candidate)
+            if cfg.fallback_rule in {"log", "on"}:
+                self._observe_fallback_safely(snap, ready)
+        alerts = []
+        for candidate in sorted(ready, key=lambda c: (-c.score, c.snapshot.symbol)):
+            snap = candidate.snapshot
+            if cfg.send_requote:
+                candidate.metrics["send_requote"] = 1
+            phase = "ACTIVE"
+            payload = alert_payload(candidate, phase)
+            self._annotate_card(payload, candidate)
+            ident = self.store.queue(candidate, payload, self.dry_run, phase, None, tier=None, sendable=True)
+            posted = f"active alert {ident}"
+            if candidate.metrics.get("fallback_reason"):
+                posted = f"{posted}: {candidate.metrics['fallback_reason']}"
+            self.store.decision(snap, candidate.state, posted, candidate)
+            alerts.append({"id": ident, "phase": phase, "parent_id": None, "payload": payload})
+        return alerts
+
+    def _apply_stock_override(self, snap, scored, cfg, history) -> None:
+        """Post the priced 1-OTM contract when every strong-stock check is on.
+
+        Other strikes stay on the combined bar. No contract means no card.
+        """
+        from .model_v import apply_v2, pick_one_otm, thin_candidate
+        from .patterns import Setup
+
+        sides = {c.option.side for c in scored if c.metrics.get("exceptional_stock")}
+        for side in sides:
+            picked = pick_one_otm(snap, side, cfg)
+            if picked is None:
+                self._log_missing(snap, "stock_override has no priced 1-OTM contract")
+                continue
+            match = next((c for c in scored if c.option.symbol == picked.symbol), None)
+            if match is None:
+                donor = next(c for c in scored if c.option.side == side and c.metrics.get("exceptional_stock"))
+                setup = donor.setup or Setup("STOCK_OVERRIDE", snap.spot, snap.spot)
+                match = thin_candidate(snap, picked, cfg, setup)
+                apply_v2(match, cfg, history, self.index_bars, handoff=True, thin=True)
+                scored.append(match)
+            match.metrics["path"] = "stock_override"
+            match.metrics["score_mode"] = "combined"
+            match.qualifying = True
+
+    def _log_missing(self, snap, reason: str) -> None:
+        from .model_v import missing_v2
+        detail = missing_v2(reason)
+        self.store.decision(snap, "DISCOVERY", detail["v2_reason"])
+
+    def _fallback_log_path(self):
+        if self.fallback_log:
+            return self.fallback_log
+        return Path(os.getenv("DATA_DIR", "data")) / "fallback-rule.jsonl"
+
+    def _option_side_skip(self, snap, side, ready):
+        start = snap.at - timedelta(minutes=self.settings.fb_same_move_before_min)
+        for candidate in ready:
+            if candidate.snapshot.symbol != snap.symbol or candidate.option.side != side:
+                continue
+            if candidate.setup and candidate.setup.name == "STRONG_STOCK_FALLBACK":
+                continue
+            if start <= candidate.snapshot.at <= snap.at:
+                return True, "pending", candidate.snapshot.at.astimezone(ET).isoformat()
+        rows = self.store.db.execute(
+            "SELECT id, at, setup_name FROM alerts WHERE day=? AND symbol=? AND side=?",
+            (snap.day, snap.symbol, side)).fetchall()
+        for row in rows:
+            if row["setup_name"] == "STRONG_STOCK_FALLBACK":
+                continue
+            at = datetime.fromisoformat(row["at"])
+            if start <= at <= snap.at:
+                return True, row["id"], row["at"]
+        return False, None, None
+
+    def _finish_fallback_entries(self, snap) -> None:
+        """Write the entry line when bar m+2 arrives. A skipped bar is entry_missing, not a spread fail.
+
+        The fire line is already on disk. Drop the in-memory entry before writing it, so a
+        failed write is not retried on the next cycle.
+        """
+        from .model_v import append_fallback_log, fallback_entry_line
+        from .model_v import _minute_index
+        minute = _minute_index(snap.bars[-1]) if snap.bars else None
+        if minute is None:
+            return
+        pending = []
+        due = []
+        for record in self.fallback_pending:
+            if record["tk"] != snap.symbol or record["date"] != snap.day or minute < record["entry_m"]:
+                pending.append(record)
+                continue
+            due.append((record, minute == record["entry_m"]))
+        self.fallback_pending = pending
+        for record, landed in due:
+            line = fallback_entry_line(record, snap if landed else None, self.settings)
+            append_fallback_log(self._fallback_log_path(), line)
+
+    def _observe_fallback_safely(self, snap, ready) -> None:
+        """A fallback failure logs a warning and leaves this cycle's option cards alone."""
+        try:
+            self._observe_fallback(snap, ready)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "fallback rule failed for %s (%s)", snap.symbol, type(exc).__name__)
+
+    def _post_fallback(self, snap, record, ready) -> None:
+        from .model_v import apply_v2, quote_spread_fail, thin_candidate
+        from .patterns import Setup
+        option = record.get("_option")
+        if option is None or record["dedupe_flag"] or record["skip_flag"]:
+            return
+        fail, _pct, _mid = quote_spread_fail(record.get("fire_bid"), record.get("fire_ask"),
+                                              self.settings.fb_max_spread_pct)
+        if fail:
+            return
+        level = record["level_value"] if isinstance(record["level_value"], (int, float)) else snap.spot
+        setup = Setup("STRONG_STOCK_FALLBACK", float(level), float(level))
+        candidate = thin_candidate(snap, option, self.settings, setup)
+        apply_v2(candidate, self.settings, [], self.index_bars, handoff=False, thin=True,
+                 a_bar=snap.symbol in self.runner_names)
+        if candidate.metrics.get("score_v2") is None:
+            candidate.metrics["score_v2"] = candidate.score
+        ready.append(candidate)
+        candidate.setup = setup
+        candidate.qualifying = True
+        candidate.state = "IGNITION"
+        candidate.metrics["path"] = "fallback"
+        candidate.metrics["fallback_reason"] = record["card_reason"]
+        if record["card_reason"] not in candidate.reasons:
+            candidate.reasons = list(candidate.reasons) + [record["card_reason"]]
+
+    def _observe_fallback(self, snap, ready) -> None:
+        """Log would-be cards. log mode does not touch the option-side post list."""
+        from .model_v import append_fallback_log, evaluate_fallback, new_fallback_state
+        if not snap.bars:
+            return
+        self._finish_fallback_entries(snap)
+        for side in ("CALL", "PUT"):
+            key = (snap.day, snap.symbol, side)
+            state = self.fallback_state.get(key)
+            if state is None:
+                state = new_fallback_state()
+                self.fallback_state[key] = state
+            record = evaluate_fallback(snap, side, self.settings, state, self._option_side_skip(snap, side, ready))
+            if record is None:
+                continue
+            fire_line = {key: value for key, value in record.items() if key != "_option"}
+            append_fallback_log(self._fallback_log_path(), fire_line)
+            self.fallback_pending.append(record)
+            if self.settings.fallback_rule == "on":
+                self._post_fallback(snap, record, ready)
+
+    def _duplicate_event(self, candidate) -> bool:
+        from .model_v import same_event
+        snap = candidate.snapshot
+        trigger = candidate.setup.trigger if candidate.setup else candidate.metrics.get("handoff_trigger")
+        rows = self.store.db.execute(
+            """SELECT at, setup_trigger FROM alerts WHERE day=? AND symbol=? AND contract=? ORDER BY at DESC""",
+            (snap.day, snap.symbol, candidate.option.symbol)).fetchall()
+        window = timedelta(minutes=self.settings.event_dedupe_minutes)
+        for row in rows:
+            at = datetime.fromisoformat(row["at"])
+            if snap.at - at >= window or snap.at < at:
+                continue
+            if same_event(trigger, row["setup_trigger"], snap.spot, snap.prior_atr):
+                return True
+        return False
+
+    def _annotate_card(self, payload, candidate) -> None:
+        metrics = candidate.metrics
+        embed = payload["embeds"][0]
+        path = metrics.get("path") or "combined"
+        embed["description"] += (
+            f"\n{path} · {metrics.get('score_mode')} v2 **{metrics.get('score_v2')}** · bar {metrics.get('post_bar')}"
+            f" · option {metrics.get('option_v2')} + stock {metrics.get('stock_v2')}"
+        )
+        embed["description"] += (
+            f"\nstock_strength {metrics.get('stock_strength') if metrics.get('stock_strength') is not None else 'n/a'}"
+            f" · fitted p {metrics.get('fitted_win_probability') if metrics.get('fitted_win_probability') is not None else 'n/a'}"
+        )
+        if metrics.get("spy_label"):
+            embed["description"] += f"\n{metrics['spy_label']}"
+        if metrics.get("level_retest"):
+            embed["description"] += f"\nLevel retest {metrics.get('retest_level') or ''}".rstrip()
+        if path == "stock_override":
+            embed["description"] += "\nExceptional stock override"
+        if metrics.get("strength_band") == "a_bar":
+            embed["description"] += "\nRunner name at the A bar"
+        if metrics.get("fallback_reason"):
+            embed["description"] += "\n" + metrics["fallback_reason"]
 
     def _clear_confirmation(self, key):
         for score_key in list(self.qualified_since):

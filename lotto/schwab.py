@@ -26,6 +26,25 @@ SECTORS = {**dict.fromkeys(("TSM", "NVDA", "AMD", "ARM", "INTC", "MU", "AVGO", "
            **dict.fromkeys(("COIN", "HOOD", "MSTR"), "IBIT"), "MRNA": "XBI"}
 
 
+def _market_day_context(bars, spot, opening):
+    """Benchmark return from the open and which side of session VWAP it is on."""
+    if bars and spot and bars[0].open:
+        price = spot
+        day_open = bars[0].open
+        volume = 0.0
+        total = 0.0
+        for bar in bars:
+            typical = (bar.high + bar.low + bar.close) / 3
+            volume += bar.volume
+            total += typical * bar.volume
+        vwap = total / volume if volume else bars[-1].close
+        side = 1 if price > vwap else -1 if price < vwap else 0
+        return price / day_open - 1, side
+    if spot and opening:
+        return spot / opening - 1, None
+    return None, None
+
+
 def benchmark_for(symbol):
     return "SPY" if symbol in {"SPX", "QQQ", "SMH", "SOXX", "XLK"} else SECTORS.get(symbol, "QQQ")
 
@@ -81,6 +100,8 @@ class Schwab:
         self.atrs = {}
         self.levels = {}
         self.bar_cache = {}
+        self.quote_cycle = 0
+        self.standby_chain_at = {}
         self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "60")),
             always_deep={s.strip().upper() for s in os.getenv(
                 "LOTTO_CONTINUOUS_SYMBOLS",
@@ -254,6 +275,10 @@ class Schwab:
         if not hasattr(self, "atrs"):
             self.atrs = {}
         self.atrs[key] = sum(ranges[-14:])/14 if len(ranges) >= 14 else None
+        if not hasattr(self, "atrs21"):
+            self.atrs21 = {}
+        from .model_v import atr21_value
+        self.atrs21[key] = atr21_value(ranges)
         if not hasattr(self,"levels"):
             self.levels = {}
         if daily:
@@ -289,11 +314,57 @@ class Schwab:
                 total += minutes.get(minute, 0)
                 if minute in minutes:
                     observations[minute + 1].append(total)
+        full_days = []
+        for historic_day in sorted(profiles):
+            minutes = profiles[historic_day]
+            if sum(1 for minute in minutes if 0 <= minute < 390) < 380:
+                continue
+            total = 0.0
+            curve = {}
+            for minute in range(390):
+                total += minutes.get(minute) or 0
+                curve[minute] = total
+            full_days.append(curve)
+        used = full_days[-10:]
+        handoff_base = {}
+        if len(full_days) >= 5:
+            for minute in range(390):
+                handoff_base[minute] = sum(curve[minute] for curve in used) / len(used)
+        if not hasattr(self, "handoff_rvol"):
+            self.handoff_rvol = {}
+        self.handoff_rvol[key] = {"days": len(full_days), "base": handoff_base}
+        # Fallback RVOL is the prior 10 sessions, partial days included. It does
+        # not use the handoff model's 5-day / 380-bar floor.
+        session_curves = []
+        for historic_day in sorted(profiles):
+            minutes = profiles[historic_day]
+            if not any(0 <= minute < 390 for minute in minutes):
+                continue
+            total = 0.0
+            curve = {}
+            for minute in range(390):
+                total += minutes.get(minute) or 0
+                curve[minute] = total
+            session_curves.append(curve)
+        fallback_base = {}
+        if len(session_curves) >= 10:
+            used_fallback = session_curves[-10:]
+            for minute in range(390):
+                fallback_base[minute] = sum(curve[minute] for curve in used_fallback) / 10
+        if not hasattr(self, "fallback_rvol"):
+            self.fallback_rvol = {}
+        self.fallback_rvol[key] = {"sessions": len(session_curves), "base": fallback_base}
         baseline = {minute: median(values) for minute, values in observations.items() if len(values) >= 10}
         if symbol == "SPX":
             # Schwab index candles have zero volume; use traded SPY volume only
             # for volume-based signals while retaining SPX prices and ATR.
             baseline = self.baseline("SPY", now)
+            spy_rvol = self.handoff_rvol.get(("SPY", day))
+            if spy_rvol:
+                self.handoff_rvol[key] = spy_rvol
+            spy_fallback = getattr(self, "fallback_rvol", {}).get(("SPY", day))
+            if spy_fallback is not None:
+                self.fallback_rvol[key] = spy_fallback
         if not baseline:
             LOG.warning("%s has fewer than ten usable historical sessions; no alerts until baseline is available", symbol)
         self.baselines[key] = baseline
@@ -493,7 +564,8 @@ class Schwab:
         LOG.info('Opening Greekless chains: independently refreshed %d/%d near-money contracts',
                  len(refreshed),len(requested))
 
-    def poll(self, symbols: list[str], tracked: dict, max_dte: int, on_discovery=None) -> list[Snapshot]:
+    def poll(self, symbols: list[str], tracked: dict, max_dte: int, on_discovery=None,
+             standby=(), in_play_settings=None) -> list[Snapshot]:
         now = datetime.now(timezone.utc)
         if not hasattr(self, "coverage"):
             self.coverage = ChainCoverage()
@@ -503,7 +575,18 @@ class Schwab:
         if not session or not session[0] <= now < session[1]:
             return []
         benchmarks = {benchmark_for(s) for s in symbols} | {"SPY", "QQQ", "SMH"}
-        requested = sorted(set(symbols) | benchmarks)
+        standby = set(standby)
+        batch = getattr(in_play_settings, "quote_batch", 180) if in_play_settings is not None else 180
+        quote_every = getattr(in_play_settings, "standby_quote_minutes", 1) if in_play_settings is not None else 1
+        from .model_v import quote_universe
+        cycle = getattr(self, "quote_cycle", 0)
+        quoted = quote_universe([s for s in symbols if s not in standby],
+                                [s for s in symbols if s in standby],
+                                cycle, batch, quote_every)
+        self.quote_cycle = cycle + 1
+        if not hasattr(self, "standby_chain_at"):
+            self.standby_chain_at = {}
+        requested = sorted(set(quoted) | benchmarks)
         quotes = self.get("/quotes", {"symbols": ",".join(api_symbol(s) for s in requested)})
         parsed = {}
         for symbol in requested:
@@ -520,18 +603,51 @@ class Schwab:
             }
         if "SPX" in parsed:
             parsed["SPX"]["volume"] = parsed.get("SPY", {}).get("volume")
-        selected = self.discovery.update(parsed, datetime.now(timezone.utc), set(symbols), tracked,
+        core = set(symbols) - standby
+        selected = self.discovery.update(parsed, datetime.now(timezone.utc), core or set(symbols), tracked,
                                          self.coverage.priorities(now),
                                          {s for s, available in self.coverage.has_near_expiry.items() if not available})
+        if standby and in_play_settings is not None:
+            from .model_v import due_standby, quote_in_play
+            scan_minutes = max(1, int(getattr(in_play_settings, "standby_scan_minutes", 3)))
+            scan_limit = max(1, int(getattr(in_play_settings, "standby_scans_per_cycle", 4)))
+            in_play = []
+            quotes_by_symbol = {}
+            for symbol in standby:
+                history = self.discovery.history.get(symbol) or []
+                quote = dict(parsed.get(symbol) or {})
+                if history:
+                    quote.setdefault("volume_acceleration", history[-1].get("volume_acceleration"))
+                    quote.setdefault("price", history[-1].get("price"))
+                    quote.setdefault("open", history[-1].get("open"))
+                    quote.setdefault("previous", history[-1].get("previous"))
+                if not quote_in_play(quote, in_play_settings):
+                    continue
+                in_play.append(symbol)
+                quotes_by_symbol[symbol] = history
+            for symbol in due_standby(in_play, self.standby_chain_at, now, scan_minutes, scan_limit):
+                self.standby_chain_at[symbol] = now
+                history = quotes_by_symbol.get(symbol) or []
+                if history and all(row["symbol"] != symbol for row in self.discovery.observations):
+                    self.discovery.observations.append(history[-1])
+                if symbol not in selected:
+                    selected.insert(0, symbol)
         # The whole-universe stock path runs now. It must not wait for the
         # slower option-chain sweep or deep historical-bar downloads.
+        handoff = []
         if on_discovery is not None:
-            on_discovery(self.discovery.observations)
+            returned = on_discovery(self.discovery.observations) or []
+            handoff = [s for s in returned if s in parsed]
+        for symbol in reversed(handoff):
+            if symbol in selected:
+                selected.remove(symbol)
+            selected.insert(0, symbol)
         result = []
         began = time.monotonic()
         _, _, rate_limits_before = self.request_statistics()
         sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "26")))
-        sweep_targets = self.coverage.due(symbols, now, selected, sweep_limit)
+        sweep_universe = [s for s in symbols if s not in standby or s in selected]
+        sweep_targets = self.coverage.due(sweep_universe, now, selected, sweep_limit)
         def chain(symbol):
             return self.option_chain(symbol, now, max_dte)
         def deep(symbol):
@@ -608,6 +724,9 @@ class Schwab:
                 context, context_time = self.discovery.return_5m(benchmark, at)
                 market = "QQQ" if symbol == "SPY" else "SPY"
                 market_return, market_time = self.discovery.return_5m(market, at)
+                market_from_open, market_vwap_side = _market_day_context(
+                    completed.get(market, (None, None))[0] if market in completed else None,
+                    parsed.get(market, {}).get("price"), parsed.get(market, {}).get("open"))
                 peers = []
                 # Genuine peers only; exclude the target and sector ETF itself.
                 for peer in symbols:
@@ -618,14 +737,30 @@ class Schwab:
                 peer_return = median(p[1] for p in peers) if len(peers) >= 2 else None
                 leaders = tuple(p[0] for p in sorted(peers, key=lambda p:abs(p[1]), reverse=True)[:3]
                                 if peer_return is not None and p[1]*peer_return > 0)
-                result.append(Snapshot(symbol, at, spot, spot_time, previous, bars, tuple(options),
+                rvol_info = getattr(self, "handoff_rvol", {}).get((symbol, now.astimezone(ET).date()), {})
+                rvol_minute = None
+                if bars:
+                    end = bars[-1].end.astimezone(ET)
+                    rvol_minute = (end.hour * 60 + end.minute) - (9 * 60 + 31)
+                rvol_base = (rvol_info.get("base") or {}).get(rvol_minute)
+                snap = Snapshot(symbol, at, spot, spot_time, previous, bars, tuple(options),
                                        context, context_time, benchmark, "schwab", session[1],
                                        volume_source="SPY" if symbol == "SPX" else symbol,
                                        prior_atr=self.atrs.get((symbol, now.astimezone(ET).date())),
                                        market_return_5m=market_return, market_time=market_time, market_label=market,
+                                       market_return_from_open=market_from_open, market_vwap_side=market_vwap_side,
                                        peer_return_5m=peer_return, peer_time=min((p[2] for p in peers), default=None),
                                        peer_leaders=leaders,
-                                       **getattr(self,"levels",{}).get((symbol,now.astimezone(ET).date()),{})))
+                                       prior_full_days=rvol_info.get("days"),
+                                       rvol_base=rvol_base,
+                                       **getattr(self,"levels",{}).get((symbol,now.astimezone(ET).date()),{}))
+                # Kept off the dataclass so stored option cards stay the same bytes.
+                day_key = (symbol, now.astimezone(ET).date())
+                fb = getattr(self, "fallback_rvol", {}).get(day_key, {})
+                object.__setattr__(snap, "prior_atr21", getattr(self, "atrs21", {}).get(day_key))
+                object.__setattr__(snap, "fallback_rvol_sessions", fb.get("sessions"))
+                object.__setattr__(snap, "fallback_rvol_base", (fb.get("base") or {}).get(rvol_minute))
+                result.append(snap)
             except Exception as exc:
                 LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)
         recent_requests, spacing, rate_limits_total = self.request_statistics()

@@ -37,6 +37,14 @@ def quote_ok(option: Option, snap: Snapshot, settings: Settings) -> bool:
             and abs((option.quote_time - snap.spot_time).total_seconds()) <= settings.max_quote_age_seconds)
 
 
+def contract_selectable(option: Option, snap: Snapshot, settings: Settings) -> bool:
+    """Model V only requires a priced quote. Spread and premium become score terms."""
+    if settings.model != "V":
+        return contract_ok(option, snap, settings)
+    from .model_v import priced
+    return priced(option, snap, settings)
+
+
 def contract_ok(option: Option, snap: Snapshot, settings: Settings) -> bool:
     dte = (option.expiry - snap.at.astimezone(ET).date()).days
     spread = option.ask - option.bid
@@ -232,7 +240,8 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
               if 0 <= (o.expiry - snap.at.astimezone(ET).date()).days <= settings.max_dte}
     results = []
     for expiry, side in sorted(groups):
-        rules = "B" if settings.hybrid and (expiry-snap.at.astimezone(ET).date()).days == 0 else "F"
+        dte_days = (expiry-snap.at.astimezone(ET).date()).days
+        rules = "B" if (settings.model == "V" or settings.hybrid) and dte_days == 0 else "F"
         direction = 1 if side == "CALL" else -1
         listed = sorted([o for o in snap.options if (o.expiry, o.side) == (expiry, side)], key=lambda o: o.strike)
         duration_now = (snap.at - five.at).total_seconds()
@@ -251,7 +260,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         if cluster:
             clusters.append(cluster)
         clusters = [c for c in clusters if len(c) >= settings.min_cluster]
-        eligible = [(o,c) for c in clusters for o in c if contract_ok(o, snap, settings)]
+        eligible = [(o,c) for c in clusters for o in c if contract_selectable(o, snap, settings)]
         if not eligible:
             continue
         common = [o for o in listed if o.symbol in usable]
@@ -335,6 +344,9 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         metrics["locally_improving_volume"] = int(improving)
         index_flow = index_price_flow_confirmation(
             snap, setup, metrics, score, response, len(best), acceleration, persistent)
+        # 1DTE keeps the 6d8cf1f foundation rules: no later index-flow pace bypass.
+        if settings.model == "V" and rules == "F":
+            index_flow = False
         metrics["index_price_flow_confirmation"] = int(index_flow)
         stock_risk = direction*(snap.spot-setup.invalidation) if setup else 0
         target_room = direction*(setup.target-snap.spot) if setup and setup.target is not None else None
@@ -362,7 +374,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
                 and (gap is None or 0 <= gap <= .10)),
         }
         blockers = tuple(k for k,v in checks.items() if not v)
-        if settings.hybrid and settings.soft_blocks:
+        if settings.model == "V" or (settings.hybrid and settings.soft_blocks):
             # Keep the evidence from every failed setup check, but let score
             # and the A/B delivery tier decide whether it reaches the channel.
             # Invalid or stale option quotes were rejected before this point.
@@ -374,7 +386,8 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
                 if not passed:
                     parts[f"pen_{slug}"] = -10
             score = round(sum(parts.values()), 2)
-            qualifying = score >= settings.min_score+(5 if short else 0)+(3 if late else 0)
+            # Model V posts on the v2 bar later. A failed check is only a penalty.
+            qualifying = True if settings.model == "V" else score >= settings.min_score+(5 if short else 0)+(3 if late else 0)
         else:
             qualifying = not blockers
         context_reason = (f"{snap.context_label} supportive" if context > 0
@@ -394,7 +407,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
             reasons.append("Options activity sustained 20m")
         if peer_valid and peer > 0:
             reasons.append("Peers: " + ", ".join(snap.peer_leaders))
-        if settings.hybrid and blockers:
+        if (settings.model == "V" or settings.hybrid) and blockers:
             reasons.extend(f"Soft check: {name}" for name in blockers if name != "score below threshold")
         results.append(Candidate(snap, option, score, parts, metrics, reasons, qualifying, setup=setup, blockers=blockers))
     return results

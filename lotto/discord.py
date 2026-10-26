@@ -171,34 +171,7 @@ def deliver_pending(store, webhook: str, secondary_webhook: str | None = None, q
 
 
 def deliver_stock_pending(store, webhook: str) -> None:
-    """Send independent stock ideas without waiting for deep option collection."""
-    parsed = urlparse(webhook)
-    if (parsed.scheme != "https" or parsed.hostname not in {"discord.com", "discordapp.com"}
-            or not parsed.path.startswith("/api/webhooks/")):
-        raise ValueError("A Discord HTTPS webhook URL is required for live delivery")
-    for row in store.db.execute("""SELECT id,at,payload FROM stock_ideas
-                                   WHERE delivery='pending' ORDER BY at""").fetchall():
-        age = (datetime.now(timezone.utc) - datetime.fromisoformat(row["at"])).total_seconds()
-        if not 0 <= age <= 120:
-            with store.db:
-                store.db.execute("UPDATE stock_ideas SET delivery='expired' WHERE id=?", (row["id"],))
-            continue
-        with store.db:
-            store.db.execute("UPDATE stock_ideas SET delivery='uncertain' WHERE id=?", (row["id"],))
-        request = Request(webhook, data=row["payload"].encode(),
-                          headers={"Content-Type": "application/json", "User-Agent": "LottoScanner/0.1"})
-        status = "sent"
-        try:
-            with urlopen(request, timeout=10) as response:
-                response.read()
-        except HTTPError as exc:
-            status = "pending" if exc.code == 429 else "failed" if 400 <= exc.code < 500 else "uncertain"
-            LOG.warning("Stock idea delivery %s: HTTP %s (%s)", row["id"], exc.code, status)
-        except (URLError, TimeoutError, OSError):
-            status = "uncertain"
-            LOG.warning("Stock idea delivery %s uncertain; check channel before resending", row["id"])
-        with store.db:
-            store.db.execute("UPDATE stock_ideas SET delivery=?,delivered_at=? WHERE id=?",
-                             (status,datetime.now(timezone.utc).isoformat() if status == "sent" else None,row["id"]))
-        if status != "sent":
-            break
+    """Stock-only cards never post. Pending rows are retained as internal."""
+    del webhook
+    with store.db:
+        store.db.execute("UPDATE stock_ideas SET delivery='internal' WHERE delivery='pending'")
