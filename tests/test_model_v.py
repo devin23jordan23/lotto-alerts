@@ -609,10 +609,18 @@ class FallbackRuleTests(unittest.TestCase):
                                    q_false_since=False, candidate=True, side="CALL"))
 
         settings = model_v_settings(fallback_rule="log")
-        early = _session([100] * 12 + [100, 101, 102])
+        # PMH is legal from bar 2. HOD still waits until the 09:45 bar.
+        opened = evaluate_fallback(
+            _fallback_snap(_session([100, 101, 102], volume=600)), "CALL", settings, new_fallback_state())
+        self.assertEqual((opened["m"], opened["lvl"], opened["why"]), (2, "pmh", "first"))
+        self.assertIsNone(evaluate_fallback(
+            _fallback_snap(_session([100, 102], volume=2000)), "CALL", settings, new_fallback_state()))
+        early = evaluate_fallback(
+            _fallback_snap(_session([100] * 12 + [100, 101, 102], volume=200)),
+            "CALL", settings, new_fallback_state())
+        self.assertEqual((early["m"], early["lvl"]), (14, "pmh"))
+        self.assertNotIn("hod", early["lvl"])
         state = new_fallback_state()
-        self.assertIsNone(evaluate_fallback(_fallback_snap(early), "CALL", settings, state))
-        self.assertEqual(state["k"], 0)
         held = _session([100] * 14 + [101, 102])
         fired = evaluate_fallback(_fallback_snap(held), "CALL", settings, state)
         self.assertEqual((fired["why"], fired["m"], fired["k"]), ("first", 15, 1))
@@ -719,15 +727,21 @@ class FallbackRuleTests(unittest.TestCase):
             self.assertEqual([row["payload"] for row in off_rows], [row["payload"] for row in log_rows])
             self.assertEqual([row["contract"] for row in off_rows], [row["contract"] for row in log_rows])
             self.assertFalse(off_path.exists())
-            lines = log_path.read_text().strip().splitlines()
-            self.assertEqual(len(lines), 1)
-            logged = json.loads(lines[0])
-            self.assertEqual(logged["entry_ask"], 1.1)
-            self.assertEqual(logged["spread_fail"], 0)
+            lines = [json.loads(line) for line in log_path.read_text().strip().splitlines()]
+            fire, entry = lines
+            self.assertEqual(fire["line"], "fire")
+            self.assertIsNone(fire["entry_ask"])
+            self.assertIsNone(fire["spread_fail"])
             # The option card posted on the fire bar, so the flag is set and the line is not held.
-            self.assertTrue(logged["skip_flag"])
-            self.assertEqual(logged["skip_ref_card_id"], "pending")
-            self.assertFalse(logged["skip_after_resolved"])
+            self.assertTrue(fire["skip_flag"])
+            self.assertEqual(fire["skip_ref_card_id"], "pending")
+            self.assertFalse(fire["skip_after_resolved"])
+            self.assertEqual(entry["line"], "entry")
+            self.assertEqual(entry["entry_missing"], 0)
+            self.assertEqual(entry["entry_ask"], 1.1)
+            self.assertEqual(entry["spread_fail"], 0)
+            self.assertEqual(entry["ts_fire"], fire["ts_fire"])
+            self.assertEqual(entry["k"], fire["k"])
             self.assertNotIn("strong-stock fallback", off_rows[0]["payload"])
             self.assertEqual(len(log_posted), 1)
         bare = Snapshot("DEMO", datetime(2026, 10, 26, 9, 46, tzinfo=ET), 1, datetime(2026, 10, 26, 9, 46, tzinfo=ET),
@@ -765,10 +779,11 @@ class FallbackRuleTests(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
             posted, rows = play("on", [first, first + [102], first + [102, 102], near, near + [102], near_entry], directory)
+        fires = [row for row in rows if row["line"] == "fire"]
         self.assertEqual(len(posted), 1)
-        self.assertEqual(rows[0]["k"], 1)
-        self.assertTrue(rows[1]["dedupe_flag"])
-        self.assertEqual(rows[1]["k"], 2)
+        self.assertEqual(fires[0]["k"], 1)
+        self.assertTrue(fires[1]["dedupe_flag"])
+        self.assertEqual(fires[1]["k"], 2)
         self.assertIn("PMH", posted[0]["payload"]["embeds"][0]["description"])
         self.assertIn("strong-stock fallback:", posted[0]["payload"]["embeds"][0]["description"])
         with tempfile.TemporaryDirectory() as directory:
@@ -777,7 +792,17 @@ class FallbackRuleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             posted, rows = play("log", [first, first + [102], first + [102, 102]], directory)
         self.assertEqual(posted, [])
-        self.assertEqual(len(rows), 1)
+        self.assertEqual([row["line"] for row in rows], ["fire", "entry"])
+        self.assertEqual(rows[1]["entry_missing"], 0)
+        self.assertEqual(rows[1]["entry_ask"], 1.1)
+        with tempfile.TemporaryDirectory() as directory:
+            _posted, missed = play("log", [first, first + [102] * 3], directory)
+        self.assertEqual([row["line"] for row in missed], ["fire", "entry"])
+        self.assertEqual(missed[1]["entry_missing"], 1)
+        self.assertIsNone(missed[1]["spread_fail"])
+        self.assertIsNone(missed[1]["entry_ask"])
+        self.assertEqual(missed[1]["ts_fire"], missed[0]["ts_fire"])
+        self.assertEqual(missed[1]["k"], missed[0]["k"])
 
         def prime(store):
             at = datetime(2026, 10, 26, 9, 36, tzinfo=ET)
@@ -789,8 +814,63 @@ class FallbackRuleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             posted, rows = play("on", [first, first + [102], first + [102, 102]], directory, prime)
         self.assertEqual(posted, [])
+        self.assertEqual(rows[0]["line"], "fire")
         self.assertTrue(rows[0]["skip_flag"])
         self.assertNotEqual(rows[0]["skip_ref_card_id"], "pending")
+
+    def test_fallback_failures_do_not_drop_option_cards(self):
+        closes = [100] * 14 + [101, 102, 102, 102]
+        frames = [closes[:index] for index in (16, 17, 18)]
+
+        def candidates(snap, history, settings):
+            option = snap.options[0]
+            return [Candidate(snap, option, 80, {}, {"cluster_size": 2}, ["option side"], True)]
+
+        def fake_apply(candidate, *args, **kwargs):
+            candidate.metrics["score_v2"] = 80
+            candidate.metrics["path"] = "hybrid"
+            candidate.score = 80
+            candidate.qualifying = True
+            return candidate
+
+        def run(directory):
+            store = Store(":memory:")
+            self.addCleanup(store.db.close)
+            engine = Engine(store, model_v_settings(fallback_rule="log"))
+            engine.fallback_log = Path(directory) / "fallback-rule.jsonl"
+            posted = []
+            with patch("lotto.engine.candidates", candidates), patch("lotto.model_v.apply_v2", fake_apply):
+                for prefix in frames:
+                    posted.extend(engine.process([_fallback_snap(_session(prefix))]))
+            rows = store.db.execute("SELECT payload FROM alerts").fetchall()
+            return posted, rows
+
+        real_open = Path.open
+
+        def disk_full(self, *args, **kwargs):
+            if str(self).endswith("fallback-rule.jsonl"):
+                raise OSError(28, "No space left on device")
+            return real_open(self, *args, **kwargs)
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertLogs("lotto.model_v", level="WARNING") as caught, patch.object(Path, "open", disk_full):
+                posted, rows = run(directory)
+            self.assertEqual(len(posted), 1)
+            self.assertEqual(len(rows), 1)
+            self.assertNotIn("strong-stock fallback", rows[0]["payload"])
+            self.assertIn("fallback log write failed (OSError)", "\n".join(caught.output))
+
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("rule blew up")
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertLogs("lotto.engine", level="WARNING") as caught, patch(
+                    "lotto.model_v.evaluate_fallback", explode):
+                posted, rows = run(directory)
+            self.assertEqual(len(posted), 1)
+            self.assertEqual(len(rows), 1)
+            self.assertIn("fallback rule failed for DEMO (RuntimeError)", "\n".join(caught.output))
 
 
 if __name__ == "__main__":

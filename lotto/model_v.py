@@ -39,11 +39,14 @@ Runner names stay out of the quote batch until LOTTO_STANDBY_NAMES=on. Those
 names take the handoff A bar (the normal floor) with no strength step-down.
 """
 import json
+import logging
 from bisect import bisect_left
 from dataclasses import replace
 from datetime import datetime, timedelta
 from math import exp, isfinite, log, log1p
 from pathlib import Path
+
+LOG = logging.getLogger(__name__)
 
 from .config import STRATEGY_VERSION, Settings
 from .features import Candidate
@@ -702,7 +705,9 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
             new_extreme = True
         if side == "PUT" and state.get("run_low_at_fire") is not None and bar.low < state["run_low_at_fire"]:
             new_extreme = True
-    candidate = (FALLBACK_FIRST_BAR <= minute <= FALLBACK_LAST_BAR and bool(breaks) and q_true)
+    # PMH/PDH (and the put mirrors) may fire from bar 2. HOD/LOD stay inside
+    # held_level_breaks, which still requires m >= 15. Nothing fires after 384.
+    candidate = (minute <= FALLBACK_LAST_BAR and bool(breaks) and q_true)
     why = fire_why(first=state.get("k", 0) == 0, fresh_level=fresh, new_extreme=new_extreme,
                    q_false_since=bool(state.get("q_false_since")), candidate=candidate, side=side)
     if why is None:
@@ -750,6 +755,7 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
         "quote_source": snap.source, "rule_version": FALLBACK_RULE_VERSION,
         "strategy_version": STRATEGY_VERSION, "mode": settings.fallback_rule, "card_reason": reason,
         "fire_bid": contract["fire_bid"], "fire_ask": contract["fire_ask"],
+        "line": "fire",
     }
     state["k"] = k
     state["last_m"] = minute
@@ -777,12 +783,39 @@ def complete_fallback_entry(record: dict, snap: Snapshot, settings: Settings) ->
     return record
 
 
+def fallback_entry_line(record: dict, snap: Snapshot | None, settings: Settings) -> dict:
+    """A second JSONL line keyed to the fire. A missed bar is not a spread failure."""
+    line = {
+        "line": "entry",
+        "date": record.get("date"), "ts_fire": record.get("ts_fire"), "tk": record.get("tk"),
+        "side": record.get("side"), "k": record.get("k"), "m": record.get("m"),
+        "entry_m": record.get("entry_m"), "occ_symbol": record.get("occ_symbol"),
+    }
+    if snap is None:
+        line.update({
+            "entry_missing": 1, "bid": None, "ask": None, "mid": None, "spread_pct": None,
+            "spread_fail": None, "eligible_spread": None, "entry_ask": None,
+        })
+        return line
+    filled = complete_fallback_entry(record, snap, settings)
+    line.update({
+        "entry_missing": 0, "bid": filled["bid"], "ask": filled["ask"], "mid": filled["mid"],
+        "spread_pct": filled["spread_pct"], "spread_fail": filled["spread_fail"],
+        "eligible_spread": filled["eligible_spread"], "entry_ask": filled["entry_ask"],
+    })
+    return line
+
+
 def append_fallback_log(path, record: dict) -> None:
+    """Append one JSONL line. A disk or permission error drops that line and is not retried."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {key: value for key, value in record.items() if key != "_option"}
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str) + "\n")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str) + "\n")
+    except OSError as exc:
+        LOG.warning("fallback log write failed (%s)", type(exc).__name__)
 
 
 def resolve_fallback_skip(record: dict, alerts: list[dict]) -> dict:

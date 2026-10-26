@@ -347,7 +347,7 @@ class Engine:
                 history.append(snap)
                 self.history[key] = [s for s in history if snap.at - s.at <= timedelta(minutes=25)]
                 if cfg.fallback_rule in {"log", "on"}:
-                    self._observe_fallback(snap, ready)
+                    self._observe_fallback_safely(snap, ready)
                 continue
             scored = []
             for candidate in evaluated:
@@ -385,7 +385,7 @@ class Engine:
                         f"p {candidate.metrics.get('fitted_win_probability')})",
                         candidate)
             if cfg.fallback_rule in {"log", "on"}:
-                self._observe_fallback(snap, ready)
+                self._observe_fallback_safely(snap, ready)
         alerts = []
         for candidate in sorted(ready, key=lambda c: (-c.score, c.snapshot.symbol)):
             snap = candidate.snapshot
@@ -458,24 +458,35 @@ class Engine:
         return False, None, None
 
     def _finish_fallback_entries(self, snap) -> None:
-        from .model_v import append_fallback_log, complete_fallback_entry
+        """Write the entry line when bar m+2 arrives. A skipped bar is entry_missing, not a spread fail.
+
+        The fire line is already on disk. Drop the in-memory entry before writing it, so a
+        failed write is not retried on the next cycle.
+        """
+        from .model_v import append_fallback_log, fallback_entry_line
         from .model_v import _minute_index
         minute = _minute_index(snap.bars[-1]) if snap.bars else None
         if minute is None:
             return
         pending = []
+        due = []
         for record in self.fallback_pending:
             if record["tk"] != snap.symbol or record["date"] != snap.day or minute < record["entry_m"]:
                 pending.append(record)
                 continue
-            if minute == record["entry_m"]:
-                filled = complete_fallback_entry(record, snap, self.settings)
-            else:
-                filled = {key: value for key, value in record.items() if key != "_option"}
-                filled.update({"bid": None, "ask": None, "mid": None, "spread_pct": None,
-                               "spread_fail": 1, "eligible_spread": 0, "entry_ask": None})
-            append_fallback_log(self._fallback_log_path(), filled)
+            due.append((record, minute == record["entry_m"]))
         self.fallback_pending = pending
+        for record, landed in due:
+            line = fallback_entry_line(record, snap if landed else None, self.settings)
+            append_fallback_log(self._fallback_log_path(), line)
+
+    def _observe_fallback_safely(self, snap, ready) -> None:
+        """A fallback failure logs a warning and leaves this cycle's option cards alone."""
+        try:
+            self._observe_fallback(snap, ready)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "fallback rule failed for %s (%s)", snap.symbol, type(exc).__name__)
 
     def _post_fallback(self, snap, record, ready) -> None:
         from .model_v import apply_v2, quote_spread_fail, thin_candidate
@@ -505,7 +516,7 @@ class Engine:
 
     def _observe_fallback(self, snap, ready) -> None:
         """Log would-be cards. log mode does not touch the option-side post list."""
-        from .model_v import evaluate_fallback, new_fallback_state
+        from .model_v import append_fallback_log, evaluate_fallback, new_fallback_state
         if not snap.bars:
             return
         self._finish_fallback_entries(snap)
@@ -518,6 +529,8 @@ class Engine:
             record = evaluate_fallback(snap, side, self.settings, state, self._option_side_skip(snap, side, ready))
             if record is None:
                 continue
+            fire_line = {key: value for key, value in record.items() if key != "_option"}
+            append_fallback_log(self._fallback_log_path(), fire_line)
             self.fallback_pending.append(record)
             if self.settings.fallback_rule == "on":
                 self._post_fallback(snap, record, ready)
