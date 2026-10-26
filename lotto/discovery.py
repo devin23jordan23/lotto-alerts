@@ -136,6 +136,36 @@ class Discovery:
             row["promoted"] = row["symbol"] in selected
         return selected
 
+    def prioritize_stock_ideas(self, selected, ideas, tracked, now):
+        """Give observed stock setups a deep-chain slot in this same cycle.
+
+        This changes collection priority only. It does not make an alert
+        eligible, alter a contract filter, or add a request beyond capacity.
+        """
+        if not ideas:
+            return selected
+        chosen = list(selected)
+        protected = self.always_deep | set(tracked)
+        rank = {row["symbol"]: row.get("priority", 0) for row in self.observations}
+        distinct = {idea.symbol: idea for idea in ideas if idea.symbol in rank}
+        ordered = sorted(distinct.values(), key=lambda idea: (
+            -(idea.metrics.get("recent_move_atr") or 0),
+            -rank[idea.symbol], idea.symbol))
+        for idea in ordered:
+            if idea.symbol in chosen:
+                continue
+            replaceable = [symbol for symbol in chosen if symbol not in protected]
+            if not replaceable:
+                break
+            old = min(replaceable, key=lambda symbol: (rank.get(symbol, 0), symbol))
+            chosen[chosen.index(old)] = idea.symbol
+            self.promoted.pop(old, None)
+            self.promoted[idea.symbol] = now
+        covered = set(chosen)
+        for row in self.observations:
+            row["promoted"] = row["symbol"] in covered
+        return sorted(covered)
+
     def return_5m(self, symbol, now):
         history = self.history.get(symbol, [])
         if not history or history[-1]["return_5m"] is None or not 0 <= (now-history[-1]["at"]).total_seconds() <= 90:

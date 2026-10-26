@@ -525,8 +525,10 @@ class Schwab:
                                          {s for s, available in self.coverage.has_near_expiry.items() if not available})
         # The whole-universe stock path runs now. It must not wait for the
         # slower option-chain sweep or deep historical-bar downloads.
-        if on_discovery is not None:
-            on_discovery(self.discovery.observations)
+        stock_ideas = on_discovery(self.discovery.observations) if on_discovery is not None else ()
+        if os.getenv("LOTTO_STOCK_OPTION_PROMOTION", "0") == "1":
+            selected = self.discovery.prioritize_stock_ideas(
+                selected, stock_ideas, tracked, datetime.now(timezone.utc))
         result = []
         began = time.monotonic()
         _, _, rate_limits_before = self.request_statistics()

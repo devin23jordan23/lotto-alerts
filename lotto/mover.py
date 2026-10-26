@@ -3,10 +3,10 @@
 The legacy lane is contract-first: no busy, tight 0DTE strike cluster means the
 stock is never even scored (PANW/NET/CRWD on 2026-10-23). This lane is the
 reverse: it watches the stock, alerts when the stock itself is moving with the
-market, and picks the contract last. The old contract-first liquidity
-gates (75-contract clusters, 15% AND $0.15 spread, gamma, etc.) do not apply; the lane only requires
-one tradable contract (fresh two-sided quote, ask >= $0.15, spread <= 35%), the same population the
-Oct 24 study graded. No tradable contract -> logged, not posted.
+market, and picks the contract last. The old contract-first liquidity gates
+(75-contract clusters, 15% AND $0.15 spread, gamma, etc.) do not apply. A
+fresh two-sided option quote is required for a priced card, and wide spreads
+are labeled. No such quote means the stock event is logged, not posted.
 
 Triggers (either one), tested on 2026-10-16/19/20/23 live data (read-only study,
 LOTTO-MOVERS-REVERSE-ENGINEER-2026-10-24); SPY's last 15 minutes must not be against the side:
@@ -100,10 +100,14 @@ def _valid_stock(snap):
 
 
 def pick_contract(snap, direction, settings):
-    """Best contract for the side, or None. Same tradable population the Oct 24 mover study graded:
-    ask >= $0.15, two-sided, fresh quote, spread <= 35% of ask (or <= $0.05). Among those, the
-    nearest expiry and the contract closest to 0.30 delta (moneyness proxy when delta is missing).
-    No tradable contract -> no card (the move is logged as a research decision, never posted unpriced)."""
+    """Pick a fresh two-sided contract after the stock setup exists.
+
+    Keep the historical liquid .30-delta choice where available. If no quote
+    meets that preference, use the nearest ATM or first OTM strike rather than
+    discarding the underlying setup solely because of option spread or Greeks.
+    The card labels a wide spread; an absent or stale two-sided quote still
+    cannot produce a priced trade idea.
+    """
     today = snap.at.astimezone(ET).date()
     side = "CALL" if direction == 1 else "PUT"
     pool = [o for o in snap.options
@@ -111,23 +115,28 @@ def pick_contract(snap, direction, settings):
             and 0 <= (o.expiry - today).days <= settings.max_dte]
     if not pool:
         return None
-    pool = [o for o in pool if -.02 <= direction * (o.strike / snap.spot - 1) <= .08]
+    pool = [o for o in pool if quote_ok(o, snap, settings)]
     if not pool:
         return None
-    pool = [o for o in pool if quote_ok(o, snap, settings)
-            and ((o.ask - o.bid) / o.ask <= .35 or o.ask - o.bid <= .05)]
-    if not pool:
-        return None
-    # An untradable same-day chain must not hide a tradable next-day expiry.
-    nearest = min(o.expiry for o in pool)
-    pool = [o for o in pool if o.expiry == nearest]
+    preferred = [o for o in pool if -.02 <= direction * (o.strike / snap.spot - 1) <= .08
+                 and ((o.ask - o.bid) / o.ask <= .35 or o.ask - o.bid <= .05)]
+    choices = preferred or pool
+    nearest = min(o.expiry for o in choices)
+    choices = [o for o in choices if o.expiry == nearest]
+
+    if not preferred:
+        atm = min(choices, key=lambda o: abs(o.strike - snap.spot))
+        otm = [o for o in choices if direction * (o.strike - snap.spot) > 0]
+        first_otm = min(otm, key=lambda o: direction * (o.strike - snap.spot)) if otm else atm
+        return min((atm, first_otm), key=lambda o: (abs(o.strike - snap.spot),
+                                                    (o.ask - o.bid) / o.ask))
 
     def rank(o):
         good_delta = o.delta is not None and isfinite(o.delta) and 0 < abs(o.delta) <= 1
         fit = (abs(abs(o.delta) - .30) if good_delta
                else abs(direction * (o.strike / snap.spot - 1) - .005) * 25)
         return (round(fit, 3), (o.ask - o.bid) / o.ask)
-    return min(pool, key=rank)
+    return min(choices, key=rank)
 
 
 def mover_candidates(engine, snap, settings):
@@ -184,14 +193,15 @@ def mover_candidates(engine, snap, settings):
             continue
         option = pick_contract(snap, direction, settings)
         if option is None:
-            engine.store.decision(snap, "MOVER", "mover: no tradable contract (fresh, two-sided, ask>=0.15, spread<=35%) - not posted")
+            engine.store.decision(snap, "MOVER", "mover: no fresh two-sided near-expiry contract - not posted")
             continue
         recent = snap.bars[-15:]
         invalidation = min(b.low for b in recent) if direction == 1 else max(b.high for b in recent)
         score = round(60 + 25 * min(1.0, r15 / .75) + 15 * min(1.0, max(0.0, mfo) / 1.5), 2)
         spread = (option.ask - option.bid) / option.ask
         metrics = {"lane": "MOVER", "mover_trigger": "PUSH" if push else "BASE_BREAK", "mover_r15_atr": r15, "move_from_open_atr": mfo, "mover_spy15_pct": spy15,
-                   "selected_spread_fraction": spread, "mover_quote_fresh": int(quote_ok(option, snap, settings))}
+                   "selected_spread_fraction": spread, "mover_wide_spread": int(spread > .35),
+                   "mover_quote_fresh": int(quote_ok(option, snap, settings))}
         market = f"{spy15:+.2f}%" if spy15 is not None else "unknown"
         reasons = [f"Stock-led mover ({'15m push' if push else 'base break to new session extreme'}): {r15:+.2f} ATR in 15m, {mfo:+.2f} ATR from open, SPY 15m {market}"]
         out.append(Candidate(snap, option, score, {"mover": score}, metrics, reasons, True,
@@ -225,6 +235,8 @@ def decorate(payload, candidate):
     spread = m.get("selected_spread_fraction") or 0
     embed["title"] = "🚀 STOCK MOVER · ACTIVE TRADE IDEA"
     flags = [f"spread {spread:.0%}"]
+    if m.get("mover_wide_spread"):
+        flags.append("WIDE SPREAD · limit orders only")
     trig = "15m push" if m.get("mover_trigger") == "PUSH" else "base break to new session " + ("high" if candidate.option.side == "CALL" else "low")
     spy = m['mover_spy15_pct']
     market = f"{spy:+.2f}%" if spy is not None else "unknown"

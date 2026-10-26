@@ -1,12 +1,13 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import json
 import unittest
 from unittest.mock import patch
 
 from lotto.config import Settings
 from lotto.demo import demo_frames
 from lotto.engine import Engine
-from lotto.discord import mover_send_quote_ok, deliver_pending
+from lotto.discord import mover_send_quote_ok, deliver_pending, render_send_card
 from lotto.features import Candidate
 from lotto.models import Bar, ET, Option
 from lotto.mover import keep_reason, mover_candidates, pick_contract
@@ -61,9 +62,9 @@ class MoverTests(unittest.TestCase):
 
     def test_untradable_contract_is_not_posted_but_the_move_can_still_alert_later(self):
         settings, engine, prices, snap = self._mover_setup()
-        wide = self.option(snap.at, 103, .60, 1.10)  # 45% spread: not tradable
-        self.assertEqual(mover_candidates(engine, replace(snap, options=(wide,)), settings), [])
-        # one minute later the same move has a tradable quote: it alerts (the move was never consumed)
+        one_sided = self.option(snap.at, 103, 0, 1.10)
+        self.assertEqual(mover_candidates(engine, replace(snap, options=(one_sided,)), settings), [])
+        # One minute later a real two-sided quote arrives; the stock move was not consumed.
         later = replace(snap, at=snap.at + timedelta(minutes=1))
         later = replace(later, bars=later.bars + (Bar(snap.bars[-1].end + timedelta(minutes=1), prices[-1], prices[-1] + .2,
                                                       prices[-1], prices[-1] + .15, 1000, 31000),), spot=prices[-1] + .15, spot_time=later.at)
@@ -101,7 +102,15 @@ class MoverTests(unittest.TestCase):
         b = self.option(snap.at, 104, .30, .34, delta=.22)   # tradable
         c = self.option(snap.at, 105, .12, .14, delta=.15)   # ask below $0.15: excluded
         self.assertEqual(pick_contract(replace(snap, options=(a, b, c)), 1, Settings()).symbol, b.symbol)
-        self.assertIsNone(pick_contract(replace(snap, options=(a, c)), 1, Settings()))
+        self.assertEqual(pick_contract(replace(snap, options=(a, c)), 1, Settings()).symbol, a.symbol)
+
+    def test_wide_fallback_keeps_a_priced_option_attached_to_stock_move(self):
+        settings, engine, _, snap = self._mover_setup()
+        atm = self.option(snap.at, round(snap.spot), .40, .80)
+        out = mover_candidates(engine, replace(snap, options=(atm,)), settings)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].option.symbol, atm.symbol)
+        self.assertEqual(out[0].metrics["mover_wide_spread"], 1)
 
     def test_picker_falls_back_to_listed_next_day_when_same_day_is_untradable(self):
         snap = self.snap("NET", [100 + .05 * i for i in range(50)], 5)
@@ -232,10 +241,22 @@ class MoverDeliveryTests(unittest.TestCase):
         valid = {"realtime": True, "quote_time": now, "spot_time": now,
                  "bid": .80, "ask": 1.0, "spot": 100.0}
         self.assertTrue(mover_send_quote_ok(valid, now))
-        for change in ({"ask": 1.5}, {"bid": 0}, {"spot": None},
+        self.assertTrue(mover_send_quote_ok({**valid, "ask": 1.5}, now))
+        for change in ({"ask": .80}, {"bid": 0}, {"spot": None},
                        {"quote_time": now - timedelta(seconds=91)},
                        {"spot_time": now - timedelta(seconds=91)}, {"realtime": False}):
             self.assertFalse(mover_send_quote_ok({**valid, **change}, now), change)
+
+    def test_wide_send_quote_is_labeled_on_option_card(self):
+        now = datetime.now(timezone.utc)
+        payload = {"embeds": [{"description": "Ask **$1.00** · Bid $0.80 · Stock $100.00"}]}
+        row = {"snapshot": json.dumps({"options": []}), "contract": "X",
+               "at": now.isoformat(), "symbol": "X", "setup_name": "MOVER", "entry_ask": 1.0}
+        quote = {"realtime": True, "quote_time": now, "spot_time": now,
+                 "bid": .8, "ask": 1.5, "spot": 100.0}
+        card = render_send_card(payload, row, quote, now)
+        self.assertIn("Send spread 47%", card["embeds"][0]["description"])
+        self.assertIn("WIDE SPREAD", card["embeds"][0]["description"])
 
     def test_failed_mover_requote_stays_internal_without_discord_post(self):
         helper = MoverTests("test_default_settings_change_nothing")

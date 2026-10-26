@@ -213,6 +213,7 @@ def main():
                     LOG.info("Stock-first %s %s %s at %.2f", idea.symbol, idea.side, idea.setup, idea.price)
                 if live_delivery and stock_first.enabled and stock_first.mode == "send":
                     deliver_stock_pending(store, webhook)
+                return ideas
             frame = client.poll(sorted(set(symbols) | set(tracked)), tracked,
                                 engine.settings.max_dte, on_discovery=on_discovery)
             store.record_discovery(client.discovery.observations)

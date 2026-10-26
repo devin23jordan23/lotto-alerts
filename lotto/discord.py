@@ -102,6 +102,11 @@ def render_send_card(payload: dict, row, quote: dict | None, now: datetime) -> d
             label = "⚠ STALE QUOTE" if age > 30 else "aging quote" if age >= 15 else "live quote"
             embed["description"] += (f"\n{label} · Quote {round(age)}s old at send · "
                                      f"Schwab /quotes · <t:{int(qt.timestamp())}:R>")
+            if row["setup_name"] == "MOVER":
+                spread = (quote["ask"] - quote["bid"]) / quote["ask"]
+                embed["description"] += f"\nSend spread {spread:.0%}"
+                if spread > .35:
+                    embed["description"] += " · ⚠ WIDE SPREAD · limit orders only"
             if row["entry_ask"] and abs(quote["ask"]/row["entry_ask"]-1) >= .10:
                 embed["description"] += f"\nSignal ask ${row['entry_ask']:.2f} when queued"
             return payload
@@ -111,7 +116,7 @@ def render_send_card(payload: dict, row, quote: dict | None, now: datetime) -> d
 
 
 def mover_send_quote_ok(quote: dict | None, now: datetime) -> bool:
-    """The bypass only posts a priced card when its send-time quote is tradable."""
+    """The bypass only posts a priced card with a fresh two-sided market."""
     if not quote or quote.get("realtime") is not True:
         return False
     qt, st, bid, ask, spot = (quote.get("quote_time"), quote.get("spot_time"),
@@ -125,8 +130,7 @@ def mover_send_quote_ok(quote: dict | None, now: datetime) -> bool:
     stock_age = (now - st).total_seconds()
     return (0 <= age <= 90 and 0 <= stock_age <= 90
             and abs((qt - st).total_seconds()) <= 90
-            and spot > 0 and bid > 0 and ask > bid and ask >= .15
-            and ((ask - bid) / ask <= .35 or ask - bid <= .05))
+            and spot > 0 and bid > 0 and ask > bid and ask >= .15)
 
 
 def deliver_pending(store, webhook: str, secondary_webhook: str | None = None, quoter=None) -> None:

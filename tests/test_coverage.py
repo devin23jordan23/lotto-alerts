@@ -2,6 +2,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from lotto.coverage import ChainCoverage
+from lotto.discovery import Discovery
 
 
 class CoverageTests(unittest.TestCase):
@@ -30,6 +31,19 @@ class CoverageTests(unittest.TestCase):
         self.assertIs(coverage.has_near_expiry["TEST"], False)
         coverage.reset(day + timedelta(days=1))
         self.assertNotIn("TEST", coverage.has_near_expiry)
+
+    def test_stock_setup_replaces_only_unprotected_deep_slot(self):
+        now = datetime(2026, 10, 26, 14, 0, tzinfo=timezone.utc)
+        discovery = Discovery(capacity=4, always_deep=("SPY",))
+        discovery.observations = [
+            {"symbol": symbol, "priority": priority, "promoted": symbol in {"SPY", "A", "B", "C"}}
+            for symbol, priority in (("SPY", 1), ("A", 2), ("B", 3), ("C", 4), ("PANW", 10))
+        ]
+        idea = type("Idea", (), {"symbol": "PANW", "metrics": {"recent_move_atr": .35}})()
+        chosen = discovery.prioritize_stock_ideas(["SPY", "A", "B", "C"], [idea], {"B": []}, now)
+        self.assertEqual(set(chosen), {"SPY", "B", "C", "PANW"})
+        self.assertEqual(len(chosen), 4)
+        self.assertTrue(next(row for row in discovery.observations if row["symbol"] == "PANW")["promoted"])
 
 
 if __name__ == "__main__":
