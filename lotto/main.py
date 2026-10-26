@@ -81,6 +81,20 @@ PWIN_FIELDS = (
 )
 
 
+def atr_window_status(settings) -> int:
+    """One startup line naming the ATR window Model V scores and posts on."""
+    days = settings.atr_days
+    if days == 14:
+        LOG.warning("ATR window: 14 days. prior_atr is the 14-day true-range average.")
+    else:
+        LOG.warning(
+            "ATR window: 21 days. prior_atr is the mean of the prior daily true ranges, today excluded. "
+            "Fewer than 15 true ranges leaves prior_atr empty; the 14-day average is not substituted. "
+            "LOTTO_ATR_DAYS=14 restores that average."
+        )
+    return days
+
+
 def fallback_rule_status(settings) -> str:
     """One startup line naming the strong-stock fallback mode and thresholds."""
     mode = settings.fallback_rule
@@ -260,6 +274,7 @@ def main():
              ','.join(sorted(engine.quality.disabled_rules)) or 'none')
     handoff_fallback_status(stock_first.enabled, os.getenv("LOTTO_STOCK_FIRST_MODE"))
     fallback_rule_status(engine.settings)
+    atr_window_status(engine.settings)
     from .model_v import scan_budget
     LOG.info("Model %s score_mode=%s preset=%s standby_names=%s standby=%s",
              engine.settings.model, engine.settings.score_mode, engine.settings.preset,

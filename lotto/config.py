@@ -52,6 +52,9 @@ class Settings:
     # card and posts nothing. on posts through the existing option path and
     # uses the normal handoff floors. off does not evaluate the rule.
     fallback_rule: str = "log"
+    # Model V scores and posts on this ATR window. 21 is the mean of the prior
+    # daily true ranges (today excluded, at least 15). 14 restores the old window.
+    atr_days: int = 21
     fb_rvol_min: float = 0.78
     fb_push_atr_min: float = 0.5
     fb_max_spread_pct: float = 30
@@ -180,6 +183,8 @@ class Settings:
             raise ValueError("LOTTO_STANDBY_NAMES must be on or off")
         if self.fallback_rule not in {"off", "log", "on"}:
             raise ValueError("LOTTO_FALLBACK_RULE must be off, log, or on")
+        if self.atr_days not in {14, 21}:
+            raise ValueError("LOTTO_ATR_DAYS must be 14 or 21")
         if self.fb_rvol_min < 0 or self.fb_push_atr_min < 0 or self.fb_max_spread_pct <= 0:
             raise ValueError("Invalid fallback threshold")
         if self.fb_same_move_before_min < 0 or self.fb_same_move_after_min < 0:
