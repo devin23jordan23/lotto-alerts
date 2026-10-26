@@ -1988,6 +1988,65 @@ class ReviewFixTests(unittest.TestCase):
             engine._post_fallback(snap, record(109, 10), quiet)
         self.assertNotIn("strength_marker", quiet[0].metrics)
 
+    def test_vwap_slap_uses_the_vwap_known_at_each_bar(self):
+        start = datetime(2026, 10, 26, 9, 30, tzinfo=ET)
+        atr = 2.0
+        rows = []
+        # First 5-minute bar closes under its own VWAP. Later bars pull the
+        # session VWAP down into that bar's range, above the later bars.
+        for minute, price in enumerate((104.0, 104.0, 104.0, 104.0), start=1):
+            end = start + timedelta(minutes=minute)
+            rows.append(Bar(end, price, price, price, price, 20000, None))
+        end = start + timedelta(minutes=5)
+        rows.append(Bar(end, 104.0, 110.0, 100.0, 101.0, 20000, None))
+        for minute in range(6, 11):
+            end = start + timedelta(minutes=minute)
+            rows.append(Bar(end, 97.0, 97.0, 97.0, 97.0, 20000, None))
+        rows.append(Bar(start + timedelta(minutes=11), 97.0, 97.05, 96.95, 97.0, 20000, None))
+        bars = tuple(rows)
+        final = 0.0
+        volume = 0.0
+        for bar in bars[:-1]:
+            volume += bar.volume
+            final += (bar.high + bar.low + bar.close) / 3 * bar.volume
+        final /= volume
+        early = bars[4]
+        self.assertLess(early.close, (104.0 * 4 + (110.0 + 100.0 + 101.0) / 3) / 5)
+        self.assertGreater(early.close, final)
+        self.assertLessEqual(early.low, final)
+        self.assertGreaterEqual(early.high, final)
+        self.assertLess(bars[9].high, final)
+        self.assertEqual(detect_vwap_slap(bars, 1, atr, vwap=final), 0.0)
+        self.assertEqual(detect_vwap_slap(bars, 1, atr, None), 0.0)
+        slap = _fives(start, [
+            (100.4, 100.8, 99.9, 100.5),
+            (100.5, 101.4, 100.6, 101.2),
+        ])
+        self.assertEqual(detect_vwap_slap(slap, 1, atr, vwap=1000.0), 1.0)
+        at = bars[-1].end
+        option = _contract(at, bars[-1].close, bid=1.0, ask=1.05)
+        snap = Snapshot("DEMO", at, bars[-1].close, at, bars[0].open, bars, (option,),
+                        prior_atr=atr, source="replay")
+        self.assertEqual(additive_features(snap, option, model_v_settings(), {"vwap": final})["a_vwap_slap"], 0.0)
+        slap_at = slap[-1].end
+        slap_option = _contract(slap_at, slap[-1].close, bid=1.0, ask=1.05)
+        slap_snap = Snapshot(
+            "DEMO", slap_at, slap[-1].close, slap_at, slap[0].open, slap, (slap_option,),
+            prior_atr=atr, source="replay",
+        )
+        self.assertEqual(
+            additive_features(slap_snap, slap_option, model_v_settings(), {"vwap": 1000.0})["a_vwap_slap"],
+            1.0,
+        )
+        with self.assertLogs("lotto.confluence", level="DEBUG") as logs:
+            apply_v2(Candidate(snap, option, 30, {}, {}, [], False), model_v_settings(post_threshold=20), [])
+        text = "\n".join(logs.output)
+        self.assertIn("Ace flags symbol=DEMO side=CALL", text)
+        for name in ("a_drive", "a_flushpop", "a_open_reclaim", "a_pmx_reclaim",
+                     "a_vwap_slap", "a_wm", "a_spike_rev", "spy10"):
+            self.assertIn(f"{name}=", text)
+        self.assertIn("a_vwap_slap=0.0000", text)
+
 
 if __name__ == "__main__":
     unittest.main()

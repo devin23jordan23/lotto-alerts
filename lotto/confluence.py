@@ -47,10 +47,19 @@ weight 0 so they stay available for shadow grading. The 2-minute 21 EMA
 dip-and-reclaim and the 5/10-minute put dip-and-reclaim are the rows with
 a shipped weight, and only after their gates.
 """
+import logging
 from math import floor, isfinite
 
 from .config import CONFLUENCE_TABLE, Settings
 from .models import ET
+
+LOG = logging.getLogger(__name__)
+
+# Logged on each scored card so a later fit can use the live detector outputs.
+ACE_SPY_FLAGS = (
+    "a_drive", "a_flushpop", "a_open_reclaim", "a_pmx_reclaim",
+    "a_vwap_slap", "a_wm", "a_spike_rev", "spy10",
+)
 
 
 # Chart patterns that can open a bypass on the bar they first clear the trigger.
@@ -1080,15 +1089,17 @@ def detect_flushpop(bars, direction: int, atr: float | None, trigger_end=None) -
 def detect_vwap_slap(bars, direction: int, atr: float | None, vwap=None, trigger_end=None) -> float:
     """Any earlier 5-minute bar tags VWAP and closes on the trade side.
 
-    The tag does not have to be the alert bar. The match persists. A missing
-    VWAP is the session VWAP known at that bar.
+    The tag does not have to be the alert bar. The match persists. Each bar
+    uses the session VWAP known at that bar. A single current VWAP is not
+    applied to earlier bars. `vwap` stays in the signature for the harness.
     """
+    del vwap
     rows = _research_rows(bars, trigger_end)
     framed = _clock_bars(rows, 5)
     if not _ready(direction, atr, framed):
         return 0.0
     for bar in framed:
-        level = vwap if vwap is not None else _vwap_through(rows, bar["end"])
+        level = _vwap_through(rows, bar["end"])
         if level is None:
             continue
         tagged = bar["low"] <= level <= bar["high"]
@@ -1254,7 +1265,7 @@ def additive_features(snap, option, settings: Settings, metrics=None, history=No
         "a_flushpop": detect_flushpop(bars, direction, atr, trigger_end) if bars else 0.0,
         "a_open_reclaim": detect_open_reclaim(bars, direction, atr, trigger_end) if bars else 0.0,
         "a_pmx_reclaim": detect_pmx_reclaim(bars, direction, level, trigger_end) if bars else 0.0,
-        "a_vwap_slap": detect_vwap_slap(bars, direction, atr, vwap, trigger_end) if bars else 0.0,
+        "a_vwap_slap": detect_vwap_slap(bars, direction, atr, None, trigger_end) if bars else 0.0,
         "a_wm": w_score if direction == 1 else m_score,
         "a_spike_rev": detect_spike_rev(bars, direction, atr, trigger_end) if bars else 0.0,
         "e1_ema9_2m_pullin_x_rvol15": pull2 if rvol is not None and rvol >= 1.5 else 0.0,
@@ -1281,6 +1292,21 @@ def additive_features(snap, option, settings: Settings, metrics=None, history=No
         DIP_RECLAIM_5_10_CALLS: detect_dip_reclaim_5_10_calls(bars, direction, atr) if bars else 0.0,
         "_vol5": vol5,
     }
+
+
+def _log_ace_flags(snap, option, features) -> None:
+    """One debug line per scored card: the live Ace and spy10 values."""
+    parts = " ".join(
+        f"{name}={float((features or {}).get(name) or 0):.4f}" for name in ACE_SPY_FLAGS
+    )
+    LOG.debug(
+        "Ace flags symbol=%s side=%s contract=%s at=%s %s",
+        getattr(snap, "symbol", ""),
+        getattr(option, "side", ""),
+        getattr(option, "symbol", ""),
+        snap.at.isoformat(),
+        parts,
+    )
 
 
 def spread_fraction(option) -> float | None:
@@ -1331,6 +1357,7 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
                 bid=option.bid, option_volume_5m=vol5,
             )
     features.pop("_vol5", None)
+    _log_ace_flags(snap, option, features)
     book = load_weights(settings.weights_path)
     points, score, positive = score_path(features, option.side, book, "primary")
     trigger = None
