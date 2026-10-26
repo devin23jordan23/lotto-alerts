@@ -21,6 +21,27 @@ The Hybrid A/B + MOVER replay yielded 14 MOVER and 9 option-led A/B ideas. Two M
 
 For comparison, TSLA 10:14 reached +157% on sampled bid within 30m. Its stock moved +0.69% with the side over the next 15m, with SPY also rising. AMZN 10:10 had +0.58% stock follow-through in 15m, but its option return is contaminated by the quote discrepancy. The 12 failed entries all remained below +40% on the **best hindsight eligible same-day strike** in the saved quote paths as well; switching to another strike at the same alert minute does not rescue this sample. This is diagnostic hindsight, not a tradable selector.
 
+### What the trigger actually saw on each chart
+
+All values below are side-signed moves in units of the prior-day ATR, using completed stock bars at the alert minute. A dash means that many minutes of history did not yet exist. “From open” is **not** a measure of current speed.
+
+| Failed entry | From open | Last 2m | Last 5m | Last 15m | Trigger flaw or remaining problem |
+|---|---:|---:|---:|---:|---|
+| NVDA 09:32 put | .29 | — | — | — | First down bar passed the substituted-open test; the stock later moved, but the $2.84 ask never paid +40% in 30m. |
+| AMZN 09:33 call | .29 | .25 | — | — | Initial thrust stalled for 30m. The *same* contract paid after about 45m, so suppressing the ticker for the day would lose it. |
+| AAPL 09:33 call | .34 | .26 | — | — | New opening high and a modest further stock move, yet the $1.78 ask never paid +40% in 30m. |
+| TSLA 09:34 call | .36 | .28 | — | — | First thrust faded while SPY's available 2m move was against calls; the contract paid only about 44m later. |
+| SMH 09:36 put | .27 | .11 | .16 | — | Distance from open passed although the latest 2m was weaker; next 15m favorable stock excursion was only .05%. |
+| AVGO 09:36 put | .29 | .07 | .18 | — | Distance from open passed after speed slowed; stock reversed against the put. SPY's available 2m move was against puts. |
+| MSFT 09:37 call | .32 | .10 | .19 | — | The opening rise had slowed; next 15m best favorable stock excursion was only .05%. |
+| META 09:39 put | .31 | .24 | .38 | — | Real short-side stock movement, but the selected $2.73 put, with a 14% entry spread, failed to reach +40%; no eligible alternate did either. |
+| GLD 09:47 put | .29 | .14 | .18 | .32 | Fifteen-minute history existed, but its benefit was already past; stock reversed after alert. |
+| AMD 10:02 put | .31 | .12 | .17 | .31 | Genuine stock follow-through (+.83% best in 15m), but the selected put cost $17.50 and no eligible same-day strike reached +40% in 30m. |
+| SMH 10:03 put | .49 | .05 | .06 | .27 | A fifteen-minute gain kept PUSH true when the latest five minutes were nearly flat. The selected contract began with a 25% spread. |
+| TSLA 11:05 call | .92 | .02 | .08 | .16 | BASE_BREAK accepted a fresh high wick after a pause without recent price speed or a close-through; next 15m did not extend. |
+
+Seven of these twelve had less than .10% favorable stock excursion over the next 15m or reversed (AMZN, SMH twice, AVGO, MSFT, GLD, late TSLA). The other five are **not all flat-stock failures**: NVDA, AAPL, early TSLA, META, and AMD moved .35–.83% favorably at their best within 15m, while their option bids still did not reach +40% within 30m. The audit therefore supports two different repairs: qualify *current* stock motion before posting, and treat a valid stock thesis whose option does not pay as a separate entry/contract problem. The two apparent winners are not equal evidence: AMZN 10:10 has a stock/option intrinsic-value discrepancy, while TSLA 10:14 is a clean sampled-bid winner.
+
 ## The code causes
 
 1. `stock_moves()` calls the field `15-minute move`, but when no bar exists 15 minutes back it substitutes the opening price. Before 09:45, PUSH's two tests are effectively the **same .25 ATR from-open test twice**. Eight of the 14 alerts occurred with no full 15-minute reference. A breakout-looking first bar alone can become a priced idea.

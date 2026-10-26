@@ -53,7 +53,7 @@ def stock_moves(bars, atr, direction):
 def base_break(bars, direction, base_minutes):
     """True when the last bar sets a new session extreme with the side and none of the bars
     in the previous `base_minutes` did (a break out of a base, not every tick of a run)."""
-    if len(bars) < 2:
+    if len(bars) < 2 or bars[-1].end - bars[0].end < timedelta(minutes=base_minutes):
         return False
     def extreme(b):
         return b.high if direction == 1 else -b.low

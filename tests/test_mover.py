@@ -127,6 +127,11 @@ class MoverTests(unittest.TestCase):
 
 
 class BaseBreakTests(unittest.TestCase):
+    def test_opening_new_extreme_is_not_a_fifteen_minute_base(self):
+        from lotto.mover import base_break
+        bars = bars_from([100, 101, 102])
+        self.assertFalse(base_break(bars, 1, 15))
+
     def test_grind_day_realerts_on_break_of_a_base(self):
         from lotto.mover import base_break
         # +1 ATR stair-step: push, 20-min flat base, then a new high. 15-min move stays under .25 ATR.

@@ -42,7 +42,7 @@ def ref_close(bars, minutes):
 
 
 def base_break(bars, direction):
-    if len(bars) < 2:
+    if len(bars) < 2 or bars[-1].end - bars[0].end < timedelta(minutes=15):
         return False
     extreme = lambda b: b.high if direction == 1 else -b.low
     running = extreme(bars[0])
@@ -178,7 +178,7 @@ def run(db_path):
                             "bid_10": option.bid / option.ask - 1,
                             "bid_15": option.bid / option.ask - 1,
                             "bid_30": option.bid / option.ask - 1,
-                            "min_before40": 0., "hit40_at": None, "quotes": 0,
+                            "min_before40": option.bid / option.ask - 1, "hit40_at": None, "quotes": 0,
                         }
         print("trigger pass", day, "snapshots", snapshots_read, "events", len(events), flush=True)
 
