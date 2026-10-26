@@ -839,12 +839,12 @@ class FallbackRuleTests(unittest.TestCase):
             weights_file_status(model_v_settings())
         logged = "\n".join(caught.output)
         self.assertIn(
-            "Profile: moderate post>=110 bypass>=40 min_positive_features>=0 bolt_features>=10",
+            "Profile: moderate post>=90 bypass>=40 min_positive_features>=0 bolt_features>=10",
             logged)
         self.assertIn(
-            "Fallback rule: post post>=110 bypass>=40 atr=21 contract=roll spread<=15% bid>0.05 opt_vol>=50",
+            "Fallback rule: post post>=90 bypass>=40 atr=21 contract=roll spread<=15% bid>0.05 opt_vol>=50",
             logged)
-        self.assertIn("Strong score: ⚡ on cards with score>=110 and >= 10 positive features", logged)
+        self.assertIn("Strong score: ⚡ on cards with score>=90 and >= 10 positive features", logged)
         self.assertIn(
             "Freshness: quote_age_s bar_age_s min_since_trigger logged; stale quote >5s is a flag and -4, not a gate",
             logged)
@@ -2099,6 +2099,37 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(zero_points["a_flushpop"], 0)
         self.assertEqual(zero_score, 0)
         self.assertEqual(zero_positive, 0)
+
+    def test_missing_profile_key_defaults_to_moderate_90(self):
+        chosen = active_profile({"profiles": {"moderate": {}}}, "moderate")
+        self.assertEqual(
+            (chosen["post_threshold"], chosen["bypass_threshold"],
+             chosen["min_positive_features"], chosen["strong_feature_min"]),
+            (90.0, 40.0, 0, 10),
+        )
+
+    def test_weights_book_load_failure_uses_moderate_defaults(self):
+        saved = {key: os.environ.pop(key) for key in list(os.environ) if key.startswith("LOTTO_")}
+        try:
+            os.environ["LOTTO_WEIGHTS_PATH"] = "/tmp/no-such-v4c-weights.json"
+            os.environ["LOTTO_POST_THRESHOLD"] = "20"
+            os.environ["LOTTO_BYPASS_THRESHOLD"] = "15"
+            os.environ["LOTTO_MIN_POSITIVE_FEATURES"] = "4"
+            with self.assertLogs("lotto.main", level="ERROR") as logs:
+                live = env_settings()
+        finally:
+            for name in ("LOTTO_WEIGHTS_PATH", "LOTTO_POST_THRESHOLD", "LOTTO_BYPASS_THRESHOLD",
+                         "LOTTO_MIN_POSITIVE_FEATURES"):
+                os.environ.pop(name, None)
+            os.environ.update(saved)
+        self.assertEqual(live.profile, "moderate")
+        self.assertEqual(
+            (live.post_threshold, live.bypass_threshold, live.min_positive_features, live.strong_feature_min),
+            (90, 40, 0, 10),
+        )
+        text = "\n".join(logs.output)
+        self.assertIn("Weights book failed to load", text)
+        self.assertIn("moderate defaults are in use", text)
 
 
 if __name__ == "__main__":

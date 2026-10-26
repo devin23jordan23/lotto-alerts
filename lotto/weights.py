@@ -74,7 +74,7 @@ def active_profile(book: dict | None = None, name: str | None = None) -> dict:
 
     post_threshold is used as written. A value above 60 stays. Negative
     thresholds clamp to 0. An unknown name logs a warning and uses moderate.
-    Missing keys use the moderate preset: 110 / 40 / 0 / 10.
+    Missing keys use the moderate preset: 90 / 40 / 0 / 10.
     """
     if book is None:
         book = load_weights()
@@ -95,7 +95,7 @@ def active_profile(book: dict | None = None, name: str | None = None) -> dict:
     bolt = raw.get("bolt_min_features", raw.get("bolt_min_positive_features", 10))
     return {
         "profile": requested,
-        "post_threshold": max(0.0, _number(raw.get("post_threshold"), 110)),
+        "post_threshold": max(0.0, _number(raw.get("post_threshold"), 90)),
         "bypass_threshold": max(0.0, _number(raw.get("bypass_threshold"), 40)),
         "min_positive_features": max(0, _whole(raw.get("min_positive_features"), 0)),
         "strong_feature_min": max(0, _whole(bolt, 10)),

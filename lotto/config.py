@@ -95,8 +95,8 @@ class Settings:
     weights_path: str = WEIGHTS_PATH
     # LOTTO_PROFILE names a block in the weights book. Defaults match moderate.
     profile: str = "moderate"
-    # Additive post line from the active profile. Not capped. Moderate is 110.
-    post_threshold: float = 110
+    # Additive post line from the active profile. Not capped. Moderate is 90.
+    post_threshold: float = 90
     bypass_threshold: float = 40
     # Primary cards also need this many features with value >= 0.5.
     # Bypass cards do not read this field.

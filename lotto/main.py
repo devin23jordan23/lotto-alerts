@@ -237,8 +237,18 @@ def env_settings() -> Settings:
                     chosen["profile"], ", ".join(overridden),
                 )
         except (OSError, ValueError) as exc:
-            LOG.error("Weights profile not loaded (%s); using settings defaults", type(exc).__name__)
-            updates["profile"] = "moderate"
+            LOG.error(
+                "Weights book failed to load (%s); moderate defaults are in use "
+                "(post>=90 bypass>=40 min_positive_features>=0 bolt>=10)",
+                type(exc).__name__,
+            )
+            updates.update({
+                "profile": "moderate",
+                "post_threshold": 90,
+                "bypass_threshold": 40,
+                "min_positive_features": 0,
+                "strong_feature_min": 10,
+            })
     return replace(base, **updates)
 
 
