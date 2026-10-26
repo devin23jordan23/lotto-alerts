@@ -340,6 +340,43 @@ def _minute_index(bar) -> int | None:
     return None
 
 
+def features_from_spec_raw(raw: dict) -> dict:
+    """Turn one spec test-vector raw row into model features before median fill.
+
+    pe5 is clipped to [-1, 3]. Missing breaks stay None so the fill can set them to 1.
+    """
+    def num(name):
+        return _finite(raw.get(name))
+
+    rvol = num("rvol")
+    ask = num("ask")
+    bid = num("bid")
+    volume = num("ovol5")
+    spread = num("spread")
+    if spread is None and ask and bid is not None and ask > 0:
+        spread = (ask - bid) / ask
+    premium = num("prem_exp5")
+    if premium is None:
+        premium = num("pe5")
+    return {
+        "mo_atr": num("mo_atr"),
+        "mo_pct": num("mo_pct"),
+        "rvol": rvol,
+        "l_rvol": None if rvol is None else log1p(max(rvol, 0.0)),
+        "pm_brk": num("pm_brk"),
+        "pd_brk": num("pd_brk"),
+        "newx5": num("newx5"),
+        "vwap_side": num("vwap_side"),
+        "eff10": num("eff10"),
+        "spread_c": None if spread is None else max(0.0, min(1.0, spread)),
+        "l_ask": None if ask is None or ask < 0 else log1p(ask),
+        "l_ovol5": None if volume is None else log1p(max(volume, 0.0)),
+        "pe5": None if premium is None else max(-1.0, min(3.0, premium)),
+        "cdte": num("cdte"),
+        "m": num("m"),
+    }
+
+
 def fill_model_features(raw: dict, medians: dict) -> dict:
     """Apply Vince's fill order. Missing breaks are 1. The VWAP term is not used."""
     def num(name):

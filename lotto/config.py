@@ -32,18 +32,18 @@ class Settings:
     probability_path: int = 1
     strength_quintile: float = 0.8016471997604073
     strength_decile: float = 0.8756064690026955
-    pwin_normal_0dte: float = 0.4316
-    pwin_normal_1dte: float = 0.4711
-    pwin_quintile_0dte: float = 0.2882
-    pwin_quintile_1dte: float = 0.309
-    pwin_decile: float = 0.1776
-    pwin_decile_1dte: float = 0.1833
+    pwin_normal_0dte: float = 0.43157386
+    pwin_normal_1dte: float = 0.47114974
+    pwin_quintile_0dte: float = 0.28822075
+    pwin_quintile_1dte: float = 0.30901921
+    pwin_decile: float = 0.17760635
+    pwin_decile_1dte: float = 0.18333891
     handoff_model_path: str = HANDOFF_SPEC_PATH
     strength_distribution_path: str = HANDOFF_SPEC_PATH
     preset_note: str = (
-        "S12 handoff floors: normal 0.4316/0.4711, "
-        "strength >= 0.8016471997604073 → 0.2882/0.309, "
-        "strength >= 0.8756064690026955 → 0.1776/0.1833. Hybrid v2 bars stay 40/61."
+        "S12 handoff floors: normal 0.43157386/0.47114974, "
+        "strength >= 0.8016471997604073 → 0.28822075/0.30901921, "
+        "strength >= 0.8756064690026955 → 0.17760635/0.18333891. Hybrid v2 bars stay 40/61."
     )
     # Runner names are off until LOTTO_STANDBY_NAMES=on. Those names use the
     # handoff A bar (the normal floors), with no strength step-down.
@@ -206,46 +206,46 @@ class Settings:
 _STRENGTH = {
     "strength_quintile": 0.8016471997604073,
     "strength_decile": 0.8756064690026955,
-    "pwin_normal_0dte": 0.4316,
-    "pwin_normal_1dte": 0.4711,
+    "pwin_normal_0dte": 0.43157386,
+    "pwin_normal_1dte": 0.47114974,
 }
 PRESETS = {
     "S0": {
         "preset": "S0",
         "probability_path": 0,
         **_STRENGTH,
-        "pwin_quintile_0dte": 0.2882,
-        "pwin_quintile_1dte": 0.309,
-        "pwin_decile": 0.1776,
-        "pwin_decile_1dte": 0.1833,
+        "pwin_quintile_0dte": 0.28822075,
+        "pwin_quintile_1dte": 0.30901921,
+        "pwin_decile": 0.17760635,
+        "pwin_decile_1dte": 0.18333891,
         "preset_note": "S0 keeps the 58/80 stock-led v2 bars. The probability path is off.",
     },
     "S11": {
         "preset": "S11",
         "probability_path": 1,
         **_STRENGTH,
-        "pwin_quintile_0dte": 0.3215,
-        "pwin_quintile_1dte": 0.347,
-        "pwin_decile": 0.2282,
-        "pwin_decile_1dte": 0.2406,
+        "pwin_quintile_0dte": 0.32149954,
+        "pwin_quintile_1dte": 0.34696342,
+        "pwin_decile": 0.22822777,
+        "pwin_decile_1dte": 0.24061730,
         "preset_note": (
-            "S11 handoff floors: normal 0.4316/0.4711, "
-            "strength >= 0.8016471997604073 → 0.3215/0.347, "
-            "strength >= 0.8756064690026955 → 0.2282/0.2406."
+            "S11 handoff floors: normal 0.43157386/0.47114974, "
+            "strength >= 0.8016471997604073 → 0.32149954/0.34696342, "
+            "strength >= 0.8756064690026955 → 0.22822777/0.24061730."
         ),
     },
     "S12": {
         "preset": "S12",
         "probability_path": 1,
         **_STRENGTH,
-        "pwin_quintile_0dte": 0.2882,
-        "pwin_quintile_1dte": 0.309,
-        "pwin_decile": 0.1776,
-        "pwin_decile_1dte": 0.1833,
+        "pwin_quintile_0dte": 0.28822075,
+        "pwin_quintile_1dte": 0.30901921,
+        "pwin_decile": 0.17760635,
+        "pwin_decile_1dte": 0.18333891,
         "preset_note": (
-            "S12 handoff floors: normal 0.4316/0.4711, "
-            "strength >= 0.8016471997604073 → 0.2882/0.309, "
-            "strength >= 0.8756064690026955 → 0.1776/0.1833. Hybrid v2 bars stay 40/61."
+            "S12 handoff floors: normal 0.43157386/0.47114974, "
+            "strength >= 0.8016471997604073 → 0.28822075/0.30901921, "
+            "strength >= 0.8756064690026955 → 0.17760635/0.18333891. Hybrid v2 bars stay 40/61."
         ),
     },
 }

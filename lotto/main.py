@@ -72,6 +72,38 @@ def standby_symbols() -> list[str]:
     return sorted(set(named) | set(extra))
 
 
+# Floors belong to the preset. A copied .env must not put the old rounded
+# values back on top of S11 or S12.
+PWIN_FIELDS = (
+    "pwin_normal_0dte", "pwin_normal_1dte",
+    "pwin_quintile_0dte", "pwin_quintile_1dte",
+    "pwin_decile", "pwin_decile_1dte",
+)
+
+
+def handoff_fallback_status(enabled: bool, requested_mode: str | None) -> str:
+    """Whether stock-led option cards are built.
+
+    LOTTO_STOCK_FIRST_MODE is not read by the handoff lane. Shadow does not
+    hold those option cards. Turning stock-first off does. Stock-only cards
+    never post in either state.
+    """
+    mode = (requested_mode or "shadow").strip().lower() or "shadow"
+    if enabled:
+        LOG.warning(
+            "Handoff fallback state: posting. LOTTO_STOCK_FIRST_ENABLED=true builds stock-led option cards. "
+            "LOTTO_STOCK_FIRST_MODE=%s is not read by that lane. Stock-only cards never post.",
+            mode,
+        )
+        return "posting"
+    LOG.warning(
+        "Handoff fallback state: shadow. LOTTO_STOCK_FIRST_ENABLED=false disables the handoff lane, "
+        "so stock-led option cards will not post. Set LOTTO_STOCK_FIRST_ENABLED=true. "
+        "Stock-only cards never post in any mode.",
+    )
+    return "shadow"
+
+
 def env_settings() -> Settings:
     model = os.getenv("LOTTO_MODEL", "V").strip().upper()
     if model not in {"V", "S"}:
@@ -82,7 +114,7 @@ def env_settings() -> Settings:
     updates = {}
     for field in fields(base):
         raw = os.getenv("LOTTO_" + field.name.upper())
-        if raw is not None and field.name not in {"model", "preset"}:
+        if raw is not None and field.name not in {"model", "preset", *PWIN_FIELDS}:
             if field.name == "standby_names":
                 updates[field.name] = 1 if raw.strip().lower() in {"1", "on", "true", "yes"} else 0
             else:
@@ -99,6 +131,20 @@ def env_settings() -> Settings:
                 "Rollback: one combined score, bars 40/61, stock share cap 0.40, "
                 "plus the exceptional stock_override path."
             )
+        for name in PWIN_FIELDS:
+            raw = os.getenv("LOTTO_" + name.upper())
+            if raw is None:
+                continue
+            preset_value = getattr(base, name)
+            try:
+                supplied = float(raw)
+            except ValueError:
+                supplied = None
+            if supplied != preset_value:
+                LOG.warning(
+                    "Ignoring LOTTO_%s=%s; LOTTO_PRESET=%s uses %s",
+                    name.upper(), raw, base.preset, preset_value,
+                )
     return replace(base, **updates)
 
 
@@ -198,8 +244,7 @@ def main():
              engine.quality.mode,engine.quality.policy,
              'configured' if os.getenv('DISCORD_LOTTO_SECONDARY_WEBHOOK') else 'internal',
              ','.join(sorted(engine.quality.disabled_rules)) or 'none')
-    LOG.info("Stock-first: enabled=%s posting=off requested_mode=%s", stock_first.enabled,
-             os.getenv("LOTTO_STOCK_FIRST_MODE", "send"))
+    handoff_fallback_status(stock_first.enabled, os.getenv("LOTTO_STOCK_FIRST_MODE"))
     from .model_v import scan_budget
     LOG.info("Model %s score_mode=%s preset=%s standby_names=%s standby=%s",
              engine.settings.model, engine.settings.score_mode, engine.settings.preset,
