@@ -1,0 +1,381 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1500" viewBox="0 0 1440 1500">
+<rect width="1440" height="1500" fill="#fafafa"/>
+<rect x="7" y="7" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="22" y="32" font-size="17" font-family="Arial" font-weight="bold" fill="#b63131">09:32 NVDA PUT · option 30m -5%</text>
+<line x1="54" y1="245.2" x2="450" y2="245.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="249.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="54" y1="200.6" x2="450" y2="200.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="204.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="54" y1="156.0" x2="450" y2="156.0" stroke="#777" stroke-width="1.3"/>
+<text x="45" y="160.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="54" y1="133.7" x2="450" y2="133.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="137.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="54" y1="111.4" x2="450" y2="111.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="115.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="54" y1="66.8" x2="450" y2="66.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="70.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="72.9" y1="49" x2="72.9" y2="263" stroke="#eee" stroke-dasharray=""/>
+<text x="72.9" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="167.1" y1="49" x2="167.1" y2="263" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="167.1" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="261.4" y1="49" x2="261.4" y2="263" stroke="#eee" stroke-dasharray=""/>
+<text x="261.4" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="355.7" y1="49" x2="355.7" y2="263" stroke="#eee" stroke-dasharray=""/>
+<text x="355.7" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="450.0" y1="49" x2="450.0" y2="263" stroke="#eee" stroke-dasharray=""/>
+<text x="450.0" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="150.7,176.4 160.1,162.7 177.6,154.1 187.2,155.1 196.5,157.2 205.9,149.6 215.3,150.7 224.9,150.2 234.3,145.5 243.6,140.0 253.0,143.9 262.5,145.0 272.0,154.4 281.3,150.7 290.7,147.6 300.2,150.4 309.6,152.3 319.0,151.3 328.5,146.7 337.9,153.9 347.3,148.6 356.7,147.9 366.2,147.0 375.6,145.3 385.0,143.7 394.5,145.9 403.9,143.6 413.3,145.7 422.8,141.3 432.2,146.8 441.6,146.2" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="167.1" cy="156.0" r="3.3" fill="#ca4141"/>
+<text x="450" y="295" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+<rect x="487" y="7" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="502" y="32" font-size="17" font-family="Arial" font-weight="bold" fill="#b63131">09:33 AMZN CALL · option 30m -12%</text>
+<line x1="534" y1="245.2" x2="930" y2="245.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="249.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="534" y1="200.6" x2="930" y2="200.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="204.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="534" y1="156.0" x2="930" y2="156.0" stroke="#777" stroke-width="1.3"/>
+<text x="525" y="160.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="534" y1="133.7" x2="930" y2="133.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="137.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="534" y1="111.4" x2="930" y2="111.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="115.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="534" y1="66.8" x2="930" y2="66.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="70.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="552.9" y1="49" x2="552.9" y2="263" stroke="#eee" stroke-dasharray=""/>
+<text x="552.9" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="647.1" y1="49" x2="647.1" y2="263" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="647.1" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="741.4" y1="49" x2="741.4" y2="263" stroke="#eee" stroke-dasharray=""/>
+<text x="741.4" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="835.7" y1="49" x2="835.7" y2="263" stroke="#eee" stroke-dasharray=""/>
+<text x="835.7" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="930.0" y1="49" x2="930.0" y2="263" stroke="#eee" stroke-dasharray=""/>
+<text x="930.0" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="620.3,173.0 629.7,160.1 639.1,150.5 656.7,164.2 666.0,174.3 675.5,158.6 684.8,159.1 694.5,172.9 703.9,171.6 713.2,162.2 722.6,170.1 732.0,164.2 741.5,162.8 750.9,162.0 760.3,164.6 769.7,160.9 779.1,154.8 788.6,162.8 798.0,169.6 807.4,164.0 816.9,160.8 826.3,164.5 835.7,163.0 845.1,168.7 854.6,161.0 864.0,157.4 873.4,154.9 882.9,156.6 892.3,159.5 901.7,152.8 911.1,150.9 920.6,149.3" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="647.1" cy="156.0" r="3.3" fill="#ca4141"/>
+<text x="930" y="295" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+<rect x="967" y="7" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="982" y="32" font-size="17" font-family="Arial" font-weight="bold" fill="#b63131">09:33 AAPL CALL · option 30m -7%</text>
+<line x1="1014" y1="245.2" x2="1410" y2="245.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="249.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="1014" y1="200.6" x2="1410" y2="200.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="204.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="1014" y1="156.0" x2="1410" y2="156.0" stroke="#777" stroke-width="1.3"/>
+<text x="1005" y="160.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="1014" y1="133.7" x2="1410" y2="133.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="137.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="1014" y1="111.4" x2="1410" y2="111.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="115.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="1014" y1="66.8" x2="1410" y2="66.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="70.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="1032.9" y1="49" x2="1032.9" y2="263" stroke="#eee" stroke-dasharray=""/>
+<text x="1032.9" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="1127.1" y1="49" x2="1127.1" y2="263" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="1127.1" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="1221.4" y1="49" x2="1221.4" y2="263" stroke="#eee" stroke-dasharray=""/>
+<text x="1221.4" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="1315.7" y1="49" x2="1315.7" y2="263" stroke="#eee" stroke-dasharray=""/>
+<text x="1315.7" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="1410.0" y1="49" x2="1410.0" y2="263" stroke="#eee" stroke-dasharray=""/>
+<text x="1410.0" y="280" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="1100.3,181.9 1109.7,175.5 1119.1,159.0 1136.7,152.7 1146.0,160.9 1155.5,144.9 1164.8,149.2 1174.5,149.6 1183.9,139.9 1193.2,142.7 1202.6,141.2 1212.0,143.9 1221.5,145.1 1230.9,146.4 1240.3,146.3 1249.7,149.4 1259.1,152.0 1268.6,151.2 1278.0,149.8 1287.4,154.7 1296.9,155.5 1306.3,151.0 1315.7,150.4 1325.1,144.7 1334.6,145.2 1344.0,143.1 1353.4,136.5 1362.9,136.4 1372.3,136.4 1381.7,127.5 1391.1,127.1 1400.6,125.7" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="1127.1" cy="156.0" r="3.3" fill="#ca4141"/>
+<text x="1410" y="295" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+<rect x="7" y="307" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="22" y="332" font-size="17" font-family="Arial" font-weight="bold" fill="#b63131">09:34 TSLA CALL · option 30m -3%</text>
+<line x1="54" y1="545.2" x2="450" y2="545.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="549.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="54" y1="500.6" x2="450" y2="500.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="504.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="54" y1="456.0" x2="450" y2="456.0" stroke="#777" stroke-width="1.3"/>
+<text x="45" y="460.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="54" y1="433.7" x2="450" y2="433.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="437.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="54" y1="411.4" x2="450" y2="411.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="415.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="54" y1="366.8" x2="450" y2="366.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="370.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="72.9" y1="349" x2="72.9" y2="563" stroke="#eee" stroke-dasharray=""/>
+<text x="72.9" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="167.1" y1="349" x2="167.1" y2="563" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="167.1" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="261.4" y1="349" x2="261.4" y2="563" stroke="#eee" stroke-dasharray=""/>
+<text x="261.4" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="355.7" y1="349" x2="355.7" y2="563" stroke="#eee" stroke-dasharray=""/>
+<text x="355.7" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="450.0" y1="349" x2="450.0" y2="563" stroke="#eee" stroke-dasharray=""/>
+<text x="450.0" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="130.7,479.6 140.1,468.9 149.5,455.1 159.0,444.2 176.5,464.2 185.9,469.3 195.3,465.9 204.9,479.2 214.3,477.0 223.6,467.2 233.0,465.1 242.4,459.0 252.0,450.4 261.3,450.7 270.7,457.5 280.1,456.8 289.6,450.4 299.0,445.8 308.5,449.2 317.9,435.7 327.3,440.4 336.7,441.2 346.1,455.1 355.6,451.6 365.0,440.3 374.4,436.3 383.9,437.5 393.3,438.6 402.8,444.4 412.2,442.4 421.6,444.3 431.0,452.8 440.4,446.0 449.9,446.1" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="167.1" cy="456.0" r="3.3" fill="#ca4141"/>
+<text x="450" y="595" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+<rect x="487" y="307" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="502" y="332" font-size="17" font-family="Arial" font-weight="bold" fill="#b63131">09:36 SMH PUT · option 30m -17%</text>
+<line x1="534" y1="545.2" x2="930" y2="545.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="549.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="534" y1="500.6" x2="930" y2="500.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="504.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="534" y1="456.0" x2="930" y2="456.0" stroke="#777" stroke-width="1.3"/>
+<text x="525" y="460.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="534" y1="433.7" x2="930" y2="433.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="437.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="534" y1="411.4" x2="930" y2="411.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="415.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="534" y1="366.8" x2="930" y2="366.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="370.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="552.9" y1="349" x2="552.9" y2="563" stroke="#eee" stroke-dasharray=""/>
+<text x="552.9" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="647.1" y1="349" x2="647.1" y2="563" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="647.1" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="741.4" y1="349" x2="741.4" y2="563" stroke="#eee" stroke-dasharray=""/>
+<text x="741.4" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="835.7" y1="349" x2="835.7" y2="563" stroke="#eee" stroke-dasharray=""/>
+<text x="835.7" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="930.0" y1="349" x2="930.0" y2="563" stroke="#eee" stroke-dasharray=""/>
+<text x="930.0" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="591.9,473.0 601.4,463.6 610.8,460.9 620.2,468.3 629.6,464.8 639.1,458.8 656.5,459.3 666.1,456.2 675.5,456.1 684.8,454.5 694.3,457.8 703.7,457.3 713.2,468.3 722.5,463.7 731.9,459.5 741.4,462.2 750.8,465.3 760.3,466.3 769.7,460.9 779.1,468.0 788.6,459.9 798.0,459.0 807.4,457.5 816.8,456.8 826.2,453.5 835.7,452.7 845.1,446.6 854.5,447.7 864.0,441.4 873.4,444.3 882.8,441.0 892.3,440.1 901.7,435.3 911.2,432.6 920.6,438.0 930.0,443.8" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="647.1" cy="456.0" r="3.3" fill="#ca4141"/>
+<text x="930" y="595" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+<rect x="967" y="307" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="982" y="332" font-size="17" font-family="Arial" font-weight="bold" fill="#b63131">09:36 AVGO PUT · option 30m -10%</text>
+<line x1="1014" y1="545.2" x2="1410" y2="545.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="549.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="1014" y1="500.6" x2="1410" y2="500.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="504.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="1014" y1="456.0" x2="1410" y2="456.0" stroke="#777" stroke-width="1.3"/>
+<text x="1005" y="460.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="1014" y1="433.7" x2="1410" y2="433.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="437.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="1014" y1="411.4" x2="1410" y2="411.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="415.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="1014" y1="366.8" x2="1410" y2="366.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="370.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="1032.9" y1="349" x2="1032.9" y2="563" stroke="#eee" stroke-dasharray=""/>
+<text x="1032.9" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="1127.1" y1="349" x2="1127.1" y2="563" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="1127.1" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="1221.4" y1="349" x2="1221.4" y2="563" stroke="#eee" stroke-dasharray=""/>
+<text x="1221.4" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="1315.7" y1="349" x2="1315.7" y2="563" stroke="#eee" stroke-dasharray=""/>
+<text x="1315.7" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="1410.0" y1="349" x2="1410.0" y2="563" stroke="#eee" stroke-dasharray=""/>
+<text x="1410.0" y="580" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="1071.9,471.3 1081.4,462.6 1090.8,463.7 1100.2,461.7 1109.6,463.3 1119.1,455.5 1136.5,458.3 1146.1,459.8 1155.5,457.8 1164.8,458.7 1174.3,463.8 1183.7,461.7 1193.2,466.5 1202.5,462.7 1211.9,463.3 1221.4,465.2 1230.8,465.2 1240.2,464.1 1249.7,461.6 1259.1,465.7 1268.6,461.3 1278.0,460.0 1287.4,458.1 1296.8,458.0 1306.2,456.1 1315.7,456.7 1325.1,453.5 1334.5,454.2 1344.0,448.9 1353.4,451.7 1362.8,449.3 1372.3,448.6 1381.7,446.9 1391.2,444.6 1400.6,446.5 1410.0,450.9" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="1127.1" cy="456.0" r="3.3" fill="#ca4141"/>
+<text x="1410" y="595" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+<rect x="7" y="607" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="22" y="632" font-size="17" font-family="Arial" font-weight="bold" fill="#b63131">09:37 MSFT CALL · option 30m -18%</text>
+<line x1="54" y1="845.2" x2="450" y2="845.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="849.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="54" y1="800.6" x2="450" y2="800.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="804.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="54" y1="756.0" x2="450" y2="756.0" stroke="#777" stroke-width="1.3"/>
+<text x="45" y="760.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="54" y1="733.7" x2="450" y2="733.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="737.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="54" y1="711.4" x2="450" y2="711.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="715.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="54" y1="666.8" x2="450" y2="666.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="670.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="72.9" y1="649" x2="72.9" y2="863" stroke="#eee" stroke-dasharray=""/>
+<text x="72.9" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="167.1" y1="649" x2="167.1" y2="863" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="167.1" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="261.4" y1="649" x2="261.4" y2="863" stroke="#eee" stroke-dasharray=""/>
+<text x="261.4" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="355.7" y1="649" x2="355.7" y2="863" stroke="#eee" stroke-dasharray=""/>
+<text x="355.7" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="450.0" y1="649" x2="450.0" y2="863" stroke="#eee" stroke-dasharray=""/>
+<text x="450.0" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="102.6,757.8 112.0,766.2 121.4,757.8 130.8,759.8 140.3,758.4 149.7,755.9 159.1,749.5 176.8,759.7 186.2,765.1 195.5,753.9 204.9,756.2 214.3,755.7 223.8,756.4 233.2,755.0 242.6,759.0 252.0,757.0 261.4,757.1 270.9,756.3 280.3,761.9 289.7,757.8 299.2,757.0 308.6,755.4 318.0,757.2 327.4,756.9 336.9,754.0 346.3,755.2 355.7,756.7 365.2,758.0 374.6,756.8 384.0,754.3 393.4,753.6 402.9,754.1 412.3,753.6 421.8,751.8 431.2,753.1 440.6,753.0" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="167.1" cy="756.0" r="3.3" fill="#ca4141"/>
+<text x="450" y="895" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+<rect x="487" y="607" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="502" y="632" font-size="17" font-family="Arial" font-weight="bold" fill="#b63131">09:39 META PUT · option 30m -14%</text>
+<line x1="534" y1="845.2" x2="930" y2="845.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="849.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="534" y1="800.6" x2="930" y2="800.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="804.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="534" y1="756.0" x2="930" y2="756.0" stroke="#777" stroke-width="1.3"/>
+<text x="525" y="760.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="534" y1="733.7" x2="930" y2="733.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="737.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="534" y1="711.4" x2="930" y2="711.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="715.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="534" y1="666.8" x2="930" y2="666.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="670.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="552.9" y1="649" x2="552.9" y2="863" stroke="#eee" stroke-dasharray=""/>
+<text x="552.9" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="647.1" y1="649" x2="647.1" y2="863" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="647.1" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="741.4" y1="649" x2="741.4" y2="863" stroke="#eee" stroke-dasharray=""/>
+<text x="741.4" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="835.7" y1="649" x2="835.7" y2="863" stroke="#eee" stroke-dasharray=""/>
+<text x="835.7" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="930.0" y1="649" x2="930.0" y2="863" stroke="#eee" stroke-dasharray=""/>
+<text x="930.0" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="563.5,780.9 573.0,781.9 582.4,784.1 591.8,792.9 601.2,775.1 610.7,770.8 620.1,780.2 629.5,770.5 639.0,758.9 656.4,773.0 665.9,765.2 675.3,761.5 684.8,766.4 694.1,762.4 703.5,754.5 713.0,754.6 722.4,755.5 731.9,755.4 741.3,750.4 750.7,752.8 760.2,749.5 769.6,745.6 779.0,745.7 788.4,747.1 797.8,747.5 807.3,748.3 816.7,748.1 826.1,747.3 835.6,745.6 845.0,747.7 854.4,745.0 863.9,739.7 873.3,735.9 882.8,738.5 892.2,736.4 901.6,740.3 911.0,734.7 920.4,736.1 929.9,736.6" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="647.1" cy="756.0" r="3.3" fill="#ca4141"/>
+<text x="930" y="895" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+<rect x="967" y="607" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="982" y="632" font-size="17" font-family="Arial" font-weight="bold" fill="#b63131">09:47 GLD PUT · option 30m -5%</text>
+<line x1="1014" y1="845.2" x2="1410" y2="845.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="849.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="1014" y1="800.6" x2="1410" y2="800.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="804.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="1014" y1="756.0" x2="1410" y2="756.0" stroke="#777" stroke-width="1.3"/>
+<text x="1005" y="760.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="1014" y1="733.7" x2="1410" y2="733.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="737.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="1014" y1="711.4" x2="1410" y2="711.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="715.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="1014" y1="666.8" x2="1410" y2="666.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="670.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="1032.9" y1="649" x2="1032.9" y2="863" stroke="#eee" stroke-dasharray=""/>
+<text x="1032.9" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="1127.1" y1="649" x2="1127.1" y2="863" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="1127.1" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="1221.4" y1="649" x2="1221.4" y2="863" stroke="#eee" stroke-dasharray=""/>
+<text x="1221.4" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="1315.7" y1="649" x2="1315.7" y2="863" stroke="#eee" stroke-dasharray=""/>
+<text x="1315.7" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="1410.0" y1="649" x2="1410.0" y2="863" stroke="#eee" stroke-dasharray=""/>
+<text x="1410.0" y="880" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="1015.4,778.1 1024.8,780.5 1034.3,780.3 1043.7,777.0 1053.1,772.1 1062.5,773.7 1072.0,772.6 1081.4,768.0 1090.8,767.5 1100.3,769.4 1109.7,764.0 1119.1,756.7 1136.6,762.2 1146.0,764.6 1155.4,762.1 1164.9,765.7 1174.3,765.9 1183.7,769.2 1193.1,767.3 1202.6,766.2 1212.0,766.9 1221.4,770.1 1230.9,771.2 1240.3,771.8 1249.7,768.0 1259.1,766.8 1268.6,761.4 1278.0,760.3 1287.5,759.9 1296.9,760.9 1306.3,759.5 1315.8,757.5 1325.2,761.9 1334.6,761.7 1344.0,758.4 1353.4,757.6 1362.9,757.1 1372.3,754.1 1381.7,753.6 1391.2,755.1 1400.6,753.6" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="1127.1" cy="756.0" r="3.3" fill="#ca4141"/>
+<text x="1410" y="895" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+<rect x="7" y="907" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="22" y="932" font-size="17" font-family="Arial" font-weight="bold" fill="#b63131">10:02 AMD PUT · option 30m -7%</text>
+<line x1="54" y1="1145.2" x2="450" y2="1145.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="1149.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="54" y1="1100.6" x2="450" y2="1100.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="1104.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="54" y1="1056.0" x2="450" y2="1056.0" stroke="#777" stroke-width="1.3"/>
+<text x="45" y="1060.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="54" y1="1033.7" x2="450" y2="1033.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="1037.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="54" y1="1011.4" x2="450" y2="1011.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="1015.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="54" y1="966.8" x2="450" y2="966.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="970.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="72.9" y1="949" x2="72.9" y2="1163" stroke="#eee" stroke-dasharray=""/>
+<text x="72.9" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="167.1" y1="949" x2="167.1" y2="1163" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="167.1" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="261.4" y1="949" x2="261.4" y2="1163" stroke="#eee" stroke-dasharray=""/>
+<text x="261.4" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="355.7" y1="949" x2="355.7" y2="1163" stroke="#eee" stroke-dasharray=""/>
+<text x="355.7" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="450.0" y1="949" x2="450.0" y2="1163" stroke="#eee" stroke-dasharray=""/>
+<text x="450.0" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="55.4,1081.6 64.8,1078.6 74.2,1075.8 83.6,1074.6 93.1,1074.6 102.5,1069.5 111.9,1070.0 121.4,1067.8 130.8,1066.5 140.2,1065.7 149.6,1060.3 159.1,1054.5 176.5,1051.3 186.0,1045.5 195.4,1045.9 204.9,1049.1 214.3,1049.6 223.7,1049.2 233.1,1045.0 242.6,1046.1 252.0,1040.7 261.4,1044.0 270.8,1050.8 280.3,1053.9 289.7,1058.3 299.1,1056.1 308.6,1059.6 318.0,1063.8 327.4,1063.9 336.9,1064.0 346.3,1060.3 355.7,1061.9 365.1,1064.2 374.6,1062.2 387.2,1066.0 401.8,1070.7 410.5,1069.0 419.5,1070.8 429.0,1070.0 438.7,1067.3 447.8,1065.1" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="167.1" cy="1056.0" r="3.3" fill="#ca4141"/>
+<text x="450" y="1195" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+<rect x="487" y="907" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="502" y="932" font-size="17" font-family="Arial" font-weight="bold" fill="#b63131">10:03 SMH PUT · option 30m -25%</text>
+<line x1="534" y1="1145.2" x2="930" y2="1145.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="1149.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="534" y1="1100.6" x2="930" y2="1100.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="1104.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="534" y1="1056.0" x2="930" y2="1056.0" stroke="#777" stroke-width="1.3"/>
+<text x="525" y="1060.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="534" y1="1033.7" x2="930" y2="1033.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="1037.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="534" y1="1011.4" x2="930" y2="1011.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="1015.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="534" y1="966.8" x2="930" y2="966.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="970.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="552.9" y1="949" x2="552.9" y2="1163" stroke="#eee" stroke-dasharray=""/>
+<text x="552.9" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="647.1" y1="949" x2="647.1" y2="1163" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="647.1" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="741.4" y1="949" x2="741.4" y2="1163" stroke="#eee" stroke-dasharray=""/>
+<text x="741.4" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="835.7" y1="949" x2="835.7" y2="1163" stroke="#eee" stroke-dasharray=""/>
+<text x="835.7" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="930.0" y1="949" x2="930.0" y2="1163" stroke="#eee" stroke-dasharray=""/>
+<text x="930.0" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="535.4,1079.4 544.8,1078.6 554.2,1078.4 563.7,1077.5 573.1,1068.0 582.5,1070.6 592.0,1065.4 601.4,1065.4 610.8,1068.3 620.2,1064.6 629.7,1062.5 639.1,1060.2 656.6,1053.2 666.0,1058.7 675.4,1064.5 684.9,1063.6 694.3,1063.2 703.7,1063.3 713.2,1065.9 722.6,1061.9 732.0,1066.0 741.4,1074.1 750.9,1076.0 760.3,1081.3 769.7,1079.3 779.2,1083.6 788.6,1085.7 798.0,1085.7 807.5,1089.2 816.9,1084.0 826.3,1088.0 835.7,1089.9 845.2,1086.6 857.8,1089.1 872.4,1086.9 881.1,1084.3 890.1,1086.8 899.6,1084.1 909.3,1081.1 918.4,1076.9 927.8,1075.0" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="647.1" cy="1056.0" r="3.3" fill="#ca4141"/>
+<text x="930" y="1195" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+<rect x="967" y="907" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="982" y="932" font-size="17" font-family="Arial" font-weight="bold" fill="#177245">10:10 AMZN CALL · option 30m +1644%</text>
+<line x1="1014" y1="1145.2" x2="1410" y2="1145.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="1149.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="1014" y1="1100.6" x2="1410" y2="1100.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="1104.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="1014" y1="1056.0" x2="1410" y2="1056.0" stroke="#777" stroke-width="1.3"/>
+<text x="1005" y="1060.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="1014" y1="1033.7" x2="1410" y2="1033.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="1037.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="1014" y1="1011.4" x2="1410" y2="1011.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="1015.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="1014" y1="966.8" x2="1410" y2="966.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="1005" y="970.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="1032.9" y1="949" x2="1032.9" y2="1163" stroke="#eee" stroke-dasharray=""/>
+<text x="1032.9" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="1127.1" y1="949" x2="1127.1" y2="1163" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="1127.1" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="1221.4" y1="949" x2="1221.4" y2="1163" stroke="#eee" stroke-dasharray=""/>
+<text x="1221.4" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="1315.7" y1="949" x2="1315.7" y2="1163" stroke="#eee" stroke-dasharray=""/>
+<text x="1315.7" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="1410.0" y1="949" x2="1410.0" y2="1163" stroke="#eee" stroke-dasharray=""/>
+<text x="1410.0" y="1180" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="1015.4,1083.5 1024.8,1083.1 1034.2,1079.9 1043.6,1078.2 1053.1,1080.3 1062.5,1081.6 1071.9,1078.1 1081.4,1075.7 1090.8,1078.2 1100.2,1071.2 1109.6,1066.4 1119.1,1058.5 1136.5,1055.0 1146.0,1047.9 1155.4,1055.7 1164.9,1049.5 1174.3,1043.6 1183.7,1044.7 1193.2,1043.5 1202.6,1033.2 1212.0,1037.8 1221.5,1038.2 1230.9,1035.5 1240.3,1038.9 1249.7,1038.6 1259.1,1033.6 1271.8,1031.6 1286.3,1033.2 1295.1,1031.0 1304.1,1034.5 1313.5,1033.2 1323.3,1038.7 1332.3,1045.0 1341.8,1045.5 1351.6,1043.9 1360.6,1038.8 1370.1,1039.0 1379.8,1043.4 1388.9,1041.3 1398.4,1045.6 1408.2,1041.3" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="1127.1" cy="1056.0" r="3.3" fill="#ca4141"/>
+<text x="1410" y="1195" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+<rect x="7" y="1207" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="22" y="1232" font-size="17" font-family="Arial" font-weight="bold" fill="#177245">10:14 TSLA CALL · option 30m +157%</text>
+<line x1="54" y1="1445.2" x2="450" y2="1445.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="1449.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="54" y1="1400.6" x2="450" y2="1400.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="1404.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="54" y1="1356.0" x2="450" y2="1356.0" stroke="#777" stroke-width="1.3"/>
+<text x="45" y="1360.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="54" y1="1333.7" x2="450" y2="1333.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="1337.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="54" y1="1311.4" x2="450" y2="1311.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="1315.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="54" y1="1266.8" x2="450" y2="1266.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="45" y="1270.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="72.9" y1="1249" x2="72.9" y2="1463" stroke="#eee" stroke-dasharray=""/>
+<text x="72.9" y="1480" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="167.1" y1="1249" x2="167.1" y2="1463" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="167.1" y="1480" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="261.4" y1="1249" x2="261.4" y2="1463" stroke="#eee" stroke-dasharray=""/>
+<text x="261.4" y="1480" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="355.7" y1="1249" x2="355.7" y2="1463" stroke="#eee" stroke-dasharray=""/>
+<text x="355.7" y="1480" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="450.0" y1="1249" x2="450.0" y2="1463" stroke="#eee" stroke-dasharray=""/>
+<text x="450.0" y="1480" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="55.4,1386.9 64.8,1375.0 74.2,1376.0 83.7,1376.6 93.1,1379.8 102.5,1380.6 111.9,1379.3 121.4,1374.2 130.8,1370.7 140.2,1371.7 149.7,1372.3 159.1,1363.1 176.6,1355.6 186.0,1362.2 195.5,1356.6 204.8,1346.4 214.3,1350.7 223.7,1346.1 233.2,1346.9 242.6,1344.2 252.0,1345.1 261.4,1345.2 274.1,1339.4 288.6,1335.4 297.4,1338.2 306.3,1337.5 315.8,1337.8 325.6,1343.3 334.6,1340.8 344.1,1340.6 353.9,1342.6 362.9,1340.8 372.4,1339.6 382.1,1340.8 391.2,1343.5 400.7,1343.7 410.5,1340.1 419.5,1336.2 428.9,1336.4 438.7,1336.0 447.8,1340.7" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="167.1" cy="1356.0" r="3.3" fill="#ca4141"/>
+<text x="450" y="1495" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+<rect x="487" y="1207" width="466" height="286" rx="8" fill="white" stroke="#ddd"/>
+<text x="502" y="1232" font-size="17" font-family="Arial" font-weight="bold" fill="#b63131">11:05 TSLA CALL · option 30m -6%</text>
+<line x1="534" y1="1445.2" x2="930" y2="1445.2" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="1449.2" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-1</text>
+<line x1="534" y1="1400.6" x2="930" y2="1400.6" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="1404.6" text-anchor="end" font-size="10" font-family="Arial" fill="#555">-0.5</text>
+<line x1="534" y1="1356.0" x2="930" y2="1356.0" stroke="#777" stroke-width="1.3"/>
+<text x="525" y="1360.0" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0</text>
+<line x1="534" y1="1333.7" x2="930" y2="1333.7" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="1337.7" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.25</text>
+<line x1="534" y1="1311.4" x2="930" y2="1311.4" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="1315.4" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+0.5</text>
+<line x1="534" y1="1266.8" x2="930" y2="1266.8" stroke="#e1e1e1" stroke-width="0.7"/>
+<text x="525" y="1270.8" text-anchor="end" font-size="10" font-family="Arial" fill="#555">+1</text>
+<line x1="552.9" y1="1249" x2="552.9" y2="1463" stroke="#eee" stroke-dasharray=""/>
+<text x="552.9" y="1480" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">-10m</text>
+<line x1="647.1" y1="1249" x2="647.1" y2="1463" stroke="#ca4141" stroke-dasharray="5 4"/>
+<text x="647.1" y="1480" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+0m</text>
+<line x1="741.4" y1="1249" x2="741.4" y2="1463" stroke="#eee" stroke-dasharray=""/>
+<text x="741.4" y="1480" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+10m</text>
+<line x1="835.7" y1="1249" x2="835.7" y2="1463" stroke="#eee" stroke-dasharray=""/>
+<text x="835.7" y="1480" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+20m</text>
+<line x1="930.0" y1="1249" x2="930.0" y2="1463" stroke="#eee" stroke-dasharray=""/>
+<text x="930.0" y="1480" text-anchor="middle" font-size="10" font-family="Arial" fill="#555">+30m</text>
+<polyline points="537.6,1362.1 547.0,1361.5 556.4,1360.0 565.9,1363.5 575.3,1365.9 584.7,1365.7 594.2,1363.0 603.6,1361.7 613.0,1363.4 622.4,1357.6 631.9,1356.7 641.3,1355.6 656.6,1357.3 666.4,1359.0 675.4,1359.2 684.9,1360.2 694.6,1362.3 703.7,1362.7 713.2,1360.8 723.0,1356.1 732.0,1358.1" fill="none" stroke="#277aa5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="647.1" cy="1356.0" r="3.3" fill="#ca4141"/>
+<text x="930" y="1495" text-anchor="end" font-size="10" font-family="Arial" fill="#777">Favorable stock move / prior ATR</text>
+</svg>
