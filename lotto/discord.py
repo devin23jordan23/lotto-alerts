@@ -37,6 +37,9 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
     tier = candidate.metrics.get("tier")
     if tier in {"A", "B", "C"}:
         title = f"{tier} · {title}"
+    marker = candidate.metrics.get("strength_marker")
+    if marker:
+        title = f"{marker} {title}"
     levels = (f"{'Watch' if phase == 'POTENTIAL' else 'Trigger'} ${setup.trigger:.2f}"
               f" · Invalidation ${setup.invalidation:.2f}") if setup else ""
     payload = {"username": "Lotto Scanner", "allowed_mentions": {"parse": []}, "embeds": [{
@@ -74,6 +77,22 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
             embed['description'] += '\nSeparate Schwab contract quote refreshed; provider Greeks unavailable'
         if quality.reasons:
             embed['description'] += '\n' + '; '.join(DESCRIPTIONS.get(r,r) for r in quality.reasons)
+    notes = []
+    count = candidate.metrics.get("confluence_count")
+    total = candidate.metrics.get("confluence_total")
+    if count is not None and total:
+        notes.append(f"{count}/{total} confluence")
+    if candidate.metrics.get("stale_quote"):
+        notes.append("stale quote")
+    if candidate.metrics.get("spread_flag"):
+        notes.append(candidate.metrics["spread_flag"])
+    if candidate.metrics.get("bypass_reason"):
+        notes.append(candidate.metrics["bypass_reason"])
+    overrides = candidate.metrics.get("overrides") or []
+    if overrides:
+        notes.append("override " + ", ".join(overrides))
+    if notes:
+        payload["embeds"][0]["description"] += "\n" + "\n".join(notes)
     return payload
 
 

@@ -468,10 +468,10 @@ def score_handoff(spec: dict, inputs: dict, rvol: float | None = None) -> dict:
 def handoff_floor(strength: float | None, dte: int, settings: Settings, a_bar: bool = False) -> float:
     """Fitted-probability floor. Runner names stay on the normal (A) floor.
 
-    LOTTO_FALLBACK_RULE=on turns off the strength step-down. log and off do not.
+    The bypass rule does not read or change this step-down.
     """
     normal = settings.pwin_normal_0dte if dte == 0 else settings.pwin_normal_1dte
-    if getattr(settings, "fallback_rule", "off") == "on" or a_bar or strength is None:
+    if a_bar or strength is None:
         return normal
     if strength >= settings.strength_decile:
         return settings.pwin_decile if dte == 0 else settings.pwin_decile_1dte
@@ -505,6 +505,7 @@ def new_fallback_state() -> dict:
         "run_high_at_fire": None,
         "run_low_at_fire": None,
         "q_false_since": False,
+        "pattern_score": 0.0,
         "fires": [],
     }
 
@@ -525,8 +526,8 @@ def _live_ask(option: Option) -> bool:
 def choose_fallback_contract(snap: Snapshot, side: str) -> dict:
     """0DTE if any 0DTE contract on this side has a live ask, else 1DTE.
 
-    1-OTM is the nearest strike strictly past the stock. ATM is the nearest
-    strike to the stock. Spread does not choose either strike.
+    The posted contract is the nearest strike to the stock (ATM).
+    Spread does not choose the strike.
     """
     today = snap.at.astimezone(ET).date()
     grouped = {0: [], 1: []}
@@ -547,13 +548,6 @@ def choose_fallback_contract(snap: Snapshot, side: str) -> dict:
     if not pool:
         return empty
     strikes = sorted({option.strike for option in pool})
-    direction = 1 if side == "CALL" else -1
-    if direction == 1:
-        further = [strike for strike in strikes if strike > snap.spot]
-        target = further[0] if further else None
-    else:
-        further = [strike for strike in strikes if strike < snap.spot]
-        target = further[-1] if further else None
     atm_strike = min(strikes, key=lambda strike: (abs(strike - snap.spot), strike))
 
     def pick(strike):
@@ -562,18 +556,25 @@ def choose_fallback_contract(snap: Snapshot, side: str) -> dict:
         return (live or choices)[0]
 
     atm = pick(atm_strike)
-    chosen = pick(target) if target is not None else None
     result = dict(empty)
     result.update({
+        "option": atm, "occ_symbol": atm.symbol, "expiry": atm.expiry.isoformat(),
+        "dte": (atm.expiry - today).days, "strike": atm.strike,
+        "fire_bid": atm.bid, "fire_ask": atm.ask,
         "atm_symbol": atm.symbol, "atm_strike": atm.strike, "atm_bid": atm.bid, "atm_ask": atm.ask,
     })
-    if chosen is not None:
-        result.update({
-            "option": chosen, "occ_symbol": chosen.symbol, "expiry": chosen.expiry.isoformat(),
-            "dte": (chosen.expiry - today).days, "strike": chosen.strike,
-            "fire_bid": chosen.bid, "fire_ask": chosen.ask,
-        })
     return result
+
+
+def room_from_open(indexed: dict, minute: int, side: str, atr21: float | None) -> float | None:
+    """ATR used from the session open in the trade direction. Puts use the decline."""
+    if atr21 is None or not isfinite(atr21) or atr21 <= 0 or minute not in indexed or not indexed:
+        return None
+    first = indexed[min(indexed)]
+    close = indexed[minute].close
+    if side == "CALL":
+        return (close - first.open) / atr21
+    return (first.open - close) / atr21
 
 
 def fallback_push(indexed: dict, minute: int, side: str, atr21: float | None) -> float | None:
@@ -691,8 +692,10 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     base = getattr(snap, "fallback_rvol_base", None)
     rvol = fallback_rvol_value(indexed, minute, base, sessions)
     push = fallback_push(indexed, minute, side, atr21)
-    q_true = (rvol is not None and push is not None
-              and rvol >= settings.fb_rvol_min and push >= settings.fb_push_atr_min)
+    room = room_from_open(indexed, minute, side, atr21)
+    q_true = (rvol is not None and push is not None and room is not None
+              and rvol >= settings.fb_rvol_min and push >= settings.fb_push_atr_min
+              and room <= settings.fb_room_atr_max)
     if state.get("last_m") is not None and minute > state["last_m"] and not q_true:
         state["q_false_since"] = True
     breaks = held_level_breaks(indexed, minute, snap, side)
@@ -705,9 +708,29 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
             new_extreme = True
         if side == "PUT" and state.get("run_low_at_fire") is not None and bar.low < state["run_low_at_fire"]:
             new_extreme = True
-    # PMH/PDH (and the put mirrors) may fire from bar 2. HOD/LOD stay inside
-    # held_level_breaks, which still requires m >= 15. Nothing fires after 384.
-    candidate = (minute <= FALLBACK_LAST_BAR and bool(breaks) and q_true)
+    from .confluence import (PATTERN_FEATURES, card_gate, confluence_flags_for, match_value,
+                              pattern_match, spread_fraction, tiered_points)
+    probe = next((item for item in snap.options if item.side == side), None)
+    flags = confluence_flags_for(snap, probe, {}, settings)
+    _points, confluence_score, _count = tiered_points(flags, settings)
+    volume = bar.volume
+    gate = card_gate(side, volume, spread_fraction(probe), flags, confluence_score, settings)
+    # A held PM/PD/HOD is a confluence point, not a fresh trigger. The trigger
+    # is a level break on this bar, or a pattern match that first clears the
+    # line inside the entry window. A print from before that window is not spent.
+    in_window = settings.fb_min_minutes <= minute <= FALLBACK_LAST_BAR
+    matched = pattern_match(flags)
+    prior_match = float(state.get("pattern_score") or 0)
+    if in_window:
+        pattern_new = matched >= settings.pattern_trigger_min and prior_match < settings.pattern_trigger_min
+        state["pattern_score"] = matched
+    else:
+        pattern_new = False
+    setup_on = bool(breaks) or pattern_new
+    # Data-derived entry (RVOL, push, room, time) plus the tiered score.
+    # A single weak feature stays under bypass_confluence_min and does not fire.
+    score_ok = confluence_score >= settings.bypass_confluence_min and gate["post_ok"]
+    candidate = in_window and q_true and setup_on and score_ok
     why = fire_why(first=state.get("k", 0) == 0, fresh_level=fresh, new_extreme=new_extreme,
                    q_false_since=bool(state.get("q_false_since")), candidate=candidate, side=side)
     if why is None:
@@ -724,20 +747,27 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     run_high = max(item.high for item in through)
     run_low = min(item.low for item in through)
     earliest = indexed[min(indexed)]
-    lvl = "+".join(item["lvl"] for item in breaks)
-    level_value = breaks[0]["level_value"]
+    if breaks:
+        lvl = "+".join(item["lvl"] for item in breaks)
+        level_value = breaks[0]["level_value"]
+    else:
+        lvl = "+".join(name for name in PATTERN_FEATURES
+                       if match_value(flags.get(name)) >= settings.pattern_trigger_min) or "setup"
+        level_value = bar.close
     k = state.get("k", 0) + 1
     bars_since = None if state.get("last_m") is None else minute - state["last_m"]
     prev_ts = None if state.get("last_ts") is None else state["last_ts"].astimezone(ET).isoformat()
     rvol_text = 0 if rvol is None else rvol
     push_text = 0 if push is None else push
     label = "+".join(part.upper() for part in lvl.split("+"))
-    reason = f"strong-stock fallback: {label} break, RVOL {rvol_text:.2f}, push {push_text:.2f} ATR21"
+    reason = f"stock bypass: {label}, confluence {confluence_score:.0f}"
     record = {
         "date": snap.day, "ts_fire": snap.at.astimezone(ET).isoformat(), "tk": snap.symbol, "side": side,
         "k": k, "why": why, "lvl": lvl, "level_value": level_value,
         "levels": {item["lvl"]: item["level_value"] for item in breaks},
         "px": bar.close, "open": earliest.open, "atr21": atr21, "rvol": rvol, "push30": push,
+        "room_atr": room, "confluence_score": confluence_score, "confluence_flags": flags,
+        "base": gate["base"], "blockers": gate["blockers"], "overrides": gate["overrides"],
         "run_high": run_high, "run_low": run_low, "bars_since_last_fire": bars_since, "prev_fire_ts": prev_ts,
         "skip_flag": bool(skip_flag), "skip_ref_card_id": skip_id, "skip_ref_ts": skip_ts,
         "skip_after_resolved": False,
@@ -765,6 +795,8 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     state["q_false_since"] = False
     state["fires"].append({"ts": snap.at, "contract": contract["occ_symbol"], "k": k, "m": minute})
     record["_option"] = contract["option"]
+    from .confluence import card_freshness
+    record.update(card_freshness(snap, contract["option"], level_value))
     return record
 
 
@@ -833,7 +865,7 @@ def resolve_fallback_skip(record: dict, alerts: list[dict]) -> dict:
     for alert in alerts:
         if alert.get("symbol") != updated["tk"] or alert.get("side") != updated["side"]:
             continue
-        if alert.get("setup_name") == "STRONG_STOCK_FALLBACK":
+        if alert.get("setup_name") in {"STRONG_STOCK_FALLBACK", "STOCK_BYPASS"}:
             continue
         at = alert.get("at")
         if isinstance(at, str):
@@ -1372,6 +1404,11 @@ def apply_v2(candidate: Candidate, settings: Settings, history: list[Snapshot],
         ]
     candidate.blockers = tuple(candidate.blockers)
     candidate.qualifying = qualifying
+    from .confluence import apply_card_layers
+    try:
+        apply_card_layers(candidate, settings, qualifying, score_v2)
+    except Exception as exc:
+        LOG.warning("card layers failed (%s)", type(exc).__name__)
     return candidate
 
 

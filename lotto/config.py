@@ -3,6 +3,34 @@ from math import isfinite
 from pathlib import Path
 
 STRATEGY_VERSION = "model-v-2026-10-26"
+
+# Feature name, tier. One table: the quant replaces the tier and the three
+# weights below. Pattern rows are a 0-1 match, not a boolean. Points for every
+# row are tier weight × match. Placeholder assignments until that pass.
+# Puts use the same rows; the feature functions mirror the side.
+CONFLUENCE_TABLE = (
+    ("pm_break", "primary"),
+    ("pd_break", "primary"),
+    ("hod_break", "primary"),
+    ("rvol", "primary"),
+    ("volume", "primary"),
+    ("option_flow", "primary"),
+    ("range_break", "primary"),
+    ("ema9_pullback", "primary"),
+    ("flag", "primary"),
+    ("rs", "secondary"),
+    ("sector", "secondary"),
+    ("spy", "secondary"),
+    ("vwap", "secondary"),
+    ("w_pattern", "secondary"),
+    ("m_pattern", "secondary"),
+    ("mtf_flag", "secondary"),
+    ("box5", "tertiary"),
+    ("atr_move", "tertiary"),
+    ("consolidation", "tertiary"),
+    ("bounce", "tertiary"),
+    ("fashionably_late", "tertiary"),
+)
 # Vince's handoff logistic, standardization, and strength ranks. One file
 # serves both LOTTO_HANDOFF_MODEL_PATH and LOTTO_STRENGTH_DISTRIBUTION_PATH.
 HANDOFF_SPEC_PATH = str(Path(__file__).resolve().parent.parent / "config" / "handoff_model_v1026.json")
@@ -48,18 +76,101 @@ class Settings:
     # Runner names are off until LOTTO_STANDBY_NAMES=on. Those names use the
     # handoff A bar (the normal floors), with no strength step-down.
     standby_names: int = 0
-    # Strong-stock fallback. Default log writes one JSONL line per would-be
-    # card and posts nothing. on posts through the existing option path and
-    # uses the normal handoff floors. off does not evaluate the rule.
-    fallback_rule: str = "log"
-    # Model V scores and posts on this ATR window. 21 is the mean of the prior
-    # daily true ranges (today excluded, at least 15). 14 restores the old window.
-    atr_days: int = 21
+    # Vince ship-1026. One block: bypass entry, marker, freshness, base,
+    # confluence weights, and the blocker/override table. Placeholders until
+    # the next fitted pass. S12 floors are not in this block and do not read it.
+    # Bypass posts the nearest ATM contract when the option card does not.
+    # post is the default. on is an alias of post. log writes JSONL only.
+    # off skips the rule. None of these fields change the handoff step-down.
+    fallback_rule: str = "post"
     fb_rvol_min: float = 0.78
-    fb_push_atr_min: float = 0.5
+    fb_push_atr_min: float = 0.75
+    fb_room_atr_max: float = 1.0
+    fb_min_minutes: int = 15
     fb_max_spread_pct: float = 30
     fb_same_move_before_min: int = 15
     fb_same_move_after_min: int = 5
+    # ⚡ on a primary card when the model score (after the stale penalty) clears this.
+    strong_score: float = 57
+    stale_quote_seconds: float = 5
+    stale_quote_penalty: float = 4
+    # Base layer. Direction and this volume floor are the only requirements.
+    # Missing volume posts when confluence points reach the override.
+    base_volume_min: float = 1
+    base_override_points: float = 8
+    # Blocker table. A slightly wide spread blocks until confluence points
+    # clear the line, or PM break + RVOL + volume are all on.
+    blocker_spread: float = 0.20
+    blocker_spread_override_points: float = 6
+    # Reserved per-feature knobs. The scorer does not read them. The live
+    # weight is the tier weight on CONFLUENCE_TABLE, times the 0-1 match.
+    # Puts use the mirror (PML, PDL, below VWAP, weakness vs SPY/sector).
+    w_conf_rs: float = 1
+    w_conf_pm_break: float = 1
+    w_conf_pd_break: float = 1
+    w_conf_rvol: float = 1
+    w_conf_option_flow: float = 1
+    w_conf_sector: float = 1
+    w_conf_ema9_pullback: float = 1
+    w_conf_range_break: float = 1
+    w_conf_mtf_flag: float = 1
+    w_conf_box5: float = 1
+    w_conf_vwap: float = 1
+    w_conf_atr_move: float = 1
+    w_conf_consolidation: float = 1
+    w_conf_bounce: float = 1
+    conf_rvol_min: float = 1
+    conf_atr_min: float = 0.25
+    # Tier weights for CONFLUENCE_TABLE. Placeholder until the quant pass.
+    # Score = weight × match. Bypass posts when that sum clears the line.
+    tier_weight_primary: float = 3
+    tier_weight_secondary: float = 2
+    tier_weight_tertiary: float = 1
+    bypass_confluence_min: float = 9
+    # Loose pattern ranges. Every detector (9 EMA pullback, flag, W, M,
+    # Fashionably Late, consolidation, bounce) scans these instead of one
+    # template. Inside the core the match is 1. From the core out to the
+    # outer edge it fades to 0. Past the outer edge it is 0. Depth and the
+    # ATR bands are in units of the 21-day ATR. Bar counts are completed
+    # bars on each timeframe in pattern_timeframes. A match at or above
+    # pattern_trigger_min is a bypass trigger the bar it first gets there.
+    # Ace's playbook is not in this repo. The definitions live in confluence.py.
+    pattern_timeframes: str = "2,5,10"
+    pattern_bars_outer_min: float = 1
+    pattern_bars_core_min: float = 3
+    pattern_bars_core_max: float = 8
+    pattern_bars_outer_max: float = 16
+    pattern_depth_outer_min: float = 0.05
+    pattern_depth_core_min: float = 0.15
+    pattern_depth_core_max: float = 1.20
+    pattern_depth_outer_max: float = 2.50
+    pattern_trigger_min: float = 0.50
+    pattern_twin_core: float = 0.15
+    pattern_twin_outer: float = 0.60
+    ema_pullback_period: int = 9
+    ema_move_outer_min: float = 0.10
+    ema_move_core_min: float = 0.25
+    ema_move_core_max: float = 3.0
+    ema_move_outer_max: float = 5.0
+    ema_tag_core: float = 0.08
+    ema_tag_outer: float = 0.45
+    flag_impulse_outer_min: float = 0.15
+    flag_impulse_core_min: float = 0.30
+    flag_impulse_core_max: float = 1.80
+    flag_impulse_outer_max: float = 3.0
+    flag_pause_outer_min: float = 1
+    flag_pause_core_min: float = 2
+    flag_pause_core_max: float = 5
+    flag_pause_outer_max: float = 8
+    flag_range_core: float = 0.25
+    flag_range_outer: float = 0.55
+    late_outer_min: float = 0.20
+    late_core_min: float = 0.50
+    late_core_max: float = 1.80
+    late_outer_max: float = 3.50
+    # Model V scores and posts on this ATR window. 21 is the mean of the prior
+    # daily true ranges (today excluded, at least 15). 14 restores the old window.
+    atr_days: int = 21
     # Exceptional-stock override. Every check is required. Defaults are high so it is rare.
     override_move_atr: float = 2.5
     override_rvol: float = 3.0
@@ -181,14 +292,65 @@ class Settings:
             raise ValueError("Invalid stock-strength cutoff or probability floor")
         if self.standby_names not in (0, 1):
             raise ValueError("LOTTO_STANDBY_NAMES must be on or off")
-        if self.fallback_rule not in {"off", "log", "on"}:
-            raise ValueError("LOTTO_FALLBACK_RULE must be off, log, or on")
+        if self.fallback_rule not in {"off", "log", "post", "on"}:
+            raise ValueError("LOTTO_FALLBACK_RULE must be off, log, post, or on")
         if self.atr_days not in {14, 21}:
             raise ValueError("LOTTO_ATR_DAYS must be 14 or 21")
         if self.fb_rvol_min < 0 or self.fb_push_atr_min < 0 or self.fb_max_spread_pct <= 0:
             raise ValueError("Invalid fallback threshold")
+        if self.fb_room_atr_max <= 0 or self.fb_min_minutes < 0:
+            raise ValueError("Invalid fallback room or open delay")
         if self.fb_same_move_before_min < 0 or self.fb_same_move_after_min < 0:
             raise ValueError("Invalid fallback same-move window")
+        if self.strong_score < 0 or self.stale_quote_seconds < 0 or self.stale_quote_penalty < 0:
+            raise ValueError("Invalid strong-score or stale-quote setting")
+        if self.base_volume_min < 0 or self.base_override_points < 0:
+            raise ValueError("Invalid base-layer setting")
+        if self.blocker_spread <= 0 or self.blocker_spread_override_points < 0:
+            raise ValueError("Invalid blocker setting")
+        if self.conf_rvol_min < 0 or self.conf_atr_min < 0:
+            raise ValueError("Invalid confluence floor")
+        weights = (
+            self.w_conf_rs, self.w_conf_pm_break, self.w_conf_pd_break, self.w_conf_rvol,
+            self.w_conf_option_flow, self.w_conf_sector, self.w_conf_ema9_pullback,
+            self.w_conf_range_break, self.w_conf_mtf_flag, self.w_conf_box5,
+            self.w_conf_vwap, self.w_conf_atr_move, self.w_conf_consolidation, self.w_conf_bounce,
+        )
+        if any(weight < 0 for weight in weights):
+            raise ValueError("Confluence weights cannot be negative")
+        tier_weights = (self.tier_weight_primary, self.tier_weight_secondary, self.tier_weight_tertiary)
+        if any(weight < 0 for weight in tier_weights) or self.bypass_confluence_min < 0:
+            raise ValueError("Invalid confluence tier weight or bypass threshold")
+        bands = (
+            ("pattern bar", self.pattern_bars_outer_min, self.pattern_bars_core_min,
+             self.pattern_bars_core_max, self.pattern_bars_outer_max),
+            ("pattern depth", self.pattern_depth_outer_min, self.pattern_depth_core_min,
+             self.pattern_depth_core_max, self.pattern_depth_outer_max),
+            ("ema move", self.ema_move_outer_min, self.ema_move_core_min,
+             self.ema_move_core_max, self.ema_move_outer_max),
+            ("flag impulse", self.flag_impulse_outer_min, self.flag_impulse_core_min,
+             self.flag_impulse_core_max, self.flag_impulse_outer_max),
+            ("flag pause", self.flag_pause_outer_min, self.flag_pause_core_min,
+             self.flag_pause_core_max, self.flag_pause_outer_max),
+            ("fashionably late", self.late_outer_min, self.late_core_min,
+             self.late_core_max, self.late_outer_max),
+        )
+        if any(not outer_min <= core_min <= core_max <= outer_max for _label, outer_min, core_min, core_max, outer_max in bands):
+            raise ValueError("Invalid pattern band")
+        if not 0 < self.pattern_trigger_min <= 1:
+            raise ValueError("Invalid pattern trigger")
+        if self.ema_pullback_period < 2 or not 0 <= self.ema_tag_core < self.ema_tag_outer:
+            raise ValueError("Invalid EMA pullback band")
+        if not 0 <= self.flag_range_core < self.flag_range_outer:
+            raise ValueError("Invalid flag range band")
+        if not 0 <= self.pattern_twin_core < self.pattern_twin_outer:
+            raise ValueError("Invalid twin-extreme band")
+        try:
+            frames = [int(part.strip()) for part in self.pattern_timeframes.split(",") if part.strip()]
+        except ValueError:
+            frames = []
+        if not frames or any(frame < 1 for frame in frames):
+            raise ValueError("Invalid pattern timeframes")
         if min(self.override_move_atr, self.override_rvol) <= 0:
             raise ValueError("Invalid exceptional-stock threshold")
         if self.override_fresh_seconds <= 0 or self.override_trigger_minutes <= 0:

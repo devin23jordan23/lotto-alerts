@@ -96,14 +96,28 @@ def atr_window_status(settings) -> int:
 
 
 def fallback_rule_status(settings) -> str:
-    """One startup line naming the strong-stock fallback mode and thresholds."""
+    """One startup line naming the bypass mode, entry filters, and confluence line."""
     mode = settings.fallback_rule
     LOG.warning(
-        "Fallback rule: %s rvol>=%s push>=%s atr=21 spread<=%s%% same_move=-%s/+%s",
-        mode, settings.fb_rvol_min, settings.fb_push_atr_min, settings.fb_max_spread_pct,
-        settings.fb_same_move_before_min, settings.fb_same_move_after_min,
+        "Fallback rule: %s rvol>=%s push>=%s atr=21 room<=%s min_after_open=%sm spread<=%s%% contract=atm confluence>=%s",
+        mode, settings.fb_rvol_min, settings.fb_push_atr_min, settings.fb_room_atr_max,
+        settings.fb_min_minutes, settings.fb_max_spread_pct, settings.bypass_confluence_min,
     )
     return mode
+
+
+def strong_score_status(settings) -> float:
+    """⚡ is applied in scoring when the model score clears this line."""
+    LOG.warning("Strong score: ⚡ on primary cards with model score >= %s", settings.strong_score)
+    return settings.strong_score
+
+
+def freshness_status(settings) -> None:
+    """Ages are logged. A stale quote is a flag and a point penalty, not a gate."""
+    LOG.warning(
+        "Freshness: quote_age_s bar_age_s min_since_trigger logged; stale quote >%ss is a flag and -%s, not a gate",
+        settings.stale_quote_seconds, settings.stale_quote_penalty,
+    )
 
 
 def handoff_fallback_status(enabled: bool, requested_mode: str | None) -> str:
@@ -274,6 +288,8 @@ def main():
              ','.join(sorted(engine.quality.disabled_rules)) or 'none')
     handoff_fallback_status(stock_first.enabled, os.getenv("LOTTO_STOCK_FIRST_MODE"))
     fallback_rule_status(engine.settings)
+    strong_score_status(engine.settings)
+    freshness_status(engine.settings)
     atr_window_status(engine.settings)
     from .model_v import scan_budget
     LOG.info("Model %s score_mode=%s preset=%s standby_names=%s standby=%s",
