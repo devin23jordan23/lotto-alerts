@@ -371,9 +371,14 @@ def _pace(bars, side, atr):
     except (TypeError, ValueError, AttributeError):
         return None, None
     move = direction * (price - opened) / atr
-    if len(rows) < 15:
+    latest = getattr(rows[-1], "end", None)
+    if latest is None:
         return move, None
-    window = rows[-15:]
+    window = [bar for bar in rows if getattr(bar, "end", None) is not None
+              and latest - timedelta(minutes=14) <= bar.end <= latest]
+    # A missing one-minute bar is tolerated; a short opening window is unknown.
+    if len(window) < 13 or window[0].end > latest - timedelta(minutes=14):
+        return move, None
     span = (max(float(bar.high) for bar in window) - min(float(bar.low) for bar in window)) / atr
     return move, span
 
@@ -403,10 +408,13 @@ def _volume_normal(bar, bars, tod):
 
 
 def _volume_exempt(bars, side, levels, tod) -> bool:
+    from .vt_measure import counted_volume
+
     hits = breaks_in_window(bars, side, levels, against=False, last_n=3)
     for bar, _kind in hits:
         normal = _volume_normal(bar, bars, tod)
-        vol = _num(getattr(bar, "volume", None))
+        # A wick break on a bar that closes against the card is not signed flow.
+        vol = counted_volume(bar, _card_direction(side), True)
         if normal is not None and vol is not None and vol >= 1.5 * normal:
             return True
     return False
@@ -464,7 +472,7 @@ def _index_levels(index_levels, snap, symbol: str):
 
 def alignment_rows(settings, *, side, option_v2=None, dte=1, bars=None, spot=None, strike=None,
                    atr=None, spy_bars=None, qqq_bars=None, spy_levels=None, qqq_levels=None,
-                   peers=None, etf_pct=None, levels=None, raw=None, tod=None) -> dict:
+                   peers=None, etf_pct=None, levels=None, raw=None, sources=None, tod=None) -> dict:
     """Non-zero penalty rows. Stock-volume and pace rows are last."""
     rows = {}
     side = str(side or "").upper()
@@ -492,7 +500,6 @@ def alignment_rows(settings, *, side, option_v2=None, dte=1, bars=None, spot=Non
 
     pos = _range_pos(bars)
     same_side_3 = bool(breaks_in_window(bars, side, levels, against=False, last_n=3))
-    any_same_side = bool(directional_breaks(bars, side, levels, against=False))
     if pos is not None and not same_side_3:
         if side == "PUT":
             if pos > 0.60:
@@ -510,11 +517,16 @@ def alignment_rows(settings, *, side, option_v2=None, dte=1, bars=None, spot=Non
     if vwap is not None and close is not None:
         wrong_vwap = (side == "PUT" and close > vwap) or (side == "CALL" and close < vwap)
     _take(rows, "PEN_VWAP_SIDE_WRONG", settings.pen_vwap_side_wrong, wrong_vwap)
-    _take(rows, "PEN_OTM_FAR", settings.pen_otm_far, _otm_far(side, spot, strike) and not any_same_side)
+    _take(rows, "PEN_OTM_FAR", settings.pen_otm_far, _otm_far(side, spot, strike) and not same_side_3)
 
-    bu = _raw_ratio(raw, "BU_5_TOD_10", "BU_5_TOD")
+    # The scored BU_5_TOD row can point to a prior breakout. This penalty
+    # specifically measures the five completed bars ending at the card.
+    bu = _raw_ratio(raw, "BU_5_TOD_LAST")
     rvol = _raw_ratio(raw, "RVOL_CUM")
-    if bu is not None and rvol is not None and bu < 1.0 and rvol < 1.0 and not _volume_exempt(bars, side, levels, tod):
+    rvol_source = (sources or {}).get("RVOL_CUM") if isinstance(sources, dict) else None
+    cumulative_baseline = rvol_source in {"RVOL_CUM_10", "RVOL_CUM_5", "RVOL_CUM_3", "RVOL_ANY", "RVOL_CUM_TIMESCALE"}
+    if (bu is not None and rvol is not None and cumulative_baseline
+            and bu < 1.0 and rvol < 1.0 and not _volume_exempt(bars, side, levels, tod)):
         if bu < 0.8:
             _take(rows, "PEN_STOCK_VOL_VERY_WEAK", settings.pen_stock_vol_very_weak, True)
         else:
@@ -556,6 +568,7 @@ def apply_alignment_penalties(score, candidate, settings, features=None, spy_bar
         etf_pct=etf_pct,
         levels=_snap_levels(snap),
         raw=features.get("_vt_raw") if isinstance(features, dict) else None,
+        sources=features.get("_vt_sources") if isinstance(features, dict) else None,
         tod=getattr(snap, "vt_tod", None),
     )
     if candidate.metrics is not None:

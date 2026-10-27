@@ -544,6 +544,27 @@ def measure_volume(bars, direction: int, levels, atr, tod=None, premarket=None,
             flags[name] = ratio_score(ratio, full)
             sources[name] = source
 
+    # The scored BU_5_TOD windows above end before the chosen breakout bar.
+    # Keep a separate causal last-five ratio for the alignment penalty.
+    if len(rows) >= 5:
+        last_five = rows[-5:]
+        normals = []
+        for item in last_five:
+            minute_at = minute_of(item)
+            normal = None
+            for key in (10, 5, 3, "any"):
+                curve = (tod or {}).get(key) or {}
+                normal = _num(curve.get(minute_at)) if minute_at is not None else None
+                if normal is not None and normal > 0:
+                    break
+            if normal is None or normal <= 0:
+                normals = []
+                break
+            normals.append(normal)
+        if len(normals) == 5:
+            raw["BU_5_TOD_LAST"] = sum(_vol(item) for item in last_five) / sum(normals)
+            sources["BU_5_TOD_LAST"] = "TOD"
+
     cum = sum(_vol(bar) for bar in rows)
     minute_now = minute_of(rows[-1])
     curves = cum_curves if cum_curves is not None else {}
