@@ -1545,7 +1545,7 @@ def index_sync(index_bars: dict, day: str, snap_at: datetime) -> bool:
 
 def apply_v2(candidate: Candidate, settings: Settings, history: list[Snapshot],
              index_bars: dict | None = None, handoff: bool = False, thin: bool = False,
-             a_bar: bool = False) -> Candidate:
+             a_bar: bool = False, index_levels: dict | None = None) -> Candidate:
     """Fill score_v2, path, and every term. Does not drop the candidate."""
     snap, option = candidate.snapshot, candidate.option
     direction = 1 if option.side == "CALL" else -1
@@ -1709,10 +1709,15 @@ def apply_v2(candidate: Candidate, settings: Settings, history: list[Snapshot],
     from pathlib import Path
     from .confluence import apply_card_layers
     spy_bars = snap.bars if snap.symbol == "SPY" else None
+    qqq_bars = None
     if index_bars:
         spy_bars = index_bars.get((snap.day, "SPY")) or spy_bars
+        qqq_bars = index_bars.get((snap.day, "QQQ"))
     try:
-        apply_card_layers(candidate, settings, qualifying, score_v2, history, spy_bars=spy_bars)
+        apply_card_layers(
+            candidate, settings, qualifying, score_v2, history, spy_bars=spy_bars,
+            qqq_bars=qqq_bars, index_levels=index_levels,
+        )
     except Exception as exc:
         candidate.qualifying = False
         candidate.metrics["card_layers_failed"] = type(exc).__name__

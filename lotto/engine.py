@@ -142,6 +142,7 @@ class Engine:
         self.rearmed = set()
         self.stock_events = []
         self.index_bars = {}
+        self.index_levels = {}
         self.runner_names = frozenset()
         self.fallback_log = None
         self.fallback_state = {}
@@ -349,7 +350,8 @@ class Engine:
     def process_model_v(self, snapshots: list[Snapshot]) -> list[dict]:
         """Score every priced contract on v2. Post only when it clears its path bar.
 
-        Nothing else posts. No cap, repeat penalty, or hard gate. One posted
+        Nothing else posts. No cap or repeat penalty. Alignment gates stay off
+        unless set. One posted
         card per ticker and side is held for cooldown_minutes. The other
         suppression is an exact duplicate: same contract and trigger inside
         the dedupe window.
@@ -359,6 +361,15 @@ class Engine:
 
         cfg = self.settings
         ready = []
+        for snap in snapshots:
+            if snap.symbol in {"SPY", "QQQ"} and snap.bars:
+                self.index_bars[(snap.day, snap.symbol)] = snap.bars
+                self.index_levels[(snap.day, snap.symbol)] = {
+                    "premarket_high": snap.premarket_high,
+                    "premarket_low": snap.premarket_low,
+                    "prior_high": snap.prior_high,
+                    "prior_low": snap.prior_low,
+                }
         for snap in snapshots:
             key = (snap.day, snap.symbol)
             if key not in self.history:
@@ -371,6 +382,12 @@ class Engine:
             self.store.track(snap, cfg)
             if snap.symbol in {"SPY", "QQQ"} and snap.bars:
                 self.index_bars[(snap.day, snap.symbol)] = snap.bars
+                self.index_levels[(snap.day, snap.symbol)] = {
+                    "premarket_high": snap.premarket_high,
+                    "premarket_low": snap.premarket_low,
+                    "prior_high": snap.prior_high,
+                    "prior_low": snap.prior_low,
+                }
             problems = snap.problems(cfg.max_quote_age_seconds, min_bars=max(3, min(cfg.min_opening_bars, 3)))
             if problems:
                 if not snap.problems(cfg.max_quote_age_seconds, min_bars=1):
@@ -418,7 +435,8 @@ class Engine:
                     candidate.setup = Setup(match.setup, match.trigger, match.invalidation)
                 apply_v2(candidate, cfg, history, self.index_bars, handoff=handoff,
                          thin=not candidate.metrics.get("cluster_size"),
-                         a_bar=snap.symbol in self.runner_names)
+                         a_bar=snap.symbol in self.runner_names,
+                         index_levels=self.index_levels)
                 if candidate.metrics.get("score_v2") is None:
                     candidate.metrics.update(missing_v2("score did not compute"))
                 scored.append(candidate)
@@ -453,8 +471,13 @@ class Engine:
                 self._observe_fallback_safely(snap, ready)
         alerts = []
         ready = dedupe_ready_cards(ready)
+        from .alignment import post_gate_reasons
         for candidate in sorted(ready, key=lambda c: (-c.metrics.get("card_score", c.score), c.snapshot.symbol)):
             snap = candidate.snapshot
+            blocked = post_gate_reasons(candidate, cfg)
+            if blocked:
+                self.store.decision(snap, "RESEARCH", "; ".join(blocked), candidate)
+                continue
             held = self._cooldown_reason(candidate)
             if held:
                 # The score and the contract stay in candidate_evaluations.
@@ -479,8 +502,13 @@ class Engine:
         snap = candidate.snapshot
         side = candidate.option.side if candidate.option is not None else ""
         key = (snap.day, cooldown_underlying(snap.symbol), (side or "").upper())
-        return cooldown_reason(
+        reason = cooldown_reason(
             snap.symbol, side, snap.at, self.post_cooldown.get(key), self.settings.cooldown_minutes)
+        if reason and getattr(self.settings, "cooldown_reset_on_level_break", 0):
+            from .alignment import level_break_resets_cooldown
+            if level_break_resets_cooldown(candidate, self.post_cooldown.get(key)):
+                return None
+        return reason
 
     def _remember_post(self, candidate) -> None:
         if self.settings.cooldown_minutes <= 0 or candidate.option is None:
@@ -589,7 +617,8 @@ class Engine:
                 try:
                     apply_v2(candidate, cfg, history, self.index_bars,
                              thin=not candidate.metrics.get("cluster_size"),
-                             a_bar=snap.symbol in self.runner_names)
+                             a_bar=snap.symbol in self.runner_names,
+                             index_levels=self.index_levels)
                 except Exception as exc:
                     logging.getLogger(__name__).warning(
                         "shadow score failed for %s (%s)", snap.symbol, type(exc).__name__)
@@ -642,7 +671,8 @@ class Engine:
                 donor = next(c for c in scored if c.option.side == side and c.metrics.get("exceptional_stock"))
                 setup = donor.setup or Setup("STOCK_OVERRIDE", snap.spot, snap.spot)
                 match = thin_candidate(snap, picked, cfg, setup)
-                apply_v2(match, cfg, history, self.index_bars, handoff=True, thin=True)
+                apply_v2(match, cfg, history, self.index_bars, handoff=True, thin=True,
+                         index_levels=self.index_levels)
                 scored.append(match)
             match.metrics["path"] = "stock_override"
             match.metrics["score_mode"] = "combined"
@@ -745,7 +775,7 @@ class Engine:
         candidate = thin_candidate(snap, option, self.settings, setup)
         history = self.history.get((snap.day, snap.symbol), [])
         apply_v2(candidate, self.settings, history, self.index_bars, handoff=False, thin=True,
-                 a_bar=snap.symbol in self.runner_names)
+                 a_bar=snap.symbol in self.runner_names, index_levels=self.index_levels)
         if candidate.metrics.get("card_layers_failed") or not candidate.metrics.get("gate_post"):
             return
         if candidate.metrics.get("score_v2") is None:
@@ -754,12 +784,30 @@ class Engine:
         candidate.qualifying = True
         candidate.state = "IGNITION"
         candidate.metrics["path"] = "bypass"
-        candidate.metrics["card_score"] = record.get("bypass_score", candidate.metrics.get("card_score"))
-        candidate.score = record.get("bypass_score", candidate.score)
+        raw_bypass = record.get("bypass_score")
+        rows = candidate.metrics.get("alignment_rows") or {}
+        extra = sum(float(value) for value in rows.values() if isinstance(value, (int, float)))
+        if raw_bypass is None:
+            raw_bypass = candidate.metrics.get("card_score", candidate.score)
+            extra = 0.0
+        try:
+            adjusted = float(raw_bypass) + extra
+        except (TypeError, ValueError):
+            adjusted = float(candidate.score or 0)
+        if rows and extra:
+            points = dict(candidate.metrics.get("confluence_points") or {})
+            points.update(rows)
+            candidate.metrics["confluence_points"] = points
+        candidate.metrics["card_score"] = round(adjusted, 2)
+        candidate.score = candidate.metrics["card_score"]
+        if extra and adjusted < self.settings.bypass_threshold:
+            self.store.record_candidates(snap, [candidate], self.settings)
+            self.store.decision(snap, "RESEARCH", "below bypass after alignment penalties", candidate)
+            return
         positive = record.get("positive_features") or 0
         bypass_score = record.get("bypass_score")
         if (positive >= self.settings.strong_feature_min
-                and bypass_score is not None and bypass_score >= self.settings.post_threshold):
+                and bypass_score is not None and adjusted >= self.settings.post_threshold):
             candidate.metrics["strength_marker"] = "⚡"
         else:
             candidate.metrics.pop("strength_marker", None)

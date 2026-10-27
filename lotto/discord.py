@@ -93,6 +93,11 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
         notes.append("override " + ", ".join(overrides))
     if notes:
         payload["embeds"][0]["description"] += "\n" + "\n".join(notes)
+    penalties = candidate.metrics.get("alignment_rows") or {}
+    if penalties:
+        payload["embeds"][0]["description"] += "\nAlignment penalties:"
+        for name, value in penalties.items():
+            payload["embeds"][0]["description"] += f"\n{name}: {value:+g}"
     return payload
 
 

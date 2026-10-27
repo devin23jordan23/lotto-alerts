@@ -287,6 +287,30 @@ class Settings:
     # One posted Discord card per underlying and side. 0 disables the hold.
     # SPX and SPXW share a slot. The clock is the last card that was posted.
     cooldown_minutes: int = 8
+    # Hard post gates. Off until set. Not part of the alignment pack.
+    gate_alignment: int = 0
+    gate_s12_bar: int = 0
+    # 1 applies the proposed penalty weights. An explicit override still wins.
+    alignment_pack: int = 0
+    pen_spy_opposing: float = 0.0
+    pen_spy_level_break_against: float = 0.0
+    pen_qqq_opposing: float = 0.0
+    pen_sector_opposing: float = 0.0
+    pen_both_opposing: float = 0.0
+    pen_s12_below_bar_per_point: float = 0.0
+    pen_s12_below_bar_cap: float = 0.0
+    broad_rows_side_aware: int = 0
+    cooldown_reset_on_level_break: int = 0
+    pen_range_pos_mid: float = 0.0
+    pen_range_pos_extreme: float = 0.0
+    pen_vwap_side_wrong: float = 0.0
+    pen_otm_far: float = 0.0
+    pen_stock_vol_weak: float = 0.0
+    pen_stock_vol_very_weak: float = 0.0
+    sector_peer_side_aware: int = 0
+    signed_volume: int = 0
+    pen_stock_flat: float = 0.0
+    pen_stock_slow: float = 0.0
     rearm_minutes: int = 3
     max_quote_age_seconds: int = 90
     min_ask: float = 0.10
@@ -461,6 +485,12 @@ class Settings:
                 raise ValueError(f"{name} cannot be negative")
         if self.active_quality_gate not in (0, 1):
             raise ValueError("active_quality_gate must be 0 or 1")
+        for name in (
+            "gate_alignment", "gate_s12_bar", "alignment_pack", "broad_rows_side_aware",
+            "cooldown_reset_on_level_break", "sector_peer_side_aware", "signed_volume",
+        ):
+            if getattr(self, name) not in (0, 1):
+                raise ValueError(f"{name} must be 0 or 1")
         if not 0 < self.min_ask <= self.max_ask or not 0 < self.min_delta <= self.max_delta <= 1:
             raise ValueError("Invalid contract limits")
         if not 0 <= self.max_dte <= 1:
@@ -534,6 +564,11 @@ def model_v_settings(**overrides) -> Settings:
                   strength_distribution_path=HANDOFF_SPEC_PATH)
     values.update(PRESETS[preset])
     values.update(overrides)
+    if values.get("alignment_pack"):
+        from .alignment import PACK
+        for name, proposed in PACK.items():
+            if name not in overrides:
+                values[name] = proposed
     values["preset"] = preset
     values["score_mode"] = str(values.get("score_mode", "s12")).lower()
     if "fallback_rule" in values:
