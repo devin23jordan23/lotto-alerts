@@ -10,13 +10,19 @@
  "bypass_threshold": 40,
  "profiles": {
   "aggressive": {
-   "post_threshold": 74,
+   "post_threshold": 70,
    "bypass_threshold": 40,
    "min_positive_features": 0,
    "bolt_min_features": 10
   },
   "middle": {
-   "post_threshold": 83,
+   "post_threshold": 77,
+   "bypass_threshold": 40,
+   "min_positive_features": 0,
+   "bolt_min_features": 10
+  },
+  "balanced": {
+   "post_threshold": 84,
    "bypass_threshold": 40,
    "min_positive_features": 0,
    "bolt_min_features": 10
@@ -285,7 +291,7 @@
   "spy10": "capped at 15",
   "fit": "joint L2 logistic C=0.1, penalties x0.25, fit<2026-07-20 test>=2026-07-20",
   "v4c": "adds Nia EMA terms as stacked interactions only; ~400 combinations tested by Nia -> shadow-check sized; live default profile moderate posts at 110. posting_threshold 60 is the research reference, not the live line.",
-  "profiles": "LOTTO_PROFILE selects loose 20/40/0/10, moderate 110/40/0/10, or conservative 140/40/0/10. post_threshold is not capped. Primary cards count features with value>=0.5. Bypass cards use bypass_threshold only. Bolt is score>=post_threshold and >=10 such features. No daily cap, top-N, or cooldown."
+  "profiles": "LOTTO_PROFILE selects aggressive (loose) 70/40/0/10, middle 77/40/0/10, balanced 84/40/0/10, or conservative (moderate, default) 92/40/0/10. post_threshold is not capped. Primary cards count features with value>=0.5. Bypass cards use bypass_threshold only. Bolt is score>=post_threshold and >=10 such features. No daily cap, top-N, or cooldown."
  },
  "definitions": {
   "flow85": "option vol5 (m-4..m) >=85",

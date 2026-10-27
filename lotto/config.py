@@ -139,6 +139,11 @@ class Settings:
     # also passes. spread_legacy forces this off.
     day_volume_swap: int = 1
     blocker_option_volume_day: float = 100
+    # Stock carries option volume, and one stock-bar term may miss by the
+    # tolerance. 0 is the pre-OPTB volume block and exact bars.
+    # spread_legacy forces this off.
+    optb: int = 1
+    stock_bar_tolerance: float = 0.05
     # 1 is the first strike OTM. 0 is nearest ATM, which spread_legacy forces.
     fallback_strike_offset: int = 1
     # Reserved per-feature knobs. The scorer does not read them. The live
@@ -351,6 +356,11 @@ class Settings:
             raise ValueError("Invalid spread legacy setting")
         if self.day_volume_swap not in (0, 1) or self.blocker_option_volume_day < 0:
             raise ValueError("Invalid day-volume swap")
+        if self.optb not in (0, 1):
+            raise ValueError("Invalid OPTB setting")
+        if (not isinstance(self.stock_bar_tolerance, (int, float)) or isinstance(self.stock_bar_tolerance, bool)
+                or not isfinite(self.stock_bar_tolerance) or not 0 <= self.stock_bar_tolerance < 1):
+            raise ValueError("Invalid stock bar tolerance")
         if self.fallback_strike_offset < 0:
             raise ValueError("Invalid fallback strike offset")
         bands = tuple(self.spread_bands)
@@ -372,6 +382,7 @@ class Settings:
         if self.spread_legacy:
             object.__setattr__(self, "fallback_strike_offset", 0)
             object.__setattr__(self, "day_volume_swap", 0)
+            object.__setattr__(self, "optb", 0)
         if (self.post_threshold < 0 or self.bypass_threshold < 0
                 or self.strong_feature_min < 0 or self.bolt_min_score < 0
                 or self.min_positive_features < 0):

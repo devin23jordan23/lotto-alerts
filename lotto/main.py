@@ -189,7 +189,7 @@ def env_settings() -> Settings:
     for field in fields(base):
         raw = os.getenv("LOTTO_" + field.name.upper())
         if raw is not None and field.name not in {"model", "preset", *PWIN_FIELDS}:
-            if field.name in {"standby_names", "spread_legacy", "day_volume_swap"}:
+            if field.name in {"standby_names", "spread_legacy", "day_volume_swap", "optb"}:
                 updates[field.name] = 1 if raw.strip().lower() in {"1", "on", "true", "yes"} else 0
             elif field.name == "spread_bands":
                 updates[field.name] = tuple(
