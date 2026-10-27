@@ -348,12 +348,15 @@ def main():
         configured_universe = ",".join(filter(None, (os.getenv("UOA_CORE_UNIVERSE", ""), os.getenv("UOA_IN_PLAY", "")))) or DEFAULT_UNIVERSE
     symbols = universe_symbols(configured_universe)
     standby = [s for s in standby_symbols() if s not in symbols]
-    from .volume_trend import install_extra_universe, is_volume_trend, pin_deep_names, volume_trend_symbols
+    from .volume_trend import (
+        ensure_etf_typicals, install_extra_universe, is_volume_trend, pin_deep_names, volume_trend_symbols,
+    )
     if is_volume_trend(engine.settings.profile):
         symbols = volume_trend_symbols(symbols)
         standby = [s for s in standby if s not in symbols]
         pin_deep_names(client.discovery)
         symbols, _loaded, _budget = install_extra_universe(symbols, client, engine.settings)
+        ensure_etf_typicals(client, datetime.now(timezone.utc))
     engine.runner_names = frozenset(standby)
     if not symbols:
         raise SystemExit("LOTTO_UNIVERSE must contain at least one symbol")

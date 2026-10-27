@@ -71,6 +71,37 @@ def epoch(value) -> datetime | None:
         return None
 
 
+def _session_abs_pct(daily) -> list:
+    """One curve per session: minute -> |% from that session's open|."""
+    curves = []
+    for historic in sorted(daily or {}):
+        rows = []
+        for raw in daily[historic]:
+            at = epoch(raw.get("datetime"))
+            if not at:
+                continue
+            local = at.astimezone(ET)
+            minute = (local.hour * 60 + local.minute) - 570
+            if not 0 <= minute < 390:
+                continue
+            rows.append((minute, number(raw.get("open")), number(raw.get("close"))))
+        if not rows:
+            continue
+        rows.sort()
+        session_open = next((item[1] for item in rows if item[1] and item[1] > 0), None)
+        if not session_open:
+            session_open = next((item[2] for item in rows if item[2] and item[2] > 0), None)
+        if not session_open:
+            continue
+        curve = {}
+        for minute, _opened, close in rows:
+            if close and close > 0:
+                curve[minute] = abs(close / session_open - 1.0) * 100.0
+        if curve:
+            curves.append(curve)
+    return curves
+
+
 class Schwab:
     def __init__(self, data_dir: str):
         self.client_id = os.getenv("SCHWAB_CLIENT_ID", "")
@@ -349,6 +380,22 @@ class Schwab:
         if not hasattr(self, "vt_levels"):
             self.vt_levels = {}
         self.vt_levels[key] = pack_range_levels(daily, day)
+        from .volume_trend import etf_typical_table, sector_quote_symbols
+        if symbol in set(sector_quote_symbols()):
+            curves = _session_abs_pct(daily)
+            atr_pct = None
+            atr = self.atrs.get(key)
+            ref = None
+            if daily:
+                last_rows = sorted(daily[max(daily)], key=lambda row: row.get("datetime") or 0)
+                ref = number(last_rows[-1].get("close")) if last_rows else None
+            if atr and ref and ref > 0:
+                atr_pct = float(atr) / float(ref) * 100.0
+            table, source = etf_typical_table(curves, atr_pct)
+            if not hasattr(self, "vt_etf_typical"):
+                self.vt_etf_typical = {}
+            self.vt_etf_typical[symbol] = {"by_minute": table, "source": source, "sessions": len(curves)}
+            LOG.info("ETF typical %s source=%s sessions=%d minutes=%d", symbol, source, len(curves), len(table))
         baseline = {minute: median(values) for minute, values in observations.items() if len(values) >= 10}
         if symbol == "SPX":
             # Schwab index candles have zero volume; use traded SPY volume only

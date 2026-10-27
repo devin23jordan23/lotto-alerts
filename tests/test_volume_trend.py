@@ -4,12 +4,13 @@ import unittest
 
 from lotto.models import ET, Bar, Option
 from lotto.volume_trend import (
-    DEEP_SLOTS, EXTRA_UNIVERSE, EXTRA_UNIVERSE_MAX, PAID_MARKET_DATA_PER_MINUTE,
-    PRIMARY_WEIGHTS, PROFILES, VOL_ALIASES, VOLUME_TREND_RULES,
-    alias_rows, alignment_features, call_budget, evaluate_stacks, is_volume_trend, overlay_book,
-    penalty_opt_vol_points, penalty_spread_points,
-    poll_cycle_calls, rally_breadth, rally_points, reference_close, score_volume_trend,
-    sector_map_names, select_extra_names, spy_turn, spy_window_return, stacks_from_rules,
+    DEEP_SLOTS, EXTRA_UNIVERSE, EXTRA_UNIVERSE_MAX, NO_SECTOR_ETF, PAID_MARKET_DATA_PER_MINUTE,
+    PRIMARY_WEIGHTS, PROFILES, SECTOR_BASKETS, VOL_ALIASES, VOLUME_TREND_RULES,
+    alias_rows, alignment_features, baskets_for, call_budget, candidate_etfs, choose_sector_etf,
+    etf_for, etf_multiplier, etf_typical_score, etf_typical_table, evaluate_stacks, is_volume_trend,
+    overlay_book, penalty_opt_vol_points, penalty_spread_points, poll_cycle_calls, rally_breadth,
+    rally_points, reference_close, score_volume_trend, sector_feature_choice, sector_map_names,
+    select_extra_names, spy_turn, spy_window_return, stacks_from_rules, vol_bin_flags,
     volume_trend_lines, volume_trend_symbols,
 )
 from lotto.vt_measure import (
@@ -52,7 +53,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(over["weights"]["SECTOR_ETF_PCT_TS"]["call"], 16)
         self.assertEqual(over["weights"]["SECTOR_L2_PMH"]["call"], 0)
         self.assertEqual(over["weights"]["SECTOR_ETF_PCT"]["call"], 0)
-        self.assertEqual(over["weights"]["SECTOR_PEER_COUNT"]["call"], 0)
+        self.assertEqual(over["weights"]["SECTOR_PEER_COUNT"]["call"], 33)
         self.assertEqual(over["weights"]["SPY_ALIGN_OPEN"]["call"], 1)
         self.assertNotIn("SPY_ALIGN_TURN_3M", book["bypass_weights"])
         for name in ("volume_trend_aggressive", "volume_trend_balanced", "volume_trend_conservative"):
@@ -475,6 +476,128 @@ class ExtraUniverseTests(unittest.TestCase):
         finally:
             if previous is not None:
                 os.environ["EXTRA_UNIVERSE_MAX"] = previous
+
+
+class ParityTests(unittest.TestCase):
+    def test_volume_bins_are_flags(self):
+        blank = vol_bin_flags({})
+        for key in (
+            "RVOL_CUM_15_25", "RVOL_CUM_ge25", "BU_5_TOD_10",
+            "BRK_TOD_BRK_08_12", "BRK_TOD_BRK_12_3", "BRK_TOD_BRK_ge3",
+        ):
+            self.assertEqual(blank[key], 0.0)
+        mid = vol_bin_flags({"RVOL_CUM": 1.5, "BU_5_TOD_10": 1.6, "BRK_TOD_10": 0.8})
+        self.assertEqual(mid["RVOL_CUM_15_25"], 1.0)
+        self.assertEqual(mid["RVOL_CUM_ge25"], 0.0)
+        self.assertEqual(mid["BU_5_TOD_10"], 1.0)
+        self.assertEqual(mid["BRK_TOD_BRK_08_12"], 1.0)
+        high = vol_bin_flags({"RVOL_CUM": 2.5, "BU_5_TOD_10": 1.59, "BRK_TOD_10": 1.2})
+        self.assertEqual(high["RVOL_CUM_ge25"], 1.0)
+        self.assertEqual(high["RVOL_CUM_15_25"], 0.0)
+        self.assertEqual(high["BU_5_TOD_10"], 0.0)
+        self.assertEqual(high["BRK_TOD_BRK_12_3"], 1.0)
+        self.assertEqual(high["BRK_TOD_BRK_08_12"], 0.0)
+        climax = vol_bin_flags({"BRK_TOD_10": 3.0})
+        self.assertEqual(climax["BRK_TOD_BRK_ge3"], 1.0)
+        self.assertEqual(climax["BRK_TOD_BRK_12_3"], 0.0)
+
+    def test_typical_table_fires_on_a_two_times_move(self):
+        curve, source = etf_typical_table([{30: 1.0} for _ in range(20)])
+        self.assertEqual(source, "20-day")
+        self.assertAlmostEqual(curve[30], 1.0)
+        short, short_source = etf_typical_table([{30: 1.0}] * 4)
+        self.assertEqual(short_source, "available-days")
+        scaled, scaled_source = etf_typical_table([], 2.0)
+        self.assertEqual(scaled_source, "atr-scaled")
+        self.assertGreater(scaled[30], 0)
+
+        class Snap:
+            symbol = "AAPL"
+            bars = []
+            vt_pct_by_symbol = {}
+            vt_peer_sets = {"XLK": [], "MTUM": []}
+            vt_etf_typical_by_etf = {"XLK": curve[30], "MTUM": curve[30]}
+            vt_etf_stats = {
+                "XLK": {"pct": 2.0, "last": 102.0, "pmh": None, "pml": None},
+                "MTUM": {"pct": 0.2, "last": 100.2, "pmh": None, "pml": None},
+            }
+
+        feats = sector_feature_choice(Snap(), 1, None)
+        self.assertEqual(etf_typical_score(1, 2.0, curve[30]), 1.0)
+        self.assertEqual(feats["SECTOR_ETF_PCT_TS"], 1.0)
+        self.assertEqual(feats["_sector_etf"], "XLK")
+        self.assertEqual(feats["_sector_etf_weight"], 1.0)
+
+    def test_sector_weight_picks_smh_soxx_xop_and_scales_the_low_group(self):
+        for etf in ("XLI", "XLU", "XLB", "XLP", "XLRE"):
+            self.assertEqual(etf_multiplier(etf), 0.5)
+        for etf in ("XLK", "SMH", "SOXX", "XOP", "XLE"):
+            self.assertEqual(etf_multiplier(etf), 1.0)
+        smh = choose_sector_etf([
+            ("XLK", {"SECTOR_PEER_COUNT": 0.0}),
+            ("SMH", {"SECTOR_PEER_COUNT": 1.0}),
+            ("SOXX", {"SECTOR_PEER_COUNT": 0.0}),
+        ], primary="XLK")
+        self.assertEqual(smh["etf"], "SMH")
+        self.assertEqual(smh["total"], 33)
+        tied = choose_sector_etf([
+            ("XLK", {"SECTOR_PEER_COUNT": 1.0}),
+            ("SMH", {"SECTOR_PEER_COUNT": 1.0}),
+        ], primary="XLK")
+        self.assertEqual(tied["etf"], "XLK")
+        xop = choose_sector_etf([
+            ("XLE", {"SECTOR_ETF_PCT_TS": 0.0}),
+            ("XOP", {"SECTOR_ETF_PCT_TS": 1.0}),
+        ], primary="XLE")
+        self.assertEqual(xop["etf"], "XOP")
+        soxx = choose_sector_etf([
+            ("XLK", {"SECTOR_ETF_PCT_TS": 0.0}),
+            ("SOXX", {"SECTOR_ETF_PCT_TS": 1.0}),
+        ], primary="XLK")
+        self.assertEqual(soxx["etf"], "SOXX")
+        points, _score, _positive, _fired = score_volume_trend(
+            {"SECTOR_ETF_PCT_TS": 1, "_sector_etf_weight": 0.5},
+            "CALL", load_weights(), "primary", "volume_trend_balanced",
+        )
+        self.assertEqual(points["SECTOR_ETF_PCT_TS"], 8)
+
+    def test_indexes_have_no_sector_etf(self):
+        closes = [100.0] * 11
+        closes[7] = 102.0
+        closes[10] = 101.0 * 1.0008
+        bars = [_bar(i, closes[i], 100) for i in range(11)]
+        for symbol in ("QQQ", "SPY", "IWM"):
+            self.assertIn(symbol, NO_SECTOR_ETF)
+            self.assertIsNone(etf_for(symbol))
+            self.assertEqual(candidate_etfs(symbol), ())
+            feats = sector_feature_choice(type("S", (), {"symbol": symbol, "bars": []})(), 1, bars)
+            self.assertEqual(feats["SECTOR_ETF_PCT_TS"], 0.0)
+            self.assertEqual(feats["SECTOR_PEER_COUNT"], 0.0)
+            self.assertEqual(feats["SPY_ALIGN_TURN_3M"], 1.0)
+
+    def test_baskets_and_gics_map(self):
+        by_name = {row["name"]: row for row in SECTOR_BASKETS}
+        self.assertIn("GLW", by_name["OPTICAL"]["tickers"])
+        self.assertNotIn("CIEN", by_name["OPTICAL"]["tickers"])
+        self.assertIn("S", by_name["CYBER"]["tickers"])
+        self.assertNotIn("FTNT", by_name["CYBER"]["tickers"])
+        self.assertEqual(by_name["DC_AI_INFRA"]["tickers"][0], "NBIS")
+        self.assertEqual(by_name["FINANCIALS_SLOW"]["tickers"], ())
+        for key in (
+            "BASKET_PCT_TS", "BASKET_SHARE_GREEN", "BASKET_SHARE_ABOVE_PMH",
+            "BASKET_RANK", "BASKET_REL", "BASKET_LEADER_RANK",
+        ):
+            self.assertEqual(PRIMARY_WEIGHTS[key], 0)
+        self.assertEqual({row["name"] for row in baskets_for("ANET")}, {"OPTICAL", "DC_AI_INFRA"})
+        self.assertEqual(etf_for("UBER"), "XLI")
+        self.assertEqual(etf_for("NBIS"), "XLK")
+        self.assertEqual(etf_for("TGT"), "XLY")
+        self.assertEqual(etf_for("RKLB"), "XLI")
+        self.assertEqual(etf_for("BABA"), "XLY")
+        self.assertEqual(etf_for("BMNR"), "XLK")
+        self.assertEqual(etf_for("WULF"), "XLK")
+        for name in EXTRA_UNIVERSE:
+            self.assertIsNotNone(etf_for(name), name)
 
 
 if __name__ == "__main__":

@@ -24,14 +24,19 @@ Primary cards only for the new sector and SPY points:
 
 | Row | Points | When |
 |---|---|---|
-| `SPY_ALIGN_TURN_3M` | 18 | SPY return over `SPY_ALIGN_TURN_WINDOW_MIN` (3.5, interpolated) is 0.05%–0.12% in the card's direction |
+| `SPY_ALIGN_TURN_3M` | 15 | SPY return over `SPY_ALIGN_TURN_WINDOW_MIN` (3.5, interpolated) is 0.05%–0.12% in the card's direction |
 | `SPY_ALIGN_RALLY_DAY` | 18 / 18 / 0 | 60–75% / 75–90% / ≥90% of sector-map names green (red for puts) |
-| `SECTOR_ETF_PCT_TS` | 32 | Sector ETF % from the open is 1.5–2.5× its 20-day same-minute typical move |
+| `SECTOR_ETF_PCT_TS` | 16 | Chosen sector ETF % from the open is 1.5–2.5× its 20-day same-minute typical move, then × `SECTOR_ETF_WEIGHT` |
 | `SPY_ALIGN_OPEN` | 1 | SPY on the card's side of the open and of VWAP |
 | `SECTOR_L2_PMH`, `SECTOR_ETF_PCT` | 0 | Alternates, still computed |
-| `SECTOR_PEER_COUNT` | 0 | Exactly 3 peers. Set the weight to 33 to turn that alternate on |
+| `SECTOR_PEER_COUNT` | 33 | Exactly 3 peers move with the card |
+| `BASKET_*` | 0 | Basket rows. The basket lists are in `SECTOR_BASKETS` |
 
 `SPY_ALIGN_TURN_WINDOW_MIN` is a float. 3.5 minutes is a 210-second lookback. The reference price is the linear interpolate between the two 1-minute closes that bracket that time. Set the key to 3 for a whole-minute window.
+
+The fitted volume rows are 3 to 11 points: `RVOL_CUM_15_25` is 7, `RVOL_CUM_ge25` is 11, `BU_5_TOD_10` is 4, and the break-bar rows are 4, 3, and 4. `vol_bin_flags` turns the measured ratios into those 0/1 flags. A missing ratio is 0.
+
+`SECTOR_ETF_PCT_TS` uses a same-minute typical built at startup from the existing candle history: the median absolute percent from the open over the last 20 sessions, fewer days when that is all the history, otherwise the ETF's ATR-scaled curve. The low group (`XLI`, `XLU`, `XLB`, `XLP`, `XLRE`) uses `SECTOR_ETF_WEIGHT_LOW` 0.5. A name with `SMH`, `SOXX`, or `XOP` keeps the ETF whose sector points are higher after that multiplier. `QQQ`, `SPY`, and `IWM` have no sector ETF, so their sector rows are 0 and the SPY rows still score.
 
 Ace's volume names are the scored keys (`BRK_VS_DAY`, `BRK_TOD_10/5/3`, `RVOL_CUM`, `SUST_VOL_TOD_1M`, `HOLD_ON_VOL`, and the rest in `lotto/volume_trend.py`). `VOL_*` names are aliases and stay at weight 0. `VOL_RVOL_TOD` names `RVOL_CUM_15_25` and `RVOL_CUM_ge25`. `VOL_PRE_BREAK` names `BU_5_TOD_10`. `VOL_BREAK_BAR` names `BRK_TOD_BRK_08_12`, `BRK_TOD_BRK_12_3`, and `BRK_TOD_BRK_ge3`. An alias adds no points. `RVOL_CHAIN_ge1.5` (+6) and the 1.0–1.5 dead zone (−9) score the same `RVOL_CUM` chain. `BRK_VS_10_ge1.5` (+15) stays the break bar versus the prior 10 bars of today. The backtested book has `BU_5_DAY_ge1` at 0. All three volume-trend profiles keep that 0 so the row does not double-count `BU_5_TOD_10`. The live JSON profiles, including balanced, are unchanged and do not carry the row.
 

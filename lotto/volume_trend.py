@@ -1,28 +1,26 @@
 """Volume-trend profiles. Same weights in all three; only the post line differs.
 
-Vince V2 is the live sector and SPY book, on primary cards only.
-SPY_ALIGN_TURN_3M is 18. Its window is SPY_ALIGN_TURN_WINDOW_MIN = 3.5.
+SPY_ALIGN_TURN_3M is 15. Its window is SPY_ALIGN_TURN_WINDOW_MIN = 3.5.
 3.5 minutes is 210 seconds. The reference close is the linear interpolate
 between the two 1-minute bar ends that bracket that timestamp. A whole-minute
 window such as 3 is the same function with no interpolate. The row scores
 when SPY's return over that window, in the card's direction, is inside
 SPY_ALIGN_TURN_MIN/MAX (0.05% to 0.12%).
 
-SPY_ALIGN_RALLY_DAY is tiered from the sector-map names: 18 points at
-60–75% green (red for puts), 18 at 75–90%, and 0 at 90% or more.
-SECTOR_ETF_PCT_TS is 32 when the sector ETF's percent from the open is
-1.5–2.5x its 20-day typical same-minute move. SECTOR_L2_PMH and
-SECTOR_ETF_PCT stay in the book at 0 as alternates. SECTOR_PEER_COUNT is 0;
-exactly 3 peers is the alternate (set that weight to 33). SPY_ALIGN_OPEN is 1.
+SPY_ALIGN_RALLY_DAY is 18 at 60–75% breadth, 18 at 75–90%, and 0 at 90% or more.
+Puts use the share of names that are red. SECTOR_ETF_PCT_TS is 16 when the
+chosen sector ETF's percent from the open is 1.5–2.5x its 20-day same-minute
+typical move. That ETF's SECTOR_ETF_WEIGHT (1.0, or 0.5 for the low group)
+multiplies every SECTOR_* row. SECTOR_PEER_COUNT is 33 and pays when exactly
+3 peers move with the card. SPY_ALIGN_OPEN is 1.
 
-Ace volume rows use his names. VOL_* keys are aliases. They are scored,
-never pass/fail. Provisional weights are 6–10 until the fitted pass.
-STACKS is a list: each entry adds its points when its conditions hold.
-Missing features are false. Nothing in a stack blocks a card.
-
-The sector map is hand-built and unverified. A peer with no bars counts as
-not moving. It is not an error. RF_NEWHI_VOL stays 0. The 15-minute repeat
-skip is off. The 5-minute same-contract dedupe stays.
+The fitted volume rows are 3 to 11 points: RVOL_CUM_15_25 is 7, RVOL_CUM_ge25
+is 11, BU_5_TOD_10 is 4, and the break-bar BRK_TOD_BRK rows are 4, 3, and 4.
+VOL_* keys are aliases at weight 0. STACKS stays configured at 0 points.
+QQQ, SPY, and IWM have no sector ETF, so their sector rows are 0. SPY rows
+still score. The GICS map is the sector source. A peer with no bars counts as
+not moving. RF_NEWHI_VOL stays 0. The 15-minute repeat skip is off. The
+5-minute same-contract dedupe stays.
 """
 from __future__ import annotations
 
@@ -164,6 +162,7 @@ VOLUME_TREND_RULES = {
         "XLY": 1.0, "XOP": 1.0, "XLE": 1.0, "XLF": 1.0, "XLV": 1.0,
     },
     "SECTOR_ETF_WEIGHT_LOW_NAMES": ("XLI", "XLU", "XLB", "XLP", "XLRE"),
+    "BASKET_LEADER_TOPN": 3,
     "rf_min_minutes": 5,
     "rf_vol_ratio": 1.3,
     "rf_prior_bars": 5,
@@ -243,8 +242,8 @@ PRIMARY_WEIGHTS = {
     "RS_SECTOR": 0,
     "UPPER_RANGE_30": 0,
     "RF_NEWHI_VOL": 0,
-    # Vince V2. L2 and the plain ETF band are alternates (weight 0).
-    # SECTOR_PEER_COUNT is 0. Set it to 33 to pay exactly 3 peers.
+    # L2 and the plain ETF band are alternates (weight 0).
+    # SECTOR_PEER_COUNT pays 33 when exactly 3 peers move with the card.
     "SECTOR_L1_PEERS_2": 0,
     "SECTOR_L1_PEERS_3P": 0,
     "SECTOR_L2_PMH": 0,
@@ -253,7 +252,13 @@ PRIMARY_WEIGHTS = {
     "SECTOR_ETF_PCT_TS": 16,
     "SECTOR_PM_RANGE_POS": 0,
     "SECTOR_VS_SPY": 0,
-    "SECTOR_PEER_COUNT": 0,
+    "SECTOR_PEER_COUNT": 33,
+    "BASKET_PCT_TS": 0,
+    "BASKET_SHARE_GREEN": 0,
+    "BASKET_SHARE_ABOVE_PMH": 0,
+    "BASKET_RANK": 0,
+    "BASKET_REL": 0,
+    "BASKET_LEADER_RANK": 0,
     "SPY_ALIGN_OPEN": 1,
     "SPY_ALIGN_TURN_3M": 15,
     "SPY_ALIGN_TURN_5M": 0,
@@ -338,6 +343,39 @@ def alias_rows(spec) -> tuple:
     if isinstance(spec, str):
         return (spec,)
     return tuple(spec)
+
+
+def _raw_number(raw, key):
+    try:
+        number = float((raw or {}).get(key))
+    except (TypeError, ValueError):
+        return None
+    return number if isfinite(number) else None
+
+
+def vol_bin_flags(raw, rules=None) -> dict:
+    """Binary volume rows. A missing ratio is 0, not the continuous score.
+
+    BU_5_TOD_10 is 1 when the 5-bar pre-break ratio is at least BU_5_TOD_10_MIN.
+    The break-bar flags read BRK_TOD_10, the fresh-bar ratio versus the 10-day TOD.
+    """
+    rules = rules or VOLUME_TREND_RULES
+    rvol = _raw_number(raw, "RVOL_CUM")
+    lo = float(rules["RVOL_CUM_LO"])
+    hi = float(rules["RVOL_CUM_HI"])
+    bu = _raw_number(raw, "BU_5_TOD_10")
+    brk = _raw_number(raw, "BRK_TOD_10")
+    band_lo = float(rules["BRK_TOD_BRK_LO"])
+    band_mid = float(rules["BRK_TOD_BRK_MID"])
+    band_hi = float(rules["BRK_TOD_BRK_HI"])
+    return {
+        "RVOL_CUM_15_25": 1.0 if rvol is not None and lo <= rvol < hi else 0.0,
+        "RVOL_CUM_ge25": 1.0 if rvol is not None and rvol >= hi else 0.0,
+        "BU_5_TOD_10": 1.0 if bu is not None and bu >= float(rules["BU_5_TOD_10_MIN"]) else 0.0,
+        "BRK_TOD_BRK_08_12": 1.0 if brk is not None and band_lo <= brk < band_mid else 0.0,
+        "BRK_TOD_BRK_12_3": 1.0 if brk is not None and band_mid <= brk < band_hi else 0.0,
+        "BRK_TOD_BRK_ge3": 1.0 if brk is not None and brk >= band_hi else 0.0,
+    }
 
 UNIVERSE_CUT = frozenset({
     "DIA", "USO", "SLV", "ETHA", "TQQQ",
@@ -571,6 +609,36 @@ GICS_ETFS = tuple(GICS_MAP.get("etfs") or (
     "XLF", "XLE", "XLK", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
     "SMH", "SOXX", "MTUM", "XOP",
 ))
+# Indexes have no sector ETF. Sector rows stay 0. SPY alignment rows still score.
+NO_SECTOR_ETF = frozenset(
+    str(item).upper() for item in (GICS_MAP.get("no_sector_etf") or ("SPY", "QQQ", "IWM", "SPX"))
+)
+
+# Theme baskets sit on top of the 15 ETFs. A name may be in more than one.
+# Slow groups stay empty until Vince sends the 2–3 names. Row weights are 0.
+SECTOR_BASKETS = (
+    {"name": "MEMORY", "tickers": ("MU", "SNDK", "WDC", "STX"), "weight": 1.0},
+    {"name": "OPTICAL", "tickers": ("AAOI", "LITE", "COHR", "GLW", "ANET"), "weight": 1.0},
+    {"name": "DC_AI_INFRA", "tickers": ("NBIS", "CRWV", "DELL", "SMCI", "ANET", "HPE"), "weight": 1.0},
+    {"name": "AI_POWER", "tickers": ("BE", "GEV", "VST", "CEG", "OKLO"), "weight": 1.0},
+    {"name": "SEMIS_CORE", "tickers": ("NVDA", "AMD", "AVGO", "TSM", "ARM", "QCOM", "MRVL", "INTC", "AMAT"), "weight": 1.0},
+    {"name": "CYBER", "tickers": ("PANW", "CRWD", "ZS", "NET", "S", "OKTA"), "weight": 1.0},
+    {"name": "SOFTWARE", "tickers": ("NOW", "CRM", "DDOG", "PLTR", "SNOW"), "weight": 1.0},
+    {"name": "CRYPTO_FINTECH", "tickers": ("COIN", "HOOD", "MSTR", "MARA", "RIOT", "IREN"), "weight": 1.0},
+    {"name": "MEGA", "tickers": ("AAPL", "MSFT", "META", "AMZN", "GOOGL", "TSLA"), "weight": 1.0},
+    {"name": "FINANCIALS_SLOW", "tickers": (), "weight": 1.0},
+    {"name": "INDUSTRIALS_SLOW", "tickers": (), "weight": 1.0},
+    {"name": "UTILITIES_SLOW", "tickers": (), "weight": 1.0},
+    {"name": "HOMEBUILDERS_SLOW", "tickers": (), "weight": 1.0},
+)
+
+
+def baskets_for(symbol: str) -> tuple:
+    name = str(symbol or "").upper()
+    return tuple(
+        entry for entry in SECTOR_BASKETS
+        if name in {str(item).upper() for item in entry.get("tickers") or ()}
+    )
 
 
 def ticker_row(symbol: str) -> dict:
@@ -632,13 +700,16 @@ def choose_sector_etf(bundles, primary: str | None = None, rules=None):
 
 
 def candidate_etfs(symbol: str) -> tuple:
+    name = str(symbol or "").upper()
+    if name in NO_SECTOR_ETF:
+        return ()
     row = ticker_row(symbol)
     out = []
     primary = row.get("primary")
     if primary:
         out.append(str(primary).upper())
-    for name in row.get("secondary") or []:
-        etf = str(name).upper()
+    for item in row.get("secondary") or []:
+        etf = str(item).upper()
         if etf not in out:
             out.append(etf)
     if "MTUM" not in out:
@@ -662,6 +733,8 @@ def peers_sharing(etf: str, include_reference: bool = False) -> tuple:
 
 
 def etf_for(symbol: str) -> str | None:
+    if str(symbol or "").upper() in NO_SECTOR_ETF:
+        return None
     primary = ticker_row(symbol).get("primary")
     return str(primary).upper() if primary else None
 
@@ -682,6 +755,20 @@ def peers_for(symbol: str) -> tuple:
 def sector_quote_symbols() -> tuple:
     """The 15 ETFs are quotes only. They are not alert tickers."""
     return tuple(sorted({str(item).upper() for item in GICS_ETFS}))
+
+
+def ensure_etf_typicals(client, now) -> None:
+    """Baseline each sector ETF once so the same-minute typical table exists.
+
+    baseline() is the existing candle pull. It stores the table on the client.
+    """
+    if client is None or not hasattr(client, "baseline"):
+        return
+    for etf in sector_quote_symbols():
+        try:
+            client.baseline(etf, now)
+        except Exception as exc:
+            LOG.warning("ETF typical %s unavailable (%s)", etf, type(exc).__name__)
 
 
 def group_of(symbol: str) -> str | None:
@@ -950,6 +1037,59 @@ def etf_typical_score(direction: int, etf_pct, typical_abs, rules=None) -> float
     lo = float(rules["SECTOR_ETF_TS_MIN"])
     hi = float(rules["SECTOR_ETF_TS_MAX"])
     return 1.0 if lo <= multiple <= hi else 0.0
+
+
+def _median(values):
+    rows = sorted(float(value) for value in values)
+    if not rows:
+        return None
+    mid = len(rows) // 2
+    if len(rows) % 2:
+        return rows[mid]
+    return (rows[mid - 1] + rows[mid]) / 2.0
+
+
+def etf_typical_table(day_curves, atr_pct=None, days=None) -> tuple:
+    """Median |% from open| at each minute over the last 20 sessions.
+
+    Fewer stored sessions use those days. No sessions use the ETF's ATR as a
+    percent of price, scaled by the square root of the elapsed session.
+    """
+    days = int(days or VOLUME_TREND_RULES["SECTOR_ETF_TS_DAYS"])
+
+    def curve_from(subset):
+        out = {}
+        for minute in range(390):
+            values = []
+            for item in subset:
+                if minute not in item:
+                    continue
+                try:
+                    number = float(item[minute])
+                except (TypeError, ValueError):
+                    continue
+                if isfinite(number) and number > 0:
+                    values.append(number)
+            value = _median(values)
+            if value is not None:
+                out[minute] = value
+        return out
+
+    usable = [dict(curve) for curve in (day_curves or []) if curve]
+    if len(usable) >= days:
+        return curve_from(usable[-days:]), "20-day"
+    if usable:
+        return curve_from(usable), "available-days"
+    try:
+        atr = float(atr_pct)
+    except (TypeError, ValueError):
+        atr = None
+    if atr is not None and isfinite(atr) and atr > 0:
+        return {
+            minute: atr * sqrt((minute + 1) / 390.0)
+            for minute in range(390)
+        }, "atr-scaled"
+    return {}, "missing"
 
 
 def alignment_features(*, direction: int, peers=None, etf_pct=None, spy_pct=None,
@@ -1498,6 +1638,82 @@ def _upper(bars, direction: int) -> float:
     return sum(1 for bar in window if bar.close <= line) / len(window)
 
 
+def sector_feature_choice(snap, direction, spy_bars, rules=None) -> dict:
+    """Score each mapped ETF and keep the higher total after SECTOR_ETF_WEIGHT.
+
+    QQQ, SPY, and IWM get SPY rows only. Their SECTOR_* values are 0.
+    A snap with no per-ETF tape keeps the single primary ETF already on it.
+    """
+    rules = rules or VOLUME_TREND_RULES
+    symbol = getattr(snap, "symbol", "")
+    bars = list(getattr(snap, "bars", None) or [])
+    minute = _minute_index(bars[-1]) if bars else None
+    spy_pct, qqq_pct, above = _spy_view(snap, spy_bars)
+    common = dict(
+        direction=direction,
+        spy_pct=spy_pct,
+        qqq_pct=qqq_pct,
+        spy_above_vwap=above,
+        spy_bars=spy_bars,
+        name_pcts=getattr(snap, "vt_name_pcts", None),
+        minute=minute,
+        pct_by_symbol=getattr(snap, "vt_pct_by_symbol", None),
+        rules=rules,
+        symbol=symbol,
+    )
+    if str(symbol).upper() in NO_SECTOR_ETF:
+        align = alignment_features(**common, peers=[], etf_pct=None, etf_typical=None)
+        for key in list(align):
+            if str(key).startswith("SECTOR_"):
+                align[key] = 0.0
+        align["_sector_etf_weight"] = 1.0
+        align["_sector_etf"] = ""
+        align["_sector_etf_pct"] = None
+        return align
+    stats = getattr(snap, "vt_etf_stats", None) or {}
+    peersets = getattr(snap, "vt_peer_sets", None) or {}
+    names = candidate_etfs(symbol)
+    if stats and names:
+        typicals = getattr(snap, "vt_etf_typical_by_etf", None) or {}
+        bundles = []
+        for etf in names:
+            info = stats.get(etf) or {}
+            bundles.append((etf, alignment_features(
+                **common,
+                peers=peersets.get(etf) or [],
+                etf_pct=info.get("pct"),
+                etf_last=info.get("last"),
+                etf_pmh=info.get("pmh"),
+                etf_pml=info.get("pml"),
+                etf_typical=typicals.get(etf),
+            )))
+        chosen = choose_sector_etf(bundles, primary=etf_for(symbol), rules=rules)
+        feats = dict(chosen["features"])
+        info = stats.get(chosen["etf"]) or {}
+        feats["_sector_etf_weight"] = chosen["weight"]
+        feats["_sector_etf"] = chosen["etf"]
+        feats["_sector_etf_pct"] = info.get("pct")
+        LOG.info(
+            "SECTOR ETF %s chose %s weight=%s total=%.2f",
+            symbol, chosen["etf"], chosen["weight"], chosen["total"],
+        )
+        return feats
+    primary = etf_for(symbol)
+    align = alignment_features(
+        **common,
+        peers=getattr(snap, "vt_peers", None),
+        etf_pct=getattr(snap, "vt_etf_pct", None),
+        etf_last=getattr(snap, "vt_etf_last", None),
+        etf_pmh=getattr(snap, "vt_etf_pmh", None),
+        etf_pml=getattr(snap, "vt_etf_pml", None),
+        etf_typical=getattr(snap, "vt_etf_typical", None),
+    )
+    align["_sector_etf_weight"] = etf_multiplier(primary, rules) if primary else 1.0
+    align["_sector_etf"] = primary or ""
+    align["_sector_etf_pct"] = getattr(snap, "vt_etf_pct", None)
+    return align
+
+
 def enrich_features(features: dict, snap, settings, prior=None, spy_bars=None) -> dict:
     """Add the volume-trend rows. Every volume read is a float. Nothing is left blank."""
     rules = VOLUME_TREND_RULES
@@ -1540,35 +1756,22 @@ def enrich_features(features: dict, snap, settings, prior=None, spy_bars=None) -
     if broken.get("_break_index") is not None:
         tb["TB_ENTRY"] = min(1.0, tb["TB_ENTRY"] + 0.16 * extra)
     features.update(tb)
-    spy_pct, qqq_pct, above = _spy_view(snap, spy_bars)
-    align = alignment_features(
-        direction=direction,
-        peers=getattr(snap, "vt_peers", None),
-        etf_pct=getattr(snap, "vt_etf_pct", None),
-        spy_pct=spy_pct,
-        qqq_pct=qqq_pct,
-        spy_above_vwap=above,
-        spy_bars=spy_bars,
-        name_pcts=getattr(snap, "vt_name_pcts", None),
-        minute=_minute_index(bars[-1]) if bars else None,
-        etf_last=getattr(snap, "vt_etf_last", None),
-        etf_pmh=getattr(snap, "vt_etf_pmh", None),
-        etf_pml=getattr(snap, "vt_etf_pml", None),
-        etf_typical=getattr(snap, "vt_etf_typical", None),
-        pct_by_symbol=getattr(snap, "vt_pct_by_symbol", None),
-        rules=rules,
-        symbol=getattr(snap, "symbol", ""),
-    )
+    align = sector_feature_choice(snap, direction, spy_bars, rules)
+    spy_pct, _qqq_pct, _above = _spy_view(snap, spy_bars)
     for key, value in align.items():
         if key.startswith("_"):
             features[key] = value
         else:
             features[key] = float(value)
+    features["_sector_etf_weight"] = align.get("_sector_etf_weight", 1.0)
+    features["_sector_etf"] = align.get("_sector_etf") or ""
     stock_pct = None
     if bars:
         stock_pct = pct_from_open(bars[0].open, bars[-1].close)
     features["RS_SPY"] = 1.0 if stock_pct is not None and spy_pct is not None and direction * (stock_pct - float(spy_pct)) > 0 else 0.0
-    etf_pct = _finite(getattr(snap, "vt_etf_pct", None))
+    etf_pct = _finite(align.get("_sector_etf_pct"))
+    if etf_pct is None and str(getattr(snap, "symbol", "")).upper() not in NO_SECTOR_ETF:
+        etf_pct = _finite(getattr(snap, "vt_etf_pct", None))
     features["RS_SECTOR"] = 1.0 if stock_pct is not None and etf_pct is not None and direction * (stock_pct - etf_pct) > 0 else 0.0
     features["PUSH_VOL_B"] = push_vol_b(bars, direction, atr, chain, rules)
     features["RF_NEWHI_VOL"] = rf_newhi_vol(bars, side, prior, getattr(snap, "at", None), rules)
@@ -1596,6 +1799,7 @@ def enrich_features(features: dict, snap, settings, prior=None, spy_bars=None) -
         symbol=getattr(snap, "symbol", ""),
     )
     features.update(measured["flags"])
+    features.update(vol_bin_flags(measured["raw"], rules))
     features["_vt_raw"] = measured["raw"]
     features["_vt_sources"] = measured["sources"]
     for alias, spec in VOL_ALIASES.items():
@@ -2258,8 +2462,11 @@ def sector_tape(symbol: str, parsed: dict, levels: dict, day):
     peers = []
     for name in peers_for(symbol) if primary else ():
         peers.append(_quote_row(name, parsed, levels, day))
+    names = () if str(symbol).upper() in NO_SECTOR_ETF else candidate_etfs(symbol)
     etf_stats = {}
-    for etf in candidate_etfs(symbol) or GICS_ETFS:
+    peer_sets = {}
+    me = str(symbol or "").upper()
+    for etf in names:
         row = _quote_row(etf, parsed, levels, day)
         etf_stats[etf] = {
             "pct": pct_from_open(row["open"], row["last"]),
@@ -2267,6 +2474,14 @@ def sector_tape(symbol: str, parsed: dict, levels: dict, day):
             "pmh": row["pmh"],
             "pml": row["pml"],
         }
+        if etf == "MTUM":
+            peer_sets[etf] = []
+        else:
+            peer_sets[etf] = [
+                _quote_row(name, parsed, levels, day)
+                for name in peers_sharing(etf)
+                if name != me
+            ]
     etf = primary
     etf_quote = (parsed or {}).get(etf) or {} if etf else {}
     etf_level = (levels or {}).get((etf, day), {}) if etf and levels else {}
@@ -2292,6 +2507,7 @@ def sector_tape(symbol: str, parsed: dict, levels: dict, day):
         "name_pcts": name_pcts,
         "pct_by_symbol": pct_by_symbol,
         "etf_stats": etf_stats,
+        "peer_sets": peer_sets,
         "quotes": {
             name: _quote_row(name, parsed, levels, day)
             for name in sector_map_names()
@@ -2329,4 +2545,15 @@ def attach_cycle_context(snap, client, symbol, day, minute, parsed, profile) -> 
     object.__setattr__(snap, "vt_name_pcts", tape["name_pcts"])
     object.__setattr__(snap, "vt_pct_by_symbol", tape["pct_by_symbol"])
     object.__setattr__(snap, "vt_etf_stats", tape["etf_stats"])
+    object.__setattr__(snap, "vt_peer_sets", tape["peer_sets"])
     object.__setattr__(snap, "vt_quotes", tape["quotes"])
+    tables = getattr(client, "vt_etf_typical", {}) if client is not None else {}
+    by_etf = {}
+    for etf in tape["etf_stats"]:
+        pack = tables.get(etf) or {}
+        curve = pack.get("by_minute") or {}
+        value = curve.get(minute) if minute is not None else None
+        by_etf[etf] = value
+    object.__setattr__(snap, "vt_etf_typical_by_etf", by_etf)
+    primary = etf_for(symbol)
+    object.__setattr__(snap, "vt_etf_typical", by_etf.get(primary) if primary else None)
