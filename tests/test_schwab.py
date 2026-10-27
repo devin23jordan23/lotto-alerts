@@ -13,7 +13,7 @@ from lotto.models import ET, Option, Snapshot
 from lotto.features import Candidate, contract_ok, response_proxy
 from lotto.config import Settings
 from lotto.discord import alert_payload
-from lotto.schwab import Schwab, api_symbol, benchmark_for
+from lotto.schwab import Schwab, api_symbol, benchmark_for, chain_to_date
 from lotto.discovery import Discovery
 from lotto.main import DEFAULT_UNIVERSE
 
@@ -23,6 +23,20 @@ class AdapterTests(unittest.TestCase):
         self.client = Schwab.__new__(Schwab)
         self.client.baselines = {}
         self.client.calendar_cache = {}
+
+    def test_chain_request_reaches_the_friday_weekly(self):
+        # Monday Oct 26 and Tuesday Oct 27: today+1 stops before Friday Oct 30.
+        self.assertEqual(chain_to_date(datetime(2026, 10, 26, tzinfo=ET).date(), 1).isoformat(), "2026-10-30")
+        self.assertEqual(chain_to_date(datetime(2026, 10, 27, tzinfo=ET).date(), 1).isoformat(), "2026-10-30")
+        # Friday already covers the 1-day trading window's next calendar day.
+        self.assertEqual(chain_to_date(datetime(2026, 10, 30, tzinfo=ET).date(), 1).isoformat(), "2026-10-31")
+        now = datetime(2026, 10, 26, 14, 20, tzinfo=ET)
+        self.client.get = Mock(return_value={"callExpDateMap": {}, "putExpDateMap": {}})
+        self.client.option_chain("AAOI", now, 1, 40)
+        params = self.client.get.call_args.args[1]
+        self.assertEqual(params["fromDate"], "2026-10-26")
+        self.assertEqual(params["toDate"], "2026-10-30")
+        self.assertEqual(params["strikeCount"], 40)
 
     def test_chain_preserves_iv_and_greeks_for_future_feedback(self):
         at = datetime(2026, 10, 1, 13, 27, tzinfo=ET)
