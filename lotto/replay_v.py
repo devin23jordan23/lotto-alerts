@@ -7,7 +7,8 @@ at or before the runner time counts as covered. This does not place orders.
 from collections import Counter
 from datetime import datetime
 
-from .config import Settings, model_v_settings
+from .config import Settings
+from .main import env_settings
 from .engine import Engine
 from .model_v import classify_runner, runner_doubled, true_win
 from .store import Store
@@ -57,7 +58,7 @@ def _later_quotes(store: Store, alert: dict) -> list[tuple[datetime, float]]:
 def replay(frames, settings: Settings | None = None, runners: list[dict] | None = None,
            scanned: set[str] | None = None) -> dict:
     """Score frames with Model V. `runners` are +200% names to classify."""
-    settings = settings or model_v_settings()
+    settings = settings or env_settings()
     store = Store(":memory:")
     try:
         engine = Engine(store, settings, dry_run=True)

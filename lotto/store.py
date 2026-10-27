@@ -1,4 +1,5 @@
 import json
+import logging
 import sqlite3
 import zlib
 from dataclasses import asdict
@@ -318,19 +319,24 @@ class Store:
         thesis_id = parent_id or ident
         payload["embeds"][0]["footer"] = {"text": f"{phase.title()} idea • Research score, not probability • {ident}"}
         with self.db:
-            self.db.execute("""INSERT INTO alerts
-                (id, day, symbol, side, contract, at, entry_ask, payload, snapshot, delivery,
-                 max_return, min_return, latest_return, last_quote, phase, parent_id, thesis_id,
-                 setup_name, setup_trigger, expiry)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (ident, snap.day, snap.symbol, option.side, option.symbol, snap.at.isoformat(),
-                 option.ask, json.dumps(payload), json.dumps(snap.to_dict()),
-                 "dry_run" if dry_run else "internal" if phase == "POTENTIAL" or not sendable else "pending",
-                 option.bid / option.ask - 1, option.bid / option.ask - 1,
-                 option.bid / option.ask - 1, option.quote_time.isoformat(),
-                 phase, parent_id, thesis_id,
-                 candidate.setup.name if candidate.setup else None,
-                 candidate.setup.trigger if candidate.setup else None,option.expiry.isoformat()))
+            try:
+                self.db.execute("""INSERT INTO alerts
+                    (id, day, symbol, side, contract, at, entry_ask, payload, snapshot, delivery,
+                     max_return, min_return, latest_return, last_quote, phase, parent_id, thesis_id,
+                     setup_name, setup_trigger, expiry)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (ident, snap.day, snap.symbol, option.side, option.symbol, snap.at.isoformat(),
+                     option.ask, json.dumps(payload), json.dumps(snap.to_dict()),
+                     "dry_run" if dry_run else "internal" if phase == "POTENTIAL" or not sendable else "pending",
+                     option.bid / option.ask - 1, option.bid / option.ask - 1,
+                     option.bid / option.ask - 1, option.quote_time.isoformat(),
+                     phase, parent_id, thesis_id,
+                     candidate.setup.name if candidate.setup else None,
+                     candidate.setup.trigger if candidate.setup else None,option.expiry.isoformat()))
+            except sqlite3.IntegrityError:
+                logging.getLogger(__name__).warning(
+                    "alert already queued for %s %s at %s", snap.symbol, option.symbol, snap.at.isoformat())
+                return ident
             if tier is not None:
                 self.db.execute("UPDATE alerts SET quality_tier=? WHERE id=?", (tier,ident))
             if quality is not None:

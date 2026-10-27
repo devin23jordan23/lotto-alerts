@@ -26,9 +26,13 @@ When a stored row has only the live blend, invert it if the rule counts are
 present. If they are not, score_v2 stays empty and the reason is logged.
 Those rows are kept. They are not posted and they are not dropped silently.
 
-Default posting (LOTTO_SCORE_MODE=s12) is two lanes on one priced contract:
-    hybrid   v2 >= 40 (0DTE) or >= 61 (1DTE). v2 here is the option point score.
-    handoff  fitted win chance >= the S12 or S11 floor for that strength band.
+Posting is the v4c additive score on the active profile. A primary card
+posts when that score clears the profile post_threshold, at least
+min_positive_features rows have value >= 0.5 and contribute points, and
+the posted contract passes the blockers, including a real 5-minute
+option-volume reading. Bypass cards clear bypass_threshold and the
+blockers only. The post line is not capped. The hybrid bars (40/61) and
+the handoff floors stay on the card as labels. They do not decide the post.
 The handoff floors are P(true win). hoF >= A - delta is the same bar on the
 log-odds scale (A is 58/80, delta is 200/100 on S12 and 150/75 on S11).
 
@@ -244,7 +248,8 @@ def held_level(bars, level, direction: int, closes: int = 2) -> bool:
 def stock_terms(snap: Snapshot, direction: int, metrics: dict, settings: Settings, sync: bool) -> dict:
     atr = snap.prior_atr if snap.prior_atr and snap.prior_atr > 0 else None
     move = metrics.get("move_from_open_atr") or 0
-    move_points = min(settings.w_move_atr * 2, settings.w_move_atr * max(0.0, move))
+    # More room used from the open scores lower.
+    move_points = -min(settings.w_move_atr * 2, settings.w_move_atr * max(0.0, move))
     rvol = max(metrics.get("pace_rvol") or 0, metrics.get("local_rvol_5m") or 0)
     rvol_points = min(settings.w_rvol * 2, settings.w_rvol * max(0.0, rvol - 1))
     if direction == 1:
@@ -468,10 +473,10 @@ def score_handoff(spec: dict, inputs: dict, rvol: float | None = None) -> dict:
 def handoff_floor(strength: float | None, dte: int, settings: Settings, a_bar: bool = False) -> float:
     """Fitted-probability floor. Runner names stay on the normal (A) floor.
 
-    LOTTO_FALLBACK_RULE=on turns off the strength step-down. log and off do not.
+    The bypass rule does not read or change this step-down.
     """
     normal = settings.pwin_normal_0dte if dte == 0 else settings.pwin_normal_1dte
-    if getattr(settings, "fallback_rule", "off") == "on" or a_bar or strength is None:
+    if a_bar or strength is None:
         return normal
     if strength >= settings.strength_decile:
         return settings.pwin_decile if dte == 0 else settings.pwin_decile_1dte
@@ -505,6 +510,7 @@ def new_fallback_state() -> dict:
         "run_high_at_fire": None,
         "run_low_at_fire": None,
         "q_false_since": False,
+        "pattern_score": 0.0,
         "fires": [],
     }
 
@@ -522,12 +528,145 @@ def _live_ask(option: Option) -> bool:
     return option.ask is not None and isfinite(option.ask) and option.ask > 0
 
 
-def choose_fallback_contract(snap: Snapshot, side: str) -> dict:
-    """0DTE if any 0DTE contract on this side has a live ask, else 1DTE.
+def _inside_strike_window(option: Option, snap: Snapshot, settings: Settings) -> bool:
+    spot = snap.spot
+    if spot is None or not isfinite(spot) or spot <= 0:
+        return False
+    return abs(option.strike - spot) / spot <= settings.strike_window_pct + 1e-12
 
-    1-OTM is the nearest strike strictly past the stock. ATM is the nearest
-    strike to the stock. Spread does not choose either strike.
+
+def meets_bar(parts, band, settings: Settings | None = None) -> bool:
+    """True when the stock clears the bar for this spread band. Band 0 has none."""
+    if band is None:
+        return False
+    if int(band) <= 0:
+        return True
+    if settings is None:
+        from .config import model_v_settings
+        settings = model_v_settings()
+    bars = tuple(settings.spread_stock_bars)
+    index = int(band) - 2
+    if index < 0 or index >= len(bars):
+        return False
+    need_rvol, need_push, need_setups = bars[index]
+    parts = parts or {}
+    try:
+        rvol = float(parts.get("rvol"))
+        push = float(parts.get("push"))
+        setups = int(parts.get("setups"))
+    except (TypeError, ValueError):
+        return False
+    if not isfinite(rvol) or not isfinite(push):
+        return False
+    return rvol >= float(need_rvol) and push >= float(need_push) and setups >= int(need_setups)
+
+
+def strong_stock_parts(snap: Snapshot, side: str, settings: Settings, history=None,
+                       features=None, setup=None, spy_bars=None) -> dict:
+    """RVOL, push, and the count of setup flags already on the card.
+
+    setups is setup_count of the additive feature dict. That is the same
+    detector list the score uses. A missing dict is computed once by
+    additive_features, not read from an empty side field.
     """
+    from .confluence import _atr, _curve_rvol, additive_features, setup_count
+    if features is None:
+        sample = next((option for option in snap.options if option.side == side), None)
+        features = additive_features(
+            snap, sample, settings, history=history, setup=setup, spy_bars=spy_bars)
+    bars = list(snap.bars or [])
+    indexed = _indexed_bars(bars)
+    minute = max(indexed) if indexed else None
+    if features is not None and "_rvol" in features:
+        rvol = features.get("_rvol")
+    else:
+        rvol = _curve_rvol(snap, bars) if bars else None
+    if features is not None and "_push" in features:
+        push = features.get("_push")
+    else:
+        push = fallback_push(indexed, minute, side, _atr(snap)) if minute is not None else None
+    return {"rvol": rvol, "push": push, "setups": setup_count(features)}
+
+
+def _quoted_fallback(option: Option) -> bool:
+    """A usable quote. A missing bid or a bid at or under zero is not one."""
+    bid = option.bid
+    ask = option.ask
+    if bid is None or ask is None:
+        return False
+    if not isinstance(bid, (int, float)) or not isinstance(ask, (int, float)):
+        return False
+    if not isfinite(bid) or not isfinite(ask):
+        return False
+    return bid > 0 and ask > 0
+
+
+def _otm_strike_order(strikes, spot: float, side: str, offset: int) -> list:
+    """1-OTM, then ATM if that quote is missing, then the next OTM strikes.
+
+    Calls walk up from the ATM strike. Puts walk down. offset 0 is not used
+    here; that path keeps the nearest-ATM sort.
+    """
+    strikes = sorted(set(strikes))
+    if not strikes:
+        return []
+    atm = min(strikes, key=lambda strike: (abs(strike - spot), strike))
+    if side == "CALL":
+        otm = [strike for strike in strikes if strike > atm]
+    else:
+        otm = [strike for strike in reversed(strikes) if strike < atm]
+    start = max(0, int(offset) - 1)
+    preferred = otm[start:]
+    if not preferred:
+        ordered = [atm]
+    else:
+        ordered = [preferred[0], atm, *preferred[1:]]
+    seen = set()
+    unique = []
+    for strike in ordered:
+        if strike not in seen:
+            seen.add(strike)
+            unique.append(strike)
+    return unique
+
+
+def _quote_passes(option: Option, snap: Snapshot, settings: Settings, history=None,
+                  parts=None) -> bool:
+    """Spread band, bid, ask, option volume, and the strike window.
+
+    A 5-minute print at the floor passes. With the day-volume swap on,
+    cumulative session volume also passes. spread_legacy restores the hard
+    15% cap and ignores day volume.
+    """
+    if not _live_ask(option) or not _inside_strike_window(option, snap, settings):
+        return False
+    if option.bid is None or not isfinite(option.bid) or option.bid <= settings.blocker_bid:
+        return False
+    from .confluence import option_volume_passes, spread_band, spread_fraction
+    fraction = spread_fraction(option)
+    if settings.spread_legacy:
+        if fraction is None or not isfinite(fraction) or fraction > settings.blocker_spread_legacy:
+            return False
+    else:
+        band = spread_band(fraction, settings)
+        if band is None or (band > 0 and not meets_bar(parts, band, settings)):
+            return False
+    volume = option_volume_5m(option, history, snap)
+    return option_volume_passes(volume, option.volume, settings)
+
+
+def choose_fallback_contract(snap: Snapshot, side: str, settings: Settings | None = None,
+                             history=None, parts=None) -> dict:
+    """0DTE, then 1DTE, inside 5% of spot.
+
+    The default walk starts one strike out of the money. A missing quote
+    there steps to the ATM strike, then to the next OTM strike. Offset 0,
+    including the legacy spread revert, is nearest ATM and then outward.
+    The spread band still applies. There is no hard spread block unless
+    spread_legacy is on.
+    """
+    settings = settings or Settings()
+    offset = 0 if settings.spread_legacy else int(settings.fallback_strike_offset)
     today = snap.at.astimezone(ET).date()
     grouped = {0: [], 1: []}
     for option in snap.options:
@@ -536,44 +675,60 @@ def choose_fallback_contract(snap: Snapshot, side: str) -> dict:
         days = (option.expiry - today).days
         if days in grouped:
             grouped[days].append(option)
-    pool = grouped[0] if any(_live_ask(option) for option in grouped[0]) else grouped[1]
-    if not any(_live_ask(option) for option in pool):
-        pool = []
     empty = {
         "option": None, "occ_symbol": None, "expiry": None, "dte": None, "strike": None,
         "fire_bid": None, "fire_ask": None, "atm_symbol": None, "atm_strike": None,
         "atm_bid": None, "atm_ask": None,
     }
-    if not pool:
+    order = (0, 1) if grouped[0] else (1,)
+    chosen = None
+    for days in order:
+        pool = [option for option in grouped[days] if _inside_strike_window(option, snap, settings)]
+        if offset <= 0:
+            pool.sort(key=lambda option: (abs(option.strike - snap.spot), option.strike))
+            for option in pool:
+                if _quote_passes(option, snap, settings, history, parts):
+                    chosen = option
+                    break
+        else:
+            by_strike = {}
+            for option in pool:
+                by_strike.setdefault(option.strike, []).append(option)
+            for strike in _otm_strike_order(by_strike, snap.spot, side, offset):
+                quoted = [option for option in by_strike[strike] if _quoted_fallback(option)]
+                quoted.sort(key=lambda option: option.symbol)
+                if not quoted:
+                    continue
+                for option in quoted:
+                    if _quote_passes(option, snap, settings, history, parts):
+                        chosen = option
+                        break
+                if chosen is not None:
+                    break
+        if chosen is not None:
+            break
+    if chosen is None:
         return empty
-    strikes = sorted({option.strike for option in pool})
-    direction = 1 if side == "CALL" else -1
-    if direction == 1:
-        further = [strike for strike in strikes if strike > snap.spot]
-        target = further[0] if further else None
-    else:
-        further = [strike for strike in strikes if strike < snap.spot]
-        target = further[-1] if further else None
-    atm_strike = min(strikes, key=lambda strike: (abs(strike - snap.spot), strike))
-
-    def pick(strike):
-        choices = [option for option in pool if option.strike == strike]
-        live = [option for option in choices if _live_ask(option)]
-        return (live or choices)[0]
-
-    atm = pick(atm_strike)
-    chosen = pick(target) if target is not None else None
     result = dict(empty)
     result.update({
-        "atm_symbol": atm.symbol, "atm_strike": atm.strike, "atm_bid": atm.bid, "atm_ask": atm.ask,
+        "option": chosen, "occ_symbol": chosen.symbol, "expiry": chosen.expiry.isoformat(),
+        "dte": (chosen.expiry - today).days, "strike": chosen.strike,
+        "fire_bid": chosen.bid, "fire_ask": chosen.ask,
+        "atm_symbol": chosen.symbol, "atm_strike": chosen.strike,
+        "atm_bid": chosen.bid, "atm_ask": chosen.ask,
     })
-    if chosen is not None:
-        result.update({
-            "option": chosen, "occ_symbol": chosen.symbol, "expiry": chosen.expiry.isoformat(),
-            "dte": (chosen.expiry - today).days, "strike": chosen.strike,
-            "fire_bid": chosen.bid, "fire_ask": chosen.ask,
-        })
     return result
+
+
+def room_from_open(indexed: dict, minute: int, side: str, atr21: float | None) -> float | None:
+    """ATR used from the session open in the trade direction. Puts use the decline."""
+    if atr21 is None or not isfinite(atr21) or atr21 <= 0 or minute not in indexed or not indexed:
+        return None
+    first = indexed[min(indexed)]
+    close = indexed[minute].close
+    if side == "CALL":
+        return (close - first.open) / atr21
+    return (first.open - close) / atr21
 
 
 def fallback_push(indexed: dict, minute: int, side: str, atr21: float | None) -> float | None:
@@ -674,7 +829,7 @@ def quote_spread_fail(bid, ask, max_spread_pct: float) -> tuple[int, float | Non
 
 
 def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict,
-                      option_skip: tuple | None = None) -> dict | None:
+                      option_skip: tuple | None = None, history=None, spy_bars=None) -> dict | None:
     """Advance one bar. Return a fire record, including deduped and skipped fires.
 
     Q-false is RVOL and push only. A level break does not reset the re-trigger.
@@ -689,30 +844,80 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     atr21 = getattr(snap, "prior_atr21", None)
     sessions = getattr(snap, "fallback_rvol_sessions", None)
     base = getattr(snap, "fallback_rvol_base", None)
-    rvol = fallback_rvol_value(indexed, minute, base, sessions)
+    days = getattr(snap, "prior_full_days", None)
+    curve = getattr(snap, "rvol_base", None)
+    if days is not None and days >= 10 and curve and curve > 0:
+        rvol = sum(indexed[index].volume for index in indexed if index <= minute) / curve
+    else:
+        rvol = fallback_rvol_value(indexed, minute, base, sessions)
     push = fallback_push(indexed, minute, side, atr21)
-    q_true = (rvol is not None and push is not None
-              and rvol >= settings.fb_rvol_min and push >= settings.fb_push_atr_min)
+    room = room_from_open(indexed, minute, side, atr21)
+    from .confluence import (PATTERN_FEATURES, _log_stock_bar, additive_features, card_gate,
+                              confluence_flags_for, match_value, pattern_match, spread_fraction)
+    from .weights import load_weights, score_path
+    sample = next((option for option in snap.options if option.side == side), None)
+    stock_features = additive_features(snap, sample, settings, history=history, spy_bars=spy_bars)
+    parts = strong_stock_parts(snap, side, settings, history, features=stock_features)
+    contract = choose_fallback_contract(snap, side, settings, history, parts)
+    probe = contract["option"]
+    features = additive_features(
+        snap, probe if probe is not None else sample, settings, history=history, spy_bars=spy_bars)
+    parts = strong_stock_parts(snap, side, settings, history, features=features)
+    vol5 = features.pop("_vol5", None)
+    features.pop("_rvol", None)
+    features.pop("_push", None)
+    flags = confluence_flags_for(snap, probe, {}, settings)
+    _points, bypass_score, positive = score_path(features, side, load_weights(settings.weights_path), "bypass")
+    bar = indexed[minute]
+    volume = bar.volume
+    if probe is None:
+        gate = card_gate(side, volume, None, settings, bid=None, option_volume_5m=None, parts=parts)
+    else:
+        gate = card_gate(
+            side, volume, spread_fraction(probe), settings, bid=probe.bid,
+            option_volume_5m=vol5, option_volume_day=probe.volume, parts=parts)
+    unmet = (
+        not settings.spread_legacy
+        and gate.get("spread_band") not in (None, 0)
+        and not gate.get("stock_bar_met")
+        and "wide_spread" in gate["blocked_by"]
+    )
+    _log_stock_bar(
+        snap, probe, gate.get("spread_band"), parts, stock_path=True,
+        unmet=unmet, bar_met=int(gate.get("stock_bar_met") or 0),
+    )
+    # RVOL, push, and room are points. The bypass posts when those points clear
+    # the bypass line and the contract that would post passes the blockers.
+    q_true = bypass_score >= settings.bypass_threshold and gate["post_ok"]
     if state.get("last_m") is not None and minute > state["last_m"] and not q_true:
         state["q_false_since"] = True
     breaks = held_level_breaks(indexed, minute, snap, side)
     fresh = any(item["lvl"] in {"pmh", "pdh", "pml", "pdl"} for item in breaks)
     hod = next((item for item in breaks if item["lvl"] in {"hod", "lod"}), None)
-    bar = indexed[minute]
     new_extreme = False
     if hod is not None and state.get("last_m") is not None:
         if side == "CALL" and state.get("run_high_at_fire") is not None and bar.high > state["run_high_at_fire"]:
             new_extreme = True
         if side == "PUT" and state.get("run_low_at_fire") is not None and bar.low < state["run_low_at_fire"]:
             new_extreme = True
-    # PMH/PDH (and the put mirrors) may fire from bar 2. HOD/LOD stay inside
-    # held_level_breaks, which still requires m >= 15. Nothing fires after 384.
-    candidate = (minute <= FALLBACK_LAST_BAR and bool(breaks) and q_true)
+    # A held PM/PD/HOD is a confluence point, not a fresh trigger. The trigger
+    # is a level break on this bar, or a pattern match that first clears the
+    # line inside the entry window. A print from before that window is not spent.
+    in_window = settings.fb_min_minutes <= minute <= FALLBACK_LAST_BAR
+    matched = pattern_match(flags)
+    prior_match = float(state.get("pattern_score") or 0)
+    if in_window:
+        pattern_new = matched >= settings.pattern_trigger_min and prior_match < settings.pattern_trigger_min
+        state["pattern_score"] = matched
+    else:
+        pattern_new = False
+    setup_on = bool(breaks) or pattern_new
+    score_ok = q_true
+    candidate = in_window and q_true and setup_on and score_ok
     why = fire_why(first=state.get("k", 0) == 0, fresh_level=fresh, new_extreme=new_extreme,
                    q_false_since=bool(state.get("q_false_since")), candidate=candidate, side=side)
     if why is None:
         return None
-    contract = choose_fallback_contract(snap, side)
     skip_flag, skip_id, skip_ts = option_skip or (False, None, None)
     dedupe_ts = None
     window = timedelta(minutes=settings.event_dedupe_minutes)
@@ -724,20 +929,35 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     run_high = max(item.high for item in through)
     run_low = min(item.low for item in through)
     earliest = indexed[min(indexed)]
-    lvl = "+".join(item["lvl"] for item in breaks)
-    level_value = breaks[0]["level_value"]
+    if breaks:
+        lvl = "+".join(item["lvl"] for item in breaks)
+        level_value = breaks[0]["level_value"]
+    else:
+        lvl = "+".join(name for name in PATTERN_FEATURES
+                       if match_value(flags.get(name)) >= settings.pattern_trigger_min) or "setup"
+        level_value = bar.close
     k = state.get("k", 0) + 1
     bars_since = None if state.get("last_m") is None else minute - state["last_m"]
     prev_ts = None if state.get("last_ts") is None else state["last_ts"].astimezone(ET).isoformat()
     rvol_text = 0 if rvol is None else rvol
     push_text = 0 if push is None else push
     label = "+".join(part.upper() for part in lvl.split("+"))
-    reason = f"strong-stock fallback: {label} break, RVOL {rvol_text:.2f}, push {push_text:.2f} ATR21"
+    reason = f"stock bypass: {label}, confluence {bypass_score:.0f}"
     record = {
         "date": snap.day, "ts_fire": snap.at.astimezone(ET).isoformat(), "tk": snap.symbol, "side": side,
         "k": k, "why": why, "lvl": lvl, "level_value": level_value,
         "levels": {item["lvl"]: item["level_value"] for item in breaks},
         "px": bar.close, "open": earliest.open, "atr21": atr21, "rvol": rvol, "push30": push,
+        "room_atr": room, "confluence_score": bypass_score, "bypass_score": bypass_score,
+        "positive_features": positive, "confluence_flags": flags, "confluence_points": _points,
+        "gate_post": int(gate["post_ok"]),
+        "spread_band": gate.get("spread_band"),
+        "stock_bar_met": int(gate.get("stock_bar_met") or 0),
+        "wide_spread_bar_unmet": int(unmet),
+        "stock_rvol": parts.get("rvol"),
+        "stock_push": parts.get("push"),
+        "stock_setups": parts.get("setups"),
+        "base": gate["base"], "blockers": gate["blockers"], "overrides": gate["overrides"],
         "run_high": run_high, "run_low": run_low, "bars_since_last_fire": bars_since, "prev_fire_ts": prev_ts,
         "skip_flag": bool(skip_flag), "skip_ref_card_id": skip_id, "skip_ref_ts": skip_ts,
         "skip_after_resolved": False,
@@ -765,6 +985,8 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     state["q_false_since"] = False
     state["fires"].append({"ts": snap.at, "contract": contract["occ_symbol"], "k": k, "m": minute})
     record["_option"] = contract["option"]
+    from .confluence import card_freshness
+    record.update(card_freshness(snap, contract["option"], level_value))
     return record
 
 
@@ -833,7 +1055,7 @@ def resolve_fallback_skip(record: dict, alerts: list[dict]) -> dict:
     for alert in alerts:
         if alert.get("symbol") != updated["tk"] or alert.get("side") != updated["side"]:
             continue
-        if alert.get("setup_name") == "STRONG_STOCK_FALLBACK":
+        if alert.get("setup_name") in {"STRONG_STOCK_FALLBACK", "STOCK_BYPASS"}:
             continue
         at = alert.get("at")
         if isinstance(at, str):
@@ -904,7 +1126,7 @@ def _break_flag(close: float, level: float | None, side: int) -> float | None:
 def build_handoff_features(snap: Snapshot, option: Option, history: list[Snapshot], side: int) -> dict:
     """Raw handoff inputs. None marks a missing value for the fill step.
 
-    RVOL is 0 until five prior full sessions exist. A missing premarket break,
+    RVOL is 0 until ten prior full sessions exist. A missing premarket break,
     prior-day break, or new extreme stays None so the fill can set it to 1.
     """
     bars = list(snap.bars)
@@ -923,7 +1145,7 @@ def build_handoff_features(snap: Snapshot, option: Option, history: list[Snapsho
         raw["mo_pct"] = side * (close_m / open0 - 1) * 100
     days = getattr(snap, "prior_full_days", None)
     base = getattr(snap, "rvol_base", None)
-    if days is not None and days >= 5 and base and base > 0:
+    if days is not None and days >= 10 and base and base > 0:
         raw["rvol"] = sum(bar.volume for bar in bars) / base
     else:
         raw["rvol"] = 0.0
@@ -965,6 +1187,22 @@ def build_handoff_features(snap: Snapshot, option: Option, history: list[Snapsho
     raw["cdte"] = 0.0 if dte_of(option, snap) == 0 else 1.0
     raw["m"] = float(minute if minute is not None else 0)
     return raw
+
+
+def option_volume_5m(option, history=None, snap=None) -> float | None:
+    """Contracts printed in the last five minutes.
+
+    The number is the delta from a print about five minutes earlier. With no
+    such print the reading is unknown. This function does not look at day
+    volume. The card gate accepts cumulative session volume on its own when
+    the day-volume swap is on.
+    """
+    if option is None or snap is None or not history:
+        return None
+    delta = _option_volume_5(option, history, snap)
+    if delta is None:
+        return None
+    return float(delta)
 
 
 def _option_volume_5(option: Option, history: list[Snapshot], snap: Snapshot) -> float | None:
@@ -1371,7 +1609,23 @@ def apply_v2(candidate: Candidate, settings: Settings, history: list[Snapshot],
             f"Level retest {retest.get('retest_level')} ×{retest.get('retest_count')}"
         ]
     candidate.blockers = tuple(candidate.blockers)
-    candidate.qualifying = qualifying
+    candidate.qualifying = False
+    from pathlib import Path
+    from .confluence import apply_card_layers
+    spy_bars = snap.bars if snap.symbol == "SPY" else None
+    if index_bars:
+        spy_bars = index_bars.get((snap.day, "SPY")) or spy_bars
+    try:
+        apply_card_layers(candidate, settings, qualifying, score_v2, history, spy_bars=spy_bars)
+    except Exception as exc:
+        candidate.qualifying = False
+        candidate.metrics["card_layers_failed"] = type(exc).__name__
+        LOG.error("card layers failed (%s); card not posted", type(exc).__name__)
+        if isinstance(exc, FileNotFoundError) or not Path(settings.weights_path).is_file():
+            LOG.error(
+                "WEIGHTS FILE MISSING: %s. No card will post until this file is present.",
+                settings.weights_path,
+            )
     return candidate
 
 

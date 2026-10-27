@@ -95,15 +95,64 @@ def atr_window_status(settings) -> int:
     return days
 
 
+def _setting_text(value) -> str:
+    number = float(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.4f}".rstrip("0").rstrip(".")
+
+
+def profile_status(settings) -> str:
+    """The active profile and the lines it actually posts on. No cap is applied."""
+    LOG.warning(
+        "Profile: %s post>=%s bypass>=%s min_positive_features>=%s bolt_features>=%s",
+        settings.profile, _setting_text(settings.post_threshold),
+        _setting_text(settings.bypass_threshold), settings.min_positive_features,
+        settings.strong_feature_min,
+    )
+    return settings.profile
+
+
 def fallback_rule_status(settings) -> str:
-    """One startup line naming the strong-stock fallback mode and thresholds."""
+    """One startup line. RVOL, push, and room are points, not gates."""
     mode = settings.fallback_rule
     LOG.warning(
-        "Fallback rule: %s rvol>=%s push>=%s atr=21 spread<=%s%% same_move=-%s/+%s",
-        mode, settings.fb_rvol_min, settings.fb_push_atr_min, settings.fb_max_spread_pct,
-        settings.fb_same_move_before_min, settings.fb_same_move_after_min,
+        "Fallback rule: %s post>=%s bypass>=%s atr=21 contract=roll spread<=%s%% bid>%s opt_vol>=%s",
+        mode, _setting_text(settings.post_threshold), _setting_text(settings.bypass_threshold),
+        _setting_text(settings.fb_max_spread_pct), _setting_text(settings.blocker_bid),
+        _setting_text(settings.blocker_option_volume_5m),
     )
     return mode
+
+
+def strong_score_status(settings) -> int:
+    """⚡ needs the profile post line and the positive-feature count."""
+    LOG.warning(
+        "Strong score: ⚡ on cards with score>=%s and >= %s positive features",
+        _setting_text(settings.post_threshold), settings.strong_feature_min,
+    )
+    return settings.strong_feature_min
+
+
+def weights_file_status(settings) -> bool:
+    """Loud when the shipped weights book is not on disk. Cards will not post."""
+    path = Path(settings.weights_path)
+    if path.is_file():
+        LOG.warning("Weights file: %s", path.name)
+        return True
+    LOG.error(
+        "WEIGHTS FILE MISSING: %s. No card will post until this file is present.",
+        path,
+    )
+    return False
+
+
+def freshness_status(settings) -> None:
+    """Ages are logged. A stale quote is a flag and a point penalty, not a gate."""
+    LOG.warning(
+        "Freshness: quote_age_s bar_age_s min_since_trigger logged; stale quote >%ss is a flag and -%s, not a gate",
+        _setting_text(settings.stale_quote_seconds), _setting_text(settings.stale_quote_penalty),
+    )
 
 
 def handoff_fallback_status(enabled: bool, requested_mode: str | None) -> str:
@@ -140,8 +189,20 @@ def env_settings() -> Settings:
     for field in fields(base):
         raw = os.getenv("LOTTO_" + field.name.upper())
         if raw is not None and field.name not in {"model", "preset", *PWIN_FIELDS}:
-            if field.name == "standby_names":
+            if field.name in {"standby_names", "spread_legacy", "day_volume_swap"}:
                 updates[field.name] = 1 if raw.strip().lower() in {"1", "on", "true", "yes"} else 0
+            elif field.name == "spread_bands":
+                updates[field.name] = tuple(
+                    float(piece) for piece in raw.replace(" ", "").split(",") if piece)
+            elif field.name == "spread_stock_bars":
+                parsed = []
+                for piece in raw.split(","):
+                    piece = piece.strip()
+                    if not piece:
+                        continue
+                    rvol, push, setups = piece.split("/")
+                    parsed.append((float(rvol), float(push), int(float(setups))))
+                updates[field.name] = tuple(parsed)
             else:
                 updates[field.name] = type(getattr(base, field.name))(raw)
     if "score_mode" in updates:
@@ -172,6 +233,34 @@ def env_settings() -> Settings:
                     "Ignoring LOTTO_%s=%s; LOTTO_PRESET=%s uses %s",
                     name.upper(), raw, base.preset, preset_value,
                 )
+    if model == "V":
+        from .weights import active_profile, load_weights
+        requested = str(updates.get("profile") or base.profile or "conservative")
+        overridden = [
+            name for name in ("LOTTO_POST_THRESHOLD", "LOTTO_BYPASS_THRESHOLD", "LOTTO_MIN_POSITIVE_FEATURES")
+            if os.getenv(name) is not None
+        ]
+        try:
+            chosen = active_profile(load_weights(updates.get("weights_path")), requested)
+            updates.update(chosen)
+            if overridden:
+                LOG.warning(
+                    "LOTTO_PROFILE=%s overrides %s. Set LOTTO_PROFILE to change the line.",
+                    chosen["profile"], ", ".join(overridden),
+                )
+        except (OSError, ValueError) as exc:
+            LOG.error(
+                "Weights book failed to load (%s); conservative defaults are in use "
+                "(post>=92 bypass>=40 min_positive_features>=0 bolt>=10)",
+                type(exc).__name__,
+            )
+            updates.update({
+                "profile": "conservative",
+                "post_threshold": 92,
+                "bypass_threshold": 40,
+                "min_positive_features": 0,
+                "strong_feature_min": 10,
+            })
     return replace(base, **updates)
 
 
@@ -273,7 +362,11 @@ def main():
              'configured' if os.getenv('DISCORD_LOTTO_SECONDARY_WEBHOOK') else 'internal',
              ','.join(sorted(engine.quality.disabled_rules)) or 'none')
     handoff_fallback_status(stock_first.enabled, os.getenv("LOTTO_STOCK_FIRST_MODE"))
+    profile_status(engine.settings)
     fallback_rule_status(engine.settings)
+    strong_score_status(engine.settings)
+    freshness_status(engine.settings)
+    weights_file_status(engine.settings)
     atr_window_status(engine.settings)
     from .model_v import scan_budget
     LOG.info("Model %s score_mode=%s preset=%s standby_names=%s standby=%s",

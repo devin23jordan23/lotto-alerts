@@ -190,22 +190,33 @@ class AdapterTests(unittest.TestCase):
 
     def test_fallback_rvol_needs_ten_sessions_and_does_not_use_the_handoff_floor(self):
         today = datetime(2026, 10, 26, 10, 0, tzinfo=ET)
-        candles = []
-        for age in range(10, 0, -1):
-            start = (today - timedelta(days=age)).replace(hour=9, minute=30, second=0, microsecond=0)
-            candles.append({"datetime": start.timestamp() * 1000, "high": 101, "low": 99, "close": 100, "volume": 80})
-        self.client.candles = Mock(return_value={"candles": candles})
+
+        def sessions(count, volume):
+            candles = []
+            for age in range(count, 0, -1):
+                start = (today - timedelta(days=age)).replace(hour=9, minute=30, second=0, microsecond=0)
+                for minute in range(380):
+                    at = start + timedelta(minutes=minute)
+                    candles.append({"datetime": at.timestamp() * 1000, "high": 101, "low": 99,
+                                    "close": 100, "volume": volume})
+            return candles
+
+        self.client.candles = Mock(return_value={"candles": sessions(10, 80)})
         self.client.baseline("TEST", today)
         stored = self.client.fallback_rvol[("TEST", today.date())]
+        handoff = self.client.handoff_rvol[("TEST", today.date())]
         self.assertEqual(stored["sessions"], 10)
+        self.assertEqual(handoff["days"], 10)
+        self.assertEqual(stored["base"], handoff["base"])
         self.assertEqual(stored["base"][0], 80)
-        self.assertEqual(self.client.handoff_rvol[("TEST", today.date())]["days"], 0)
+        self.assertEqual(stored["base"][1], 160)
         self.client.baselines = {}
-        self.client.candles = Mock(return_value={"candles": candles[1:]})
+        self.client.candles = Mock(return_value={"candles": sessions(9, 80)})
         self.client.baseline("TEST", today)
         short = self.client.fallback_rvol[("TEST", today.date())]
         self.assertEqual(short["sessions"], 9)
         self.assertEqual(short["base"], {})
+        self.assertEqual(self.client.handoff_rvol[("TEST", today.date())]["base"], {})
 
     def test_baseline_excludes_today_and_uses_same_elapsed_time(self):
         today = datetime(2026, 9, 21, 10, 0, tzinfo=ET)

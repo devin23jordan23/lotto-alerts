@@ -3,6 +3,20 @@
 Selective intraday potential watches and active options ideas using Schwab, Railway and Discord.
 No orders are placed. Scores are research rules, not probabilities or promised returns.
 
+## Model V profiles
+
+`LOTTO_PROFILE` selects the v4c post line. Moderate is the default. The additive score is the only post decision. Hybrid bars at 40/61 and the handoff floors stay on the card as labels. There is no daily cap, top-N, or cooldown. A primary card also needs `min_positive_features` rows with value at least 0.5. Bypass cards clear `bypass_threshold` and the blockers only. ⚡ marks a posted card whose score is at least that profile's post line and that has at least 10 such features.
+
+Held-out numbers are Vince's three-tier pass on the fixed v4c weights (median of five draws). Jul20+ is the clean window for those weights.
+
+| Profile | Post | Bypass | Min positive | Bolt features | Held-out true win | Alerts/day | Runners kept (held-out) | Full year, 142 days | Jul20+ |
+|---|---|---|---|---|---|---|---|---|---|
+| loose | 20 | 40 | 0 | 10 | 41.4% [38.6–41.6] | 33.1 [33.0–34.6] | 20.4% (75–106 per draw) | 41.2%, 35.0/day, 135/698 (19.3%) | 40.5% (n 1412, CI 38.0–43.1), 43.2/day, 29/144 |
+| moderate (default) | 110 | 40 | 0 | 10 | 48.5% [45.5–49.3] | 10.8 [10.7–12.0] | 6.4% (20–31) | 47.5%, 11.5/day, 42/698 (6.0%) | 45.2% (n 516, CI 40.9–49.5), 13.8/day, 15/144 |
+| conservative | 140 | 40 | 0 | 10 | 48.6% [45.1–49.2] | 3.7 [3.2–3.9] | 4.0% (15–19) | 49.8% (CI 45.0–54.5), 3.7/day, 29/698 (4.2%) | 47.0% (n 166, CI 39.5–54.6), 4.6/day, 8/144 |
+
+The ⚡ subset of each tier, full year: loose 48.4% at 3.7/day (Jul20+ 49.7%, n 195); moderate 48.7% at 3.7/day (Jul20+ 49.2%, n 191); conservative 52.0% at 1.8/day (n 252; Jul20+ 46.5%, n 99). The MIN 60 + bypass 40 reference was 43.7% held-out, 24.6/day, 13.2% of runners.
+
 ## Universe and collection
 
 The default universe includes the unusual-options scanner's core names (106 in the current deployed configuration).

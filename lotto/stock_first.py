@@ -38,7 +38,7 @@ def stock_payload(idea: StockIdea) -> dict:
     direction = "CALLS" if idea.side == "CALL" else "PUTS"
     age = round(idea.metrics["quote_age_seconds"])
     return {"username": "Lotto Scanner", "allowed_mentions": {"parse": []}, "embeds": [{
-        "title": f"{idea.tier} · ⚡ STOCK-LED {idea.setup.replace('_', ' ')} · {idea.symbol} {direction} WATCH",
+        "title": f"{idea.tier} · STOCK-LED {idea.setup.replace('_', ' ')} · {idea.symbol} {direction} WATCH",
         "description": (f"**{idea.symbol} {direction} · stock ${idea.price:.2f}**\n"
                         f"Break ${idea.trigger:.2f} · Stock invalidation ${idea.invalidation:.2f}\n"
                         f"From open {idea.metrics['move_from_open']*100:+.2f}% · "

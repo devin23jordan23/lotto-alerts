@@ -68,6 +68,34 @@ def active_quality_reason(candidate) -> str | None:
     return None
 
 
+def dedupe_ready_cards(ready: list) -> list:
+    """One card per contract at one timestamp. The higher score stays.
+
+    0DTE, 1DTE, and a handoff can roll onto the same strike. The alerts
+    primary key is that contract at that time, so the second insert would
+    abort the cycle.
+    """
+    best = {}
+    order = []
+    for candidate in ready:
+        snap, option = candidate.snapshot, candidate.option
+        if option is None:
+            order.append(id(candidate))
+            best[id(candidate)] = candidate
+            continue
+        key = (snap.day, snap.symbol, option.symbol, snap.at.isoformat())
+        current = best.get(key)
+        if current is None:
+            best[key] = candidate
+            order.append(key)
+            continue
+        score = candidate.metrics.get("card_score", candidate.score)
+        current_score = current.metrics.get("card_score", current.score)
+        if score > current_score:
+            best[key] = candidate
+    return [best[key] for key in order]
+
+
 class Engine:
     def __init__(self, store: Store, settings: Settings | None = None, dry_run: bool = True, quality: QualityConfig | None = None):
         self.store = store
@@ -346,7 +374,7 @@ class Engine:
                 self._log_missing(snap, reason)
                 history.append(snap)
                 self.history[key] = [s for s in history if snap.at - s.at <= timedelta(minutes=25)]
-                if cfg.fallback_rule in {"log", "on"}:
+                if cfg.fallback_rule in {"log", "post", "on"}:
                     self._observe_fallback_safely(snap, ready)
                 continue
             scored = []
@@ -377,17 +405,22 @@ class Engine:
                     candidate.state = "IGNITION"
                     ready.append(candidate)
                 else:
-                    gap = candidate.metrics.get("below_by")
-                    self.store.decision(
-                        snap, "RESEARCH",
-                        f"below bar by {gap} ({candidate.metrics.get('score_mode')} {candidate.metrics.get('path')} "
-                        f"bar {candidate.metrics.get('post_bar')}; strength {candidate.metrics.get('stock_strength')}; "
-                        f"p {candidate.metrics.get('fitted_win_probability')})",
-                        candidate)
-            if cfg.fallback_rule in {"log", "on"}:
+                    blocked = candidate.metrics.get("gate_blocked_by") or []
+                    if candidate.metrics.get("s12_qualifying") and blocked:
+                        self.store.decision(snap, "RESEARCH", "card gate: " + ", ".join(blocked), candidate)
+                    else:
+                        gap = candidate.metrics.get("below_by")
+                        self.store.decision(
+                            snap, "RESEARCH",
+                            f"below bar by {gap} ({candidate.metrics.get('score_mode')} {candidate.metrics.get('path')} "
+                            f"bar {candidate.metrics.get('post_bar')}; strength {candidate.metrics.get('stock_strength')}; "
+                            f"p {candidate.metrics.get('fitted_win_probability')})",
+                            candidate)
+            if cfg.fallback_rule in {"log", "post", "on"}:
                 self._observe_fallback_safely(snap, ready)
         alerts = []
-        for candidate in sorted(ready, key=lambda c: (-c.score, c.snapshot.symbol)):
+        ready = dedupe_ready_cards(ready)
+        for candidate in sorted(ready, key=lambda c: (-c.metrics.get("card_score", c.score), c.snapshot.symbol)):
             snap = candidate.snapshot
             if cfg.send_requote:
                 candidate.metrics["send_requote"] = 1
@@ -425,7 +458,7 @@ class Engine:
                 scored.append(match)
             match.metrics["path"] = "stock_override"
             match.metrics["score_mode"] = "combined"
-            match.qualifying = True
+            match.qualifying = bool(match.metrics.get("gate_post", 1))
 
     def _log_missing(self, snap, reason: str) -> None:
         from .model_v import missing_v2
@@ -438,19 +471,22 @@ class Engine:
         return Path(os.getenv("DATA_DIR", "data")) / "fallback-rule.jsonl"
 
     def _option_side_skip(self, snap, side, ready):
+        del side
         start = snap.at - timedelta(minutes=self.settings.fb_same_move_before_min)
         for candidate in ready:
-            if candidate.snapshot.symbol != snap.symbol or candidate.option.side != side:
+            if candidate.snapshot.symbol != snap.symbol:
                 continue
-            if candidate.setup and candidate.setup.name == "STRONG_STOCK_FALLBACK":
+            if candidate.setup and candidate.setup.name in {"STRONG_STOCK_FALLBACK", "STOCK_BYPASS"}:
+                continue
+            if candidate.metrics.get("path") == "bypass":
                 continue
             if start <= candidate.snapshot.at <= snap.at:
                 return True, "pending", candidate.snapshot.at.astimezone(ET).isoformat()
         rows = self.store.db.execute(
-            "SELECT id, at, setup_name FROM alerts WHERE day=? AND symbol=? AND side=?",
-            (snap.day, snap.symbol, side)).fetchall()
+            "SELECT id, at, setup_name FROM alerts WHERE day=? AND symbol=?",
+            (snap.day, snap.symbol)).fetchall()
         for row in rows:
-            if row["setup_name"] == "STRONG_STOCK_FALLBACK":
+            if row["setup_name"] in {"STRONG_STOCK_FALLBACK", "STOCK_BYPASS"}:
                 continue
             at = datetime.fromisoformat(row["at"])
             if start <= at <= snap.at:
@@ -488,31 +524,63 @@ class Engine:
             logging.getLogger(__name__).warning(
                 "fallback rule failed for %s (%s)", snap.symbol, type(exc).__name__)
 
+    def _primary_ready(self, snap, ready) -> bool:
+        for candidate in ready:
+            if candidate.snapshot.symbol != snap.symbol:
+                continue
+            if candidate.setup and candidate.setup.name in {"STRONG_STOCK_FALLBACK", "STOCK_BYPASS"}:
+                continue
+            if candidate.metrics.get("path") == "bypass":
+                continue
+            if candidate.qualifying:
+                return True
+        return False
+
     def _post_fallback(self, snap, record, ready) -> None:
-        from .model_v import apply_v2, quote_spread_fail, thin_candidate
+        from .model_v import apply_v2, thin_candidate
         from .patterns import Setup
         option = record.get("_option")
         if option is None or record["dedupe_flag"] or record["skip_flag"]:
             return
-        fail, _pct, _mid = quote_spread_fail(record.get("fire_bid"), record.get("fire_ask"),
-                                              self.settings.fb_max_spread_pct)
-        if fail:
+        if self._primary_ready(snap, ready):
+            return
+        if not record.get("gate_post"):
+            return
+        base = record.get("base") or {}
+        if not base.get("direction") or not base.get("volume"):
             return
         level = record["level_value"] if isinstance(record["level_value"], (int, float)) else snap.spot
-        setup = Setup("STRONG_STOCK_FALLBACK", float(level), float(level))
+        setup = Setup("STOCK_BYPASS", float(level), float(level))
         candidate = thin_candidate(snap, option, self.settings, setup)
-        apply_v2(candidate, self.settings, [], self.index_bars, handoff=False, thin=True,
+        history = self.history.get((snap.day, snap.symbol), [])
+        apply_v2(candidate, self.settings, history, self.index_bars, handoff=False, thin=True,
                  a_bar=snap.symbol in self.runner_names)
+        if candidate.metrics.get("card_layers_failed") or not candidate.metrics.get("gate_post"):
+            return
         if candidate.metrics.get("score_v2") is None:
             candidate.metrics["score_v2"] = candidate.score
-        ready.append(candidate)
         candidate.setup = setup
         candidate.qualifying = True
         candidate.state = "IGNITION"
-        candidate.metrics["path"] = "fallback"
+        candidate.metrics["path"] = "bypass"
+        candidate.metrics["card_score"] = record.get("bypass_score", candidate.metrics.get("card_score"))
+        candidate.score = record.get("bypass_score", candidate.score)
+        positive = record.get("positive_features") or 0
+        bypass_score = record.get("bypass_score")
+        if (positive >= self.settings.strong_feature_min
+                and bypass_score is not None and bypass_score >= self.settings.post_threshold):
+            candidate.metrics["strength_marker"] = "⚡"
+        else:
+            candidate.metrics.pop("strength_marker", None)
         candidate.metrics["fallback_reason"] = record["card_reason"]
+        candidate.metrics["bypass_reason"] = record["card_reason"]
         if record["card_reason"] not in candidate.reasons:
             candidate.reasons = list(candidate.reasons) + [record["card_reason"]]
+        for key in ("quote_age_s", "bar_age_s", "min_since_trigger"):
+            if key in record and key not in candidate.metrics:
+                candidate.metrics[key] = record[key]
+        ready.append(candidate)
+        self.store.record_candidates(snap, [candidate], self.settings)
 
     def _observe_fallback(self, snap, ready) -> None:
         """Log would-be cards. log mode does not touch the option-side post list."""
@@ -526,13 +594,17 @@ class Engine:
             if state is None:
                 state = new_fallback_state()
                 self.fallback_state[key] = state
-            record = evaluate_fallback(snap, side, self.settings, state, self._option_side_skip(snap, side, ready))
+            history = self.history.get((snap.day, snap.symbol), [])
+            spy_bars = self.index_bars.get((snap.day, "SPY"))
+            record = evaluate_fallback(
+                snap, side, self.settings, state, self._option_side_skip(snap, side, ready),
+                history=history, spy_bars=spy_bars)
             if record is None:
                 continue
             fire_line = {key: value for key, value in record.items() if key != "_option"}
             append_fallback_log(self._fallback_log_path(), fire_line)
             self.fallback_pending.append(record)
-            if self.settings.fallback_rule == "on":
+            if self.settings.fallback_rule in {"post", "on"}:
                 self._post_fallback(snap, record, ready)
 
     def _duplicate_event(self, candidate) -> bool:
@@ -571,8 +643,6 @@ class Engine:
             embed["description"] += "\nExceptional stock override"
         if metrics.get("strength_band") == "a_bar":
             embed["description"] += "\nRunner name at the A bar"
-        if metrics.get("fallback_reason"):
-            embed["description"] += "\n" + metrics["fallback_reason"]
 
     def _clear_confirmation(self, key):
         for score_key in list(self.qualified_since):
