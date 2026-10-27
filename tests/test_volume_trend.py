@@ -4,10 +4,11 @@ import unittest
 
 from lotto.models import ET, Bar, Option
 from lotto.volume_trend import (
+    DEEP_SLOTS, EXTRA_UNIVERSE, EXTRA_UNIVERSE_MAX, PAID_MARKET_DATA_PER_MINUTE,
     PRIMARY_WEIGHTS, PROFILES, VOL_ALIASES, VOLUME_TREND_RULES,
-    alignment_features, evaluate_stacks, is_volume_trend, overlay_book,
-    rally_breadth, rally_points, reference_close, score_volume_trend,
-    sector_map_names, spy_turn, spy_window_return, stacks_from_rules,
+    alignment_features, call_budget, evaluate_stacks, is_volume_trend, overlay_book,
+    poll_cycle_calls, rally_breadth, rally_points, reference_close, score_volume_trend,
+    sector_map_names, select_extra_names, spy_turn, spy_window_return, stacks_from_rules,
     volume_trend_lines, volume_trend_symbols,
 )
 from lotto.vt_measure import (
@@ -346,6 +347,37 @@ class StackTests(unittest.TestCase):
         self.assertNotIn("SPY_ALIGN_RALLY_DAY", _points)
         self.assertEqual(fired, [])
         self.assertLess(bypass, score)
+
+
+class ExtraUniverseTests(unittest.TestCase):
+    def test_cap_loads_first_twenty_net_new(self):
+        import os
+        from lotto.main import DEFAULT_UNIVERSE, universe_symbols
+
+        previous = os.environ.pop("EXTRA_UNIVERSE_MAX", None)
+        try:
+            self.assertEqual(EXTRA_UNIVERSE_MAX, 20)
+            self.assertEqual(DEEP_SLOTS, 60)
+            self.assertEqual(PAID_MARKET_DATA_PER_MINUTE, 120)
+            self.assertEqual(poll_cycle_calls(), 148)
+            core = volume_trend_symbols(universe_symbols(DEFAULT_UNIVERSE))
+            budget = call_budget(len(core))
+            self.assertEqual(budget["configured_deep_slots"], 60)
+            self.assertEqual(budget["extra_deep_slots"], 0)
+            self.assertEqual(budget["extra_universe_max"], 20)
+            self.assertGreater(budget["extra_names_budget"], 20)
+            self.assertEqual(budget["extra_names"], 20)
+            self.assertEqual(budget["calls_per_minute_40"], 148)
+            loaded = select_extra_names(core, lambda _name: True, budget["extra_names"])
+            self.assertEqual(loaded, [
+                "OXY", "EOSE", "RDDT", "APP", "APLD", "DAL", "CVS", "GILD", "TXN", "WULF",
+                "AAL", "ONDS", "WFC", "NVTS", "USAR", "MP", "SOUN", "CLF", "CCJ", "TWLO",
+            ])
+            self.assertGreater(len(EXTRA_UNIVERSE), 20)
+            self.assertEqual(EXTRA_UNIVERSE[0], "MARA")
+        finally:
+            if previous is not None:
+                os.environ["EXTRA_UNIVERSE_MAX"] = previous
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ No orders are placed. Scores are research rules, not probabilities or promised r
 
 `volume_trend_aggressive`, `volume_trend_balanced`, and `volume_trend_conservative` are code profiles. `volume_trend` is the balanced one. They are not in the JSON book, so the live `balanced` line stays 84 until `LOTTO_PROFILE` changes. **Do not merge this branch to main.** Merging deploys it.
 
-The three profiles share one weight block. Only the post line differs: 90, 102, and 120. Those lines are provisional for Vince's V2 sector and SPY rows. The volume rows and stacks still have provisional 6–10 point weights. The fitted cutoffs for those rows are not in yet.
+The three profiles share one weight block. Only the post line differs: 96, 108, and 124. Those cutoffs stay until the penalty rows land.
 
 Primary cards only for the new sector and SPY points:
 
@@ -38,6 +38,22 @@ Ace's volume names are the scored keys (`BRK_VS_DAY`, `BRK_TOD_10/5/3`, `RVOL_CU
 `STACKS` in that same file is the list to edit. Each entry has a name, conditions (`feature`, `op`, `threshold`), and points. Every entry whose conditions all hold adds its points. Missing features are false. `OPT_VOL_ADJ_STRIKES` stays coded. The A+ stack and the 3-of-4 partial are still in the list, and both default to 0 points (`STACK_BONUS` and `STACK_BONUS_3OF4`). Held-out data did not support a stack bonus: the 3-of-4 A+ stack was +2.3pp in the fit and −6.7pp on the test. Nothing in a stack blocks a card. The old-book volume rows are unchanged. The new `VOL_*` rows sit on top of them. Cutoffs stay 96 / 108 / 124.
 
 The chain is 10-day cumulative, then 5, then 3, then any same-time days, then the bar versus the day so far, then a linear time-scaled full-day volume, then 1.0. The source is logged. Early bars (index under 10) extend the day-so-far average back to 04:00. Holds score only after `HOLD_W` bars exist past the break. Puts mirror.
+
+`EXTRA_UNIVERSE` in `lotto/volume_trend.py` is the full ranked list. Startup loads only the first `EXTRA_UNIVERSE_MAX` names that are not already in the universe and that return a chain. The default is **20**: OXY, EOSE, RDDT, APP, APLD, DAL, CVS, GILD, TXN, WULF, AAL, ONDS, WFC, NVTS, USAR, MP, SOUN, CLF, CCJ, TWLO. Names already in the core (MARA, RIVN, RIOT, DKNG, HIMS, LUNR, STX, CRWV, U, GME, CORZ, LITE, HUT) are skipped and do not count. Edit the list or `EXTRA_UNIVERSE_MAX` to add or swap later. A set `EXTRA_UNIVERSE_MAX` env value overrides the constant. This does not add deep slots. `LOTTO_CHAIN_CAPACITY` stays 60 and no rate limit changes.
+
+Those 20 add **0 calls per minute**. They join the one `/quotes` batch (103 core + 20 = 123, under the 180 quote batch). A chain outside a deep slot comes only from the existing sweep, which stays at 26 per cycle, so one of these names takes a turn another name would have used. Deep jobs stay at 60. `RUNNER_RANK` only reorders who fills leftover core slots. Startup, once, is 2 calls per accepted name (1 chain probe + 1 history backfill), so 20 names are 40 calls at process start, not per minute.
+
+The steady poll on `main` (`1b730db`, `LOTTO_PROFILE=balanced`) already attempts the same 148, because the profile does not touch the poll:
+
+| Call | Count |
+|---|---|
+| `GET /quotes` | 1 |
+| Sweep `GET /chains` | 26 |
+| Deep `GET /pricehistory` | 60 |
+| Deep `GET /chains` | 60 |
+| SPX proxy `GET /pricehistory` for SPY | 1 |
+
+**1 + 26 + 60 + 60 + 1 = 148** per 60-second cycle when every job finishes. `strikeCount` 80 or 40 is the same call count. The 120 figure (`published_schwab_market_data_per_minute` in `scan_budget`, and `PAID_MARKET_DATA_PER_MINUTE`) is a constant used for the margin math. It does not stop a request. `Schwab.get` spaces starts at 0.25s (about 240/min) and doubles that spacing on a 429, up to 2s. Unfinished sweep jobs drop after 27s and unfinished deep jobs after the rest of 54s. The margin math still says usable calls are 96/min (20% under 120), which would fit 34 deep slots. Configured deep stays 60, so extra deep slots stay 0.
 
 ## Universe and collection
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from math import exp, erf, isfinite, log, sqrt
 from pathlib import Path
@@ -1827,6 +1828,12 @@ EXTRA_UNIVERSE = (
     "KO", "VZ", "RGTI", "T", "SMR", "CRDO", "OPEN", "QUBT", "HUT", "UUUU",
 )
 
+# How many net-new EXTRA_UNIVERSE names startup may load. The ranked list
+# stays complete. Edit this cap, or set EXTRA_UNIVERSE_MAX, to add or swap
+# later. Names already in the universe are skipped and do not count.
+# This does not add deep slots and does not change the rate limit.
+EXTRA_UNIVERSE_MAX = 20
+
 # Poll-loop constants. Strike count is a parameter on one /chains call, so
 # 80 and 40 issue the same number of requests. Do not raise these.
 PAID_MARKET_DATA_PER_MINUTE = 120
@@ -1848,6 +1855,18 @@ def poll_cycle_calls(deep_slots: int = DEEP_SLOTS, sweep_slots: int = SWEEP_PER_
     return 1 + int(sweep_slots) + 2 * int(deep_slots) + (1 if spx_proxy else 0)
 
 
+def extra_universe_cap() -> int:
+    """EXTRA_UNIVERSE_MAX. A set env value overrides the constant."""
+    raw = os.getenv("EXTRA_UNIVERSE_MAX")
+    if raw is None or not str(raw).strip():
+        return max(0, int(EXTRA_UNIVERSE_MAX))
+    try:
+        return max(0, int(str(raw).strip()))
+    except ValueError:
+        LOG.warning("EXTRA_UNIVERSE_MAX=%s is not an integer; using %s", raw, EXTRA_UNIVERSE_MAX)
+        return max(0, int(EXTRA_UNIVERSE_MAX))
+
+
 def call_budget(core_count: int) -> dict:
     """Before/after the 40-strike cut, and how many extra names fit.
 
@@ -1855,7 +1874,8 @@ def call_budget(core_count: int) -> dict:
     Usable calls are 20% under that. Extra names do not raise deep slots or
     the sweep cap, so they do not add a steady per-minute call. Each name
     that startup accepts costs one chain probe plus one history backfill,
-    and that startup burst stays inside the usable cap.
+    and that startup burst stays inside the usable cap. The load itself
+    stops at EXTRA_UNIVERSE_MAX even when the margin would allow more.
     """
     steady = poll_cycle_calls()
     per_minute = steady * (60 / POLL_SECONDS)
@@ -1865,7 +1885,9 @@ def call_budget(core_count: int) -> dict:
     quote_room = max(0, QUOTE_BATCH - int(core_count))
     startup_each = 2  # chain probe + RVOL history
     startup_n = usable // startup_each
-    extra_names = min(quote_room, startup_n)
+    budget_room = min(quote_room, startup_n)
+    cap = extra_universe_cap()
+    extra_names = min(budget_room, cap)
     return {
         "calls_per_cycle_80": steady,
         "calls_per_minute_80": per_minute,
@@ -1878,6 +1900,8 @@ def call_budget(core_count: int) -> dict:
         "max_deep_slots_under_margin": max_deep,
         "extra_deep_slots": max(0, max_deep - DEEP_SLOTS),
         "quote_room": quote_room,
+        "extra_names_budget": budget_room,
+        "extra_universe_max": cap,
         "extra_names": extra_names,
         "startup_calls_per_loaded_name": startup_each,
     }
