@@ -189,8 +189,20 @@ def env_settings() -> Settings:
     for field in fields(base):
         raw = os.getenv("LOTTO_" + field.name.upper())
         if raw is not None and field.name not in {"model", "preset", *PWIN_FIELDS}:
-            if field.name == "standby_names":
+            if field.name in {"standby_names", "spread_legacy"}:
                 updates[field.name] = 1 if raw.strip().lower() in {"1", "on", "true", "yes"} else 0
+            elif field.name == "spread_bands":
+                updates[field.name] = tuple(
+                    float(piece) for piece in raw.replace(" ", "").split(",") if piece)
+            elif field.name == "spread_stock_bars":
+                parsed = []
+                for piece in raw.split(","):
+                    piece = piece.strip()
+                    if not piece:
+                        continue
+                    rvol, push, setups = piece.split("/")
+                    parsed.append((float(rvol), float(push), int(float(setups))))
+                updates[field.name] = tuple(parsed)
             else:
                 updates[field.name] = type(getattr(base, field.name))(raw)
     if "score_mode" in updates:

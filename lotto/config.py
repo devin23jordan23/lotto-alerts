@@ -117,9 +117,24 @@ class Settings:
     # Missing volume posts when confluence points reach the override.
     base_volume_min: float = 1
     base_override_points: float = 8
-    # Blocker table. Spread, bid, and 5-minute option volume do not lift.
+    # Blocker table. Bid and 5-minute option volume do not lift.
+    # blocker_spread is the old 15% cap. Live cards use spread_bands unless
+    # spread_legacy is on, which restores that cap and nearest-ATM selection.
     blocker_spread: float = 0.15
     blocker_spread_override_points: float = 6
+    # (ask-bid)/mid. <= the first edge is a normal quote. Each later edge is
+    # the top of the next stock bar. Above the last edge there is no ceiling.
+    spread_bands: tuple = (0.25, 0.35, 0.40)
+    # (rvol, push30_atr21, setups) for the bands above 25%: S2, S3, S4.
+    spread_stock_bars: tuple = (
+        (2.0, 1.0, 2),
+        (2.5, 1.25, 3),
+        (3.0, 1.5, 3),
+    )
+    blocker_spread_legacy: float = 0.15
+    spread_legacy: int = 0
+    # 1 is the first strike OTM. 0 is nearest ATM, which spread_legacy forces.
+    fallback_strike_offset: int = 1
     # Reserved per-feature knobs. The scorer does not read them. The live
     # weight is the tier weight on CONFLUENCE_TABLE, times the 0-1 match.
     # Puts use the mirror (PML, PDL, below VWAP, weakness vs SPY/sector).
@@ -326,6 +341,28 @@ class Settings:
             raise ValueError("Invalid base-layer setting")
         if self.blocker_spread <= 0 or self.blocker_spread_override_points < 0:
             raise ValueError("Invalid blocker setting")
+        if self.spread_legacy not in (0, 1) or self.blocker_spread_legacy <= 0:
+            raise ValueError("Invalid spread legacy setting")
+        if self.fallback_strike_offset < 0:
+            raise ValueError("Invalid fallback strike offset")
+        bands = tuple(self.spread_bands)
+        bars = tuple(self.spread_stock_bars)
+        if not bands or len(bars) != len(bands):
+            raise ValueError("spread_stock_bars needs one bar per spread band edge")
+        if any(not isinstance(edge, (int, float)) or not isfinite(edge) or edge <= 0 for edge in bands):
+            raise ValueError("Invalid spread band")
+        if any(bands[index] > bands[index + 1] for index in range(len(bands) - 1)):
+            raise ValueError("Spread bands must be non-decreasing")
+        for bar in bars:
+            if len(bar) != 3:
+                raise ValueError("Each spread stock bar is rvol, push, setups")
+            rvol, push, setups = bar
+            if (not isinstance(rvol, (int, float)) or not isinstance(push, (int, float))
+                    or not isfinite(rvol) or not isfinite(push) or rvol < 0 or push < 0
+                    or int(setups) < 0):
+                raise ValueError("Invalid spread stock bar")
+        if self.spread_legacy:
+            object.__setattr__(self, "fallback_strike_offset", 0)
         if (self.post_threshold < 0 or self.bypass_threshold < 0
                 or self.strong_feature_min < 0 or self.bolt_min_score < 0
                 or self.min_positive_features < 0):

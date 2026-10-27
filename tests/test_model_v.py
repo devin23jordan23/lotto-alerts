@@ -11,19 +11,19 @@ from lotto.config import CONFLUENCE_TABLE, HANDOFF_SPEC_PATH, Settings, model_v_
 from lotto.demo import demo_frames
 from lotto.discord import deliver_stock_pending
 from lotto.engine import Engine, dedupe_ready_cards
-from lotto.confluence import (DRC_EMA21_2M, DRP_510, SHADOW_EMA_FEATURES, additive_features, band_score,
-                              card_gate, detect_ace_drive, detect_drc_ema21_2m, detect_drp_510,
+from lotto.confluence import (DRC_EMA21_2M, DRP_510, SETUP_FLAGS, SHADOW_EMA_FEATURES, additive_features,
+                              band_score, card_gate, detect_ace_drive, detect_drc_ema21_2m, detect_drp_510,
                               detect_ema9_2m_before_10, detect_ema_pullback, detect_fashionably_late, detect_flag,
                               detect_flushpop, detect_m, detect_open_reclaim, detect_pmx_reclaim, detect_spike_rev,
                               detect_spy10, detect_vwap_slap, detect_w, nia_dip_reclaim, pattern_match,
-                              primary_strength_marker, spread_fraction, tiered_points)
+                              primary_strength_marker, setup_count, spread_band, spread_fraction, tiered_points)
 from lotto.weights import active_profile, load_weights, score_path
 from lotto.features import Candidate
 from lotto.discord import alert_payload
 from lotto.main import (env_settings, fallback_rule_status, freshness_status, handoff_fallback_status,
                          profile_status, standby_symbols, strong_score_status, weights_file_status)
 from lotto.model_v import (apply_v2, atr21_value, build_handoff_features, cap_stock, stock_terms,
-                           choose_fallback_contract, classify_runner, due_standby,
+                           choose_fallback_contract, classify_runner, due_standby, meets_bar, strong_stock_parts,
                            evaluate_fallback, exceptional_stock, fallback_push, fallback_rvol_value,
                            features_from_spec_raw, fill_model_features, fill_strength_inputs,
                            fire_why, handoff_floor, invert_live_blend, lane_decision, level_retest,
@@ -791,7 +791,7 @@ class FallbackRuleTests(unittest.TestCase):
         put = evaluate_fallback(_fallback_snap(puts, side="PUT"), "PUT", settings, new_fallback_state())
         self.assertIn("pml", put["lvl"])
         self.assertGreaterEqual(put["push30"], 0.75)
-        self.assertEqual(put["strike"], 98)
+        self.assertEqual(put["strike"], 97)
         retaken = _session([100] * 14 + [101, 102] + [102] * 4 + [100, 101, 102])
         second = evaluate_fallback(_fallback_snap(retaken), "CALL", settings, state)
         self.assertEqual(second["why"], "fresh_level")
@@ -891,7 +891,7 @@ class FallbackRuleTests(unittest.TestCase):
             self.assertFalse(fire["skip_after_resolved"])
             self.assertEqual(entry["line"], "entry")
             self.assertEqual(entry["entry_missing"], 0)
-            self.assertEqual(entry["entry_ask"], 1.05)
+            self.assertEqual(entry["entry_ask"], 1.1)
             self.assertEqual(entry["spread_fail"], 0)
             self.assertEqual(entry["ts_fire"], fire["ts_fire"])
             self.assertEqual(entry["k"], fire["k"])
@@ -954,7 +954,7 @@ class FallbackRuleTests(unittest.TestCase):
         self.assertEqual(posted, [])
         self.assertEqual([row["line"] for row in rows], ["fire", "entry"])
         self.assertEqual(rows[1]["entry_missing"], 0)
-        self.assertEqual(rows[1]["entry_ask"], 1.05)
+        self.assertEqual(rows[1]["entry_ask"], 1.1)
         with tempfile.TemporaryDirectory() as directory:
             _posted, missed = play("log", [first, first + [102] * 3], directory)
         self.assertEqual([row["line"] for row in missed], ["fire", "entry"])
@@ -1124,9 +1124,13 @@ class ConfluenceGateTests(unittest.TestCase):
     def test_wide_spread_blocker_lifts_when_the_strong_variables_are_on(self):
         settings = model_v_settings()
         held = card_gate("CALL", 100, 0.25, settings, bid=1.0, option_volume_5m=200)
-        self.assertIn("wide_spread", held["blocked_by"])
-        self.assertFalse(held["post_ok"])
+        self.assertNotIn("wide_spread", held["blocked_by"])
+        self.assertTrue(held["post_ok"])
+        self.assertEqual(held["spread_band"], 0)
         self.assertEqual(held["overrides"], [])
+        wide = card_gate("CALL", 100, 0.55, settings, bid=1.0, option_volume_5m=200)
+        self.assertIn("wide_spread", wide["blocked_by"])
+        self.assertFalse(wide["post_ok"])
         exact = card_gate("CALL", 100, 0.15, settings, bid=0.06, option_volume_5m=50)
         self.assertTrue(exact["post_ok"])
         self.assertFalse(card_gate("CALL", 100, 0.15, settings, bid=0.05, option_volume_5m=50)["post_ok"])
@@ -1202,7 +1206,7 @@ class ConfluenceGateTests(unittest.TestCase):
         row = store.db.execute("SELECT contract, setup_name, quality_tier FROM alerts").fetchone()
         self.assertEqual(row["setup_name"], "STOCK_BYPASS")
         self.assertEqual(row["quality_tier"], "MAIN")
-        self.assertTrue(row["contract"].startswith("C102"))
+        self.assertTrue(row["contract"].startswith("C103"))
         features = json.loads(store.db.execute(
             "SELECT features FROM decisions WHERE reason LIKE 'active alert%'").fetchone()["features"])
         for key in ("quote_age_s", "bar_age_s", "min_since_trigger"):
@@ -1230,7 +1234,7 @@ class ConfluenceGateTests(unittest.TestCase):
         self.assertEqual(len(posted), 1)
         row = puts.db.execute("SELECT side, contract FROM alerts").fetchone()
         self.assertEqual(row["side"], "PUT")
-        self.assertTrue(row["contract"].startswith("P98"))
+        self.assertTrue(row["contract"].startswith("P97"))
 
 
 def _clock_bars(ohlc, frame=2):
@@ -1928,13 +1932,19 @@ class ReviewFixTests(unittest.TestCase):
         crossed = _contract(at, 100, bid=0.86, ask=1.0)
         self.assertLess((1.0 - 0.86) / 1.0, 0.15)
         self.assertGreater(spread_fraction(crossed), 0.15)
-        self.assertFalse(card_gate(
+        self.assertLess(spread_fraction(crossed), 0.25)
+        self.assertTrue(card_gate(
             "CALL", 100, spread_fraction(crossed), model_v_settings(), bid=0.86, option_volume_5m=50,
         )["post_ok"])
         exact = _contract(at, 100, bid=0.925, ask=1.075)
         self.assertAlmostEqual(spread_fraction(exact), 0.15)
+        legacy = model_v_settings(spread_legacy=1)
+        self.assertEqual(legacy.fallback_strike_offset, 0)
+        self.assertFalse(card_gate(
+            "CALL", 100, spread_fraction(crossed), legacy, bid=0.86, option_volume_5m=50,
+        )["post_ok"])
         self.assertTrue(card_gate(
-            "CALL", 100, spread_fraction(exact), model_v_settings(), bid=0.925, option_volume_5m=50,
+            "CALL", 100, spread_fraction(exact), legacy, bid=0.925, option_volume_5m=50,
         )["post_ok"])
 
     def test_positive_count_is_value_at_least_half(self):
@@ -2156,6 +2166,220 @@ class ReviewFixTests(unittest.TestCase):
         text = "\n".join(logs.output)
         self.assertIn("Weights book failed to load", text)
         self.assertIn("moderate defaults are in use", text)
+
+
+class SpreadBandTests(unittest.TestCase):
+    def _settings(self, **overrides):
+        return model_v_settings(**overrides)
+
+    def _gate(self, spread, parts, settings=None, bid=1.0, volume=80):
+        return card_gate(
+            "CALL", 100, spread, settings or self._settings(),
+            bid=bid, option_volume_5m=volume, parts=parts,
+        )
+
+    def test_band_edges_and_a_normal_quarter_spread(self):
+        settings = self._settings()
+        self.assertEqual(tuple(settings.spread_bands), (0.25, 0.35, 0.40))
+        self.assertEqual(tuple(settings.spread_stock_bars), (
+            (2.0, 1.0, 2), (2.5, 1.25, 3), (3.0, 1.5, 3),
+        ))
+        miss = {"rvol": 0.0, "push": 0.0, "setups": 0}
+        s2 = {"rvol": 2.0, "push": 1.0, "setups": 2}
+        s3 = {"rvol": 2.5, "push": 1.25, "setups": 3}
+        s4 = {"rvol": 3.0, "push": 1.5, "setups": 3}
+        self.assertEqual(spread_band(0.24, settings), 0)
+        self.assertEqual(spread_band(0.25, settings), 0)
+        self.assertEqual(spread_band(0.2500001, settings), 2)
+        self.assertEqual(spread_band(0.35, settings), 2)
+        self.assertEqual(spread_band(0.3500001, settings), 3)
+        self.assertEqual(spread_band(0.40, settings), 3)
+        self.assertEqual(spread_band(0.4000001, settings), 4)
+        self.assertEqual(spread_band(0.55, settings), 4)
+        self.assertTrue(self._gate(0.25, miss)["post_ok"])
+        self.assertEqual(self._gate(0.25, miss)["spread_band"], 0)
+        self.assertTrue(self._gate(0.35, s2)["post_ok"])
+        self.assertFalse(self._gate(0.35, miss)["post_ok"])
+        self.assertIn("wide_spread", self._gate(0.35, miss)["blocked_by"])
+        self.assertTrue(self._gate(0.40, s3)["post_ok"])
+        self.assertFalse(self._gate(0.40, s2)["post_ok"])
+        self.assertTrue(self._gate(0.55, s4)["post_ok"])
+        self.assertFalse(self._gate(0.55, s3)["post_ok"])
+        self.assertTrue(meets_bar(miss, 0, settings))
+        self.assertFalse(meets_bar(miss, 2, settings))
+        for bad in (None, float("nan")):
+            blocked = self._gate(bad, s4)
+            self.assertIn("wide_spread", blocked["blocked_by"])
+            self.assertIsNone(blocked["spread_band"])
+
+    def test_setups_count_is_the_live_detector_flags(self):
+        features = {name: 0.0 for name in SETUP_FLAGS}
+        features.update({
+            "flow200": 1.0, "sp5": 1.0, "rvol15": 1.0, "push30_ge_0.75atr": 1.0,
+            "_rvol": 4.0, "_push": 2.0,
+        })
+        self.assertEqual(setup_count(features), 0)
+        picked = list(SETUP_FLAGS)[:7]
+        for name in picked:
+            features[name] = 1.0
+        self.assertEqual(setup_count(features), 7)
+        start = datetime(2026, 10, 26, 10, 30, tzinfo=ET)
+        bars = _bars(start, 6, lambda _minute: 100.0, high_pad=0.05, low_pad=0.05, volume=5000)
+        at = bars[-1].end
+        option = _contract(at, 100, bid=1.0, ask=1.05)
+        snap = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (option,), prior_atr=2, source="replay")
+        parts = strong_stock_parts(snap, "CALL", self._settings(), features=features)
+        self.assertEqual(parts["setups"], 7)
+        self.assertEqual(parts["rvol"], 4.0)
+        self.assertEqual(parts["push"], 2.0)
+        live = additive_features(snap, option, self._settings())
+        counted = strong_stock_parts(snap, "CALL", self._settings(), features=live)
+        self.assertEqual(counted["setups"], setup_count(live))
+        self.assertEqual(counted["rvol"], live["_rvol"])
+        self.assertEqual(counted["push"], live["_push"])
+
+    def test_quarter_spread_posts_on_the_score_without_a_bar(self):
+        start = datetime(2026, 10, 26, 10, 30, tzinfo=ET)
+        bars = _bars(start, 6, lambda _minute: 100.0, high_pad=0.05, low_pad=0.05, volume=5000)
+        at = bars[-1].end
+        option = replace(_contract(at, 100, "CALL", bid=1.0, ask=1.2727272727), volume=250, quote_time=at)
+        snap = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (option,), prior_atr=50, source="replay")
+        self.assertAlmostEqual(spread_fraction(option), 0.24, places=5)
+        scored = apply_v2(
+            Candidate(snap, option, 30, {}, {}, [], False),
+            self._settings(post_threshold=1), _volume_history(snap, prior_volume=0))
+        self.assertEqual(scored.metrics["spread_band"], 0)
+        self.assertEqual(scored.metrics["stock_bar_met"], 1)
+        self.assertNotIn("wide_spread", scored.metrics["gate_blocked_by"])
+        self.assertNotIn("spread_flag", scored.metrics)
+        self.assertGreaterEqual(scored.metrics["card_score"], 1)
+        self.assertTrue(scored.qualifying)
+
+    def test_wide_quote_posts_when_s4_is_met_and_rolls_when_it_is_not(self):
+        start = datetime(2026, 10, 26, 10, 30, tzinfo=ET)
+        bars = _bars(start, 6, lambda _minute: 100.0, high_pad=0.05, low_pad=0.05, volume=5000)
+        at = bars[-1].end
+        wide = replace(_contract(at, 100, "CALL", bid=0.20, ask=0.35), volume=250, quote_time=at)
+        self.assertAlmostEqual(spread_fraction(wide), 0.5454545454, places=6)
+
+        def boosted(*args, **kwargs):
+            features = additive_features(*args, **kwargs)
+            for name in ("a_drive", "a_open_reclaim", "a_spike_rev"):
+                features[name] = 1.0
+            features["_rvol"] = 3.0
+            features["_push"] = 1.5
+            features["_vol5"] = 200
+            return features
+
+        def high_score(features, side, book=None, path="primary"):
+            return {"flow200": 120.0}, 120.0, 4
+
+        for post in (5, 75, 90):
+            snap = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (wide,), prior_atr=50, source="replay")
+            with patch("lotto.confluence.additive_features", boosted), \
+                    patch("lotto.weights.score_path", high_score), \
+                    self.assertLogs("lotto.confluence", level="INFO") as logs:
+                scored = apply_v2(
+                    Candidate(snap, wide, 30, {}, {}, [], False),
+                    self._settings(post_threshold=post), _volume_history(snap, prior_volume=0))
+            self.assertTrue(scored.qualifying, post)
+            self.assertEqual(scored.option.bid, 0.20)
+            self.assertEqual(scored.metrics["spread_band"], 4)
+            self.assertGreaterEqual(scored.metrics["stock_setups"], 3)
+            self.assertEqual(scored.metrics["wide_spread_bar_unmet"], 0)
+            note = "Wide spread 54.5%: size down, hold-for-the-day trade"
+            self.assertEqual(scored.metrics["spread_flag"], note)
+            self.assertIn(note, alert_payload(scored, "ACTIVE")["embeds"][0]["description"])
+            text = "\n".join(logs.output)
+            self.assertIn("spread_band=4", text)
+            self.assertIn("rvol=3.0000", text)
+            self.assertIn("push=1.5000", text)
+            self.assertIn("setups=", text)
+
+        bare = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (wide,), prior_atr=50, source="replay")
+        with self.assertLogs("lotto.confluence", level="INFO") as missed:
+            blocked = apply_v2(
+                Candidate(snap, wide, 30, {}, {}, [], False),
+                self._settings(post_threshold=5), _volume_history(bare, prior_volume=0))
+        self.assertFalse(blocked.qualifying)
+        self.assertIn("wide_spread", blocked.metrics["gate_blocked_by"])
+        self.assertEqual(blocked.metrics["wide_spread_bar_unmet"], 1)
+        self.assertIn("wide_spread_bar_unmet=1", "\n".join(missed.output))
+
+        tight = replace(_contract(at, 102, "CALL", bid=1.0, ask=1.05), volume=250, quote_time=at)
+        atm = replace(_contract(at, 100, "CALL", bid=0.0, ask=1.0), volume=250, quote_time=at)
+        first = replace(_contract(at, 101, "CALL", bid=0.20, ask=0.35), volume=250, quote_time=at)
+        chain = Snapshot(
+            "DEMO", at, 100.0, at, bars[0].open, bars, (first, atm, tight), prior_atr=50, source="replay")
+        chosen = choose_fallback_contract(
+            chain, "CALL", self._settings(), _volume_history(chain, prior_volume=0))
+        self.assertEqual(chosen["strike"], 102)
+
+    def test_fallback_strike_offset_and_the_legacy_revert(self):
+        at = datetime(2026, 10, 26, 10, 30, tzinfo=ET)
+        call_100 = _contract(at, 100, "CALL", bid=1.0, ask=1.05)
+        call_101 = _contract(at, 101, "CALL", bid=1.0, ask=1.05)
+        call_99 = _contract(at, 99, "CALL", bid=1.0, ask=1.05)
+        put_100 = _contract(at, 100, "PUT", bid=1.0, ask=1.05)
+        put_99 = _contract(at, 99, "PUT", bid=1.0, ask=1.05)
+        put_101 = _contract(at, 101, "PUT", bid=1.0, ask=1.05)
+        calls = Snapshot("DEMO", at, 100.0, at, 100, (), (call_99, call_100, call_101), source="replay")
+        puts = Snapshot("DEMO", at, 100.0, at, 100, (), (put_99, put_100, put_101), source="replay")
+        history = _volume_history(calls, prior_volume=0)
+        put_history = _volume_history(puts, prior_volume=0)
+        self.assertEqual(choose_fallback_contract(calls, "CALL", self._settings(), history)["strike"], 101)
+        self.assertEqual(choose_fallback_contract(puts, "PUT", self._settings(), put_history)["strike"], 99)
+        nearest = self._settings(fallback_strike_offset=0)
+        self.assertEqual(choose_fallback_contract(calls, "CALL", nearest, history)["strike"], 100)
+
+        dark = replace(call_101, bid=0.0, ask=1.05)
+        quoted_atm = Snapshot("DEMO", at, 100.0, at, 100, (), (call_100, dark), source="replay")
+        stepped = choose_fallback_contract(
+            quoted_atm, "CALL", self._settings(), _volume_history(quoted_atm, prior_volume=0))
+        self.assertEqual(stepped["strike"], 100)
+        further = replace(_contract(at, 102, "CALL", bid=1.0, ask=1.05), volume=200, quote_time=at)
+        both_dark = Snapshot(
+            "DEMO", at, 100.0, at, 100, (),
+            (replace(call_100, bid=0.0), dark, further), source="replay")
+        stepped_out = choose_fallback_contract(
+            both_dark, "CALL", self._settings(), _volume_history(both_dark, prior_volume=0))
+        self.assertEqual(stepped_out["strike"], 102)
+
+        legacy = self._settings(spread_legacy=1, fallback_strike_offset=1)
+        self.assertEqual(legacy.fallback_strike_offset, 0)
+        self.assertEqual(legacy.blocker_spread_legacy, 0.15)
+        self.assertEqual(choose_fallback_contract(calls, "CALL", legacy, history)["strike"], 100)
+
+        def old_block(spread):
+            return (spread is None or not isinstance(spread, (int, float))
+                    or spread != spread or spread > 0.15)
+
+        for spread in (0.0, 0.15, 0.1500001, 0.24, 0.25, 0.55, None, float("nan")):
+            gate = self._gate(spread, {"rvol": 9, "push": 9, "setups": 9}, legacy)
+            self.assertEqual("wide_spread" in gate["blocked_by"], old_block(spread), spread)
+
+        saved = {key: os.environ.pop(key) for key in list(os.environ) if key.startswith("LOTTO_")}
+        try:
+            os.environ["LOTTO_SPREAD_BANDS"] = "0.25,0.35,0.40"
+            os.environ["LOTTO_SPREAD_STOCK_BARS"] = "2/1/2,2.5/1.25/3,3/1.5/3"
+            os.environ["LOTTO_BLOCKER_SPREAD_LEGACY"] = "0.15"
+            os.environ["LOTTO_SPREAD_LEGACY"] = "0"
+            os.environ["LOTTO_FALLBACK_STRIKE_OFFSET"] = "2"
+            live = env_settings()
+            self.assertEqual(live.spread_bands, (0.25, 0.35, 0.40))
+            self.assertEqual(live.spread_stock_bars[0], (2.0, 1.0, 2))
+            self.assertEqual(live.spread_stock_bars[2], (3.0, 1.5, 3))
+            self.assertEqual(live.fallback_strike_offset, 2)
+            self.assertEqual(live.blocker_spread_legacy, 0.15)
+            os.environ["LOTTO_SPREAD_LEGACY"] = "1"
+            reverted = env_settings()
+            self.assertEqual(reverted.spread_legacy, 1)
+            self.assertEqual(reverted.fallback_strike_offset, 0)
+        finally:
+            for name in ("LOTTO_SPREAD_BANDS", "LOTTO_SPREAD_STOCK_BARS", "LOTTO_BLOCKER_SPREAD_LEGACY",
+                         "LOTTO_SPREAD_LEGACY", "LOTTO_FALLBACK_STRIKE_OFFSET"):
+                os.environ.pop(name, None)
+            os.environ.update(saved)
 
 
 if __name__ == "__main__":

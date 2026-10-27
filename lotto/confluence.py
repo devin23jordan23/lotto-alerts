@@ -61,6 +61,19 @@ ACE_SPY_FLAGS = (
     "a_vwap_slap", "a_wm", "a_spike_rev", "spy10",
 )
 
+# Detector and setup rows already written by additive_features. The stock bar
+# counts these. It does not keep a second setups field. Flow, spread, RVOL,
+# push, room, gap, time, and DTE are score rows, not setups.
+SETUP_FLAGS = (
+    "bounce", "reclaim", "spy10", "vwap_pb",
+    "a_drive", "a_flushpop", "a_open_reclaim", "a_pmx_reclaim",
+    "a_vwap_slap", "a_wm", "a_spike_rev",
+    "e1_ema9_2m_pullin_x_rvol15", "e2_ema9_5m_pullin", "w_bottom_ace",
+    "level_break", "drc_ema21_2m_dip_reclaim", "drp_510_dip_reclaim",
+    "e1_ema9_2m_pullin_pre10", "ema21_pullin_2m", "ema21_pullin_5m",
+    "ema21_pullin_10m", "ema9_2m_dip_reclaim", "dip_reclaim_5_10m_calls",
+)
+
 
 # Chart patterns that can open a bypass on the bar they first clear the trigger.
 PATTERN_FEATURES = (
@@ -123,20 +136,76 @@ def pattern_match(flags: dict) -> float:
     return max((match_value(flags.get(name)) for name in PATTERN_FEATURES), default=0.0)
 
 
-def card_gate(side, volume, spread, settings: Settings, bid=None, option_volume_5m=None) -> dict:
-    """Direction, stock volume, spread, bid, and 5-minute option volume.
+def spread_band(spread, settings: Settings) -> int | None:
+    """0 at or under the first edge. 2, 3, 4 are S2, S3, S4. None is unusable.
 
-    Nothing in the score lifts a miss. Spread is (ask-bid)/mid. Exactly the
-    spread cap passes. A bid at the floor blocks. Exactly the volume floor passes.
+    Edges are (ask-bid)/mid. Above the last edge is S4 and has no ceiling.
     """
+    if spread is None or not isinstance(spread, (int, float)) or not isfinite(spread):
+        return None
+    edges = tuple(float(edge) for edge in settings.spread_bands)
+    if not edges:
+        return None
+    if spread <= edges[0]:
+        return 0
+    for index, edge in enumerate(edges):
+        if index == 0:
+            continue
+        if spread <= edge:
+            return index + 1
+    return len(edges) + 1
+
+
+def setup_count(features) -> int:
+    """How many live setup/detector flags on this card are on.
+
+    The flags are the same rows additive_features feeds the score. A flag
+    counts at 0.5 or above. Flow, spread, RVOL, and push do not count.
+    """
+    count = 0
+    for name in SETUP_FLAGS:
+        try:
+            number = float((features or {}).get(name) or 0)
+        except (TypeError, ValueError):
+            continue
+        if isfinite(number) and number >= 0.5:
+            count += 1
+    return count
+
+
+def card_gate(side, volume, spread, settings: Settings, bid=None, option_volume_5m=None,
+              parts=None) -> dict:
+    """Direction, stock volume, spread band, bid, and 5-minute option volume.
+
+    Nothing in the score lifts a miss. Spread is (ask-bid)/mid. At or under
+    the first band edge there is no stock bar. A wider spread passes only
+    when the stock meets that band's bar. A missing spread still blocks.
+    spread_legacy restores the hard cap. A bid at the floor blocks. Exactly
+    the volume floor passes.
+    """
+    from .model_v import meets_bar
     base = {
         "direction": int(side in {"CALL", "PUT"}),
         "volume": int(volume is not None and volume >= settings.base_volume_min),
     }
     missing = [name for name, ok in base.items() if not ok]
     blockers = []
-    if spread is None or not isinstance(spread, (int, float)) or not isfinite(spread) or spread > settings.blocker_spread:
-        blockers.append("wide_spread")
+    band = None
+    bar_met = 0
+    if settings.spread_legacy:
+        cap = settings.blocker_spread_legacy
+        if spread is None or not isinstance(spread, (int, float)) or not isfinite(spread) or spread > cap:
+            blockers.append("wide_spread")
+    else:
+        band = spread_band(spread, settings)
+        if band is None:
+            blockers.append("wide_spread")
+        elif band <= 0:
+            bar_met = 1
+        else:
+            bar_met = 1 if meets_bar(parts, band, settings) else 0
+            if not bar_met:
+                blockers.append("wide_spread")
     if bid is None or not isinstance(bid, (int, float)) or not isfinite(bid) or bid <= settings.blocker_bid:
         blockers.append("low_bid")
     if (option_volume_5m is None or not isinstance(option_volume_5m, (int, float))
@@ -149,6 +218,8 @@ def card_gate(side, volume, spread, settings: Settings, bid=None, option_volume_
         "overrides": [],
         "blocked_by": blocked_by,
         "post_ok": not blocked_by,
+        "spread_band": band,
+        "stock_bar_met": bar_met,
     }
 
 
@@ -1291,6 +1362,8 @@ def additive_features(snap, option, settings: Settings, metrics=None, history=No
         EMA9_2M_DIP: detect_ema9_2m_dip(bars, direction, atr) if bars else 0.0,
         DIP_RECLAIM_5_10_CALLS: detect_dip_reclaim_5_10_calls(bars, direction, atr) if bars else 0.0,
         "_vol5": vol5,
+        "_rvol": rvol,
+        "_push": push,
     }
 
 
@@ -1306,6 +1379,29 @@ def _log_ace_flags(snap, option, features) -> None:
         getattr(option, "symbol", ""),
         snap.at.isoformat(),
         parts,
+    )
+
+
+def _log_stock_bar(snap, option, band, parts, stock_path: bool, unmet: bool = False,
+                   bar_met: int = 0) -> None:
+    """RVOL, push, and the live setup count when the band or the stock path is used."""
+    if not stock_path and (band or 0) < 1 and not unmet:
+        return
+    parts = parts or {}
+    rvol = parts.get("rvol")
+    push = parts.get("push")
+    LOG.info(
+        "spread_band=%s stock_bar_met=%s wide_spread_bar_unmet=%s rvol=%s push=%s setups=%s "
+        "stock_path=%s symbol=%s contract=%s",
+        band,
+        int(bar_met),
+        int(bool(unmet)),
+        "none" if rvol is None else f"{float(rvol):.4f}",
+        "none" if push is None else f"{float(push):.4f}",
+        parts.get("setups"),
+        int(bool(stock_path)),
+        getattr(snap, "symbol", ""),
+        getattr(option, "symbol", ""),
     )
 
 
@@ -1331,32 +1427,58 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     and does not vote. A stale quote subtracts points and does not block
     by itself. The post line is not capped.
     """
-    from .model_v import choose_fallback_contract
+    from .model_v import choose_fallback_contract, strong_stock_parts
     from .weights import load_weights, score_path
 
     snap, option = candidate.snapshot, candidate.option
     volume = snap.bars[-1].volume if snap.bars else 0
+    own_option = option
     features = additive_features(
         snap, option, settings, candidate.metrics, history, candidate.setup, spy_bars=spy_bars)
-    vol5 = features.get("_vol5")
+    parts = strong_stock_parts(snap, option.side, settings, history, features=features)
+    vol5 = features.pop("_vol5", None)
+    features.pop("_rvol", None)
+    features.pop("_push", None)
     gate = card_gate(
         option.side, volume, spread_fraction(option), settings,
-        bid=getattr(option, "bid", None), option_volume_5m=vol5,
+        bid=getattr(option, "bid", None), option_volume_5m=vol5, parts=parts,
     )
+    rolled = False
     if any(name in gate["blocked_by"] for name in ("wide_spread", "low_bid", "option_volume")):
-        rolled = choose_fallback_contract(snap, option.side, settings, history)
-        rolled_option = rolled.get("option")
+        rolled = True
+        replacement = choose_fallback_contract(snap, option.side, settings, history, parts)
+        rolled_option = replacement.get("option")
         if rolled_option is not None and rolled_option is not option:
             option = rolled_option
             candidate.option = option
             features = additive_features(
                 snap, option, settings, candidate.metrics, history, candidate.setup, spy_bars=spy_bars)
-            vol5 = features.get("_vol5")
+            parts = strong_stock_parts(snap, option.side, settings, history, features=features)
+            vol5 = features.pop("_vol5", None)
+            features.pop("_rvol", None)
+            features.pop("_push", None)
             gate = card_gate(
                 option.side, volume, spread_fraction(option), settings,
-                bid=option.bid, option_volume_5m=vol5,
+                bid=option.bid, option_volume_5m=vol5, parts=parts,
             )
-    features.pop("_vol5", None)
+    unmet = (
+        not settings.spread_legacy
+        and gate.get("spread_band") not in (None, 0)
+        and not gate.get("stock_bar_met")
+        and "wide_spread" in gate["blocked_by"]
+    )
+    fraction = spread_fraction(option)
+    if (not settings.spread_legacy and gate.get("spread_band") not in (None, 0)
+            and fraction is not None and isfinite(fraction)):
+        candidate.metrics["spread_flag"] = (
+            f"Wide spread {fraction * 100:.1f}%: size down, hold-for-the-day trade"
+        )
+    _log_stock_bar(
+        snap, option, gate.get("spread_band"), parts,
+        stock_path=rolled or option is not own_option,
+        unmet=unmet,
+        bar_met=int(gate.get("stock_bar_met") or 0),
+    )
     _log_ace_flags(snap, option, features)
     book = load_weights(settings.weights_path)
     points, score, positive = score_path(features, option.side, book, "primary")
@@ -1387,6 +1509,12 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     metrics["overrides"] = gate["overrides"]
     metrics["gate_blocked_by"] = gate["blocked_by"]
     metrics["gate_post"] = int(gate["post_ok"])
+    metrics["spread_band"] = gate.get("spread_band")
+    metrics["stock_bar_met"] = int(gate.get("stock_bar_met") or 0)
+    metrics["wide_spread_bar_unmet"] = int(unmet)
+    metrics["stock_rvol"] = parts.get("rvol")
+    metrics["stock_push"] = parts.get("push")
+    metrics["stock_setups"] = parts.get("setups")
     metrics["s12_qualifying"] = int(bool(s12_ok))
     metrics["model_score"] = model_score
     metrics["card_score"] = card_score

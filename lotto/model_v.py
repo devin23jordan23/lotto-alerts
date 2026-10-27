@@ -535,30 +535,137 @@ def _inside_strike_window(option: Option, snap: Snapshot, settings: Settings) ->
     return abs(option.strike - spot) / spot <= settings.strike_window_pct + 1e-12
 
 
-def _quote_passes(option: Option, snap: Snapshot, settings: Settings, history=None) -> bool:
-    """Spread, bid, ask, real 5-minute volume, and the strike window.
+def meets_bar(parts, band, settings: Settings | None = None) -> bool:
+    """True when the stock clears the bar for this spread band. Band 0 has none."""
+    if band is None:
+        return False
+    if int(band) <= 0:
+        return True
+    if settings is None:
+        from .config import model_v_settings
+        settings = model_v_settings()
+    bars = tuple(settings.spread_stock_bars)
+    index = int(band) - 2
+    if index < 0 or index >= len(bars):
+        return False
+    need_rvol, need_push, need_setups = bars[index]
+    parts = parts or {}
+    try:
+        rvol = float(parts.get("rvol"))
+        push = float(parts.get("push"))
+        setups = int(parts.get("setups"))
+    except (TypeError, ValueError):
+        return False
+    if not isfinite(rvol) or not isfinite(push):
+        return False
+    return rvol >= float(need_rvol) and push >= float(need_push) and setups >= int(need_setups)
+
+
+def strong_stock_parts(snap: Snapshot, side: str, settings: Settings, history=None,
+                       features=None, setup=None, spy_bars=None) -> dict:
+    """RVOL, push, and the count of setup flags already on the card.
+
+    setups is setup_count of the additive feature dict. That is the same
+    detector list the score uses. A missing dict is computed once by
+    additive_features, not read from an empty side field.
+    """
+    from .confluence import _atr, _curve_rvol, additive_features, setup_count
+    if features is None:
+        sample = next((option for option in snap.options if option.side == side), None)
+        features = additive_features(
+            snap, sample, settings, history=history, setup=setup, spy_bars=spy_bars)
+    bars = list(snap.bars or [])
+    indexed = _indexed_bars(bars)
+    minute = max(indexed) if indexed else None
+    if features is not None and "_rvol" in features:
+        rvol = features.get("_rvol")
+    else:
+        rvol = _curve_rvol(snap, bars) if bars else None
+    if features is not None and "_push" in features:
+        push = features.get("_push")
+    else:
+        push = fallback_push(indexed, minute, side, _atr(snap)) if minute is not None else None
+    return {"rvol": rvol, "push": push, "setups": setup_count(features)}
+
+
+def _quoted_fallback(option: Option) -> bool:
+    """A usable quote. A missing bid or a bid at or under zero is not one."""
+    bid = option.bid
+    ask = option.ask
+    if bid is None or ask is None:
+        return False
+    if not isinstance(bid, (int, float)) or not isinstance(ask, (int, float)):
+        return False
+    if not isfinite(bid) or not isfinite(ask):
+        return False
+    return bid > 0 and ask > 0
+
+
+def _otm_strike_order(strikes, spot: float, side: str, offset: int) -> list:
+    """1-OTM, then ATM if that quote is missing, then the next OTM strikes.
+
+    Calls walk up from the ATM strike. Puts walk down. offset 0 is not used
+    here; that path keeps the nearest-ATM sort.
+    """
+    strikes = sorted(set(strikes))
+    if not strikes:
+        return []
+    atm = min(strikes, key=lambda strike: (abs(strike - spot), strike))
+    if side == "CALL":
+        otm = [strike for strike in strikes if strike > atm]
+    else:
+        otm = [strike for strike in reversed(strikes) if strike < atm]
+    start = max(0, int(offset) - 1)
+    preferred = otm[start:]
+    if not preferred:
+        ordered = [atm]
+    else:
+        ordered = [preferred[0], atm, *preferred[1:]]
+    seen = set()
+    unique = []
+    for strike in ordered:
+        if strike not in seen:
+            seen.add(strike)
+            unique.append(strike)
+    return unique
+
+
+def _quote_passes(option: Option, snap: Snapshot, settings: Settings, history=None,
+                  parts=None) -> bool:
+    """Spread band, bid, ask, real 5-minute volume, and the strike window.
 
     No 5-minute reading is a miss. Day volume does not stand in for it.
+    spread_legacy restores the hard 15% cap.
     """
     if not _live_ask(option) or not _inside_strike_window(option, snap, settings):
         return False
     if option.bid is None or not isfinite(option.bid) or option.bid <= settings.blocker_bid:
         return False
-    from .confluence import spread_fraction
+    from .confluence import spread_band, spread_fraction
     fraction = spread_fraction(option)
-    if fraction is None or fraction > settings.blocker_spread:
-        return False
+    if settings.spread_legacy:
+        if fraction is None or not isfinite(fraction) or fraction > settings.blocker_spread_legacy:
+            return False
+    else:
+        band = spread_band(fraction, settings)
+        if band is None or (band > 0 and not meets_bar(parts, band, settings)):
+            return False
     volume = option_volume_5m(option, history, snap)
     return volume is not None and volume >= settings.blocker_option_volume_5m
 
 
-def choose_fallback_contract(snap: Snapshot, side: str, settings: Settings | None = None, history=None) -> dict:
-    """Nearest strike that passes the blockers, 0DTE first, then 1DTE.
+def choose_fallback_contract(snap: Snapshot, side: str, settings: Settings | None = None,
+                             history=None, parts=None) -> dict:
+    """0DTE, then 1DTE, inside 5% of spot.
 
-    The search starts at the strike closest to the stock and walks out inside
-    5% of spot. OTM and ITM both count. If none pass, the card is dropped.
+    The default walk starts one strike out of the money. A missing quote
+    there steps to the ATM strike, then to the next OTM strike. Offset 0,
+    including the legacy spread revert, is nearest ATM and then outward.
+    The spread band still applies. There is no hard spread block unless
+    spread_legacy is on.
     """
     settings = settings or Settings()
+    offset = 0 if settings.spread_legacy else int(settings.fallback_strike_offset)
     today = snap.at.astimezone(ET).date()
     grouped = {0: [], 1: []}
     for option in snap.options:
@@ -576,11 +683,27 @@ def choose_fallback_contract(snap: Snapshot, side: str, settings: Settings | Non
     chosen = None
     for days in order:
         pool = [option for option in grouped[days] if _inside_strike_window(option, snap, settings)]
-        pool.sort(key=lambda option: (abs(option.strike - snap.spot), option.strike))
-        for option in pool:
-            if _quote_passes(option, snap, settings, history):
-                chosen = option
-                break
+        if offset <= 0:
+            pool.sort(key=lambda option: (abs(option.strike - snap.spot), option.strike))
+            for option in pool:
+                if _quote_passes(option, snap, settings, history, parts):
+                    chosen = option
+                    break
+        else:
+            by_strike = {}
+            for option in pool:
+                by_strike.setdefault(option.strike, []).append(option)
+            for strike in _otm_strike_order(by_strike, snap.spot, side, offset):
+                quoted = [option for option in by_strike[strike] if _quoted_fallback(option)]
+                quoted.sort(key=lambda option: option.symbol)
+                if not quoted:
+                    continue
+                for option in quoted:
+                    if _quote_passes(option, snap, settings, history, parts):
+                        chosen = option
+                        break
+                if chosen is not None:
+                    break
         if chosen is not None:
             break
     if chosen is None:
@@ -728,21 +851,40 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
         rvol = fallback_rvol_value(indexed, minute, base, sessions)
     push = fallback_push(indexed, minute, side, atr21)
     room = room_from_open(indexed, minute, side, atr21)
-    from .confluence import (PATTERN_FEATURES, additive_features, card_gate, confluence_flags_for,
-                              match_value, pattern_match, spread_fraction)
+    from .confluence import (PATTERN_FEATURES, _log_stock_bar, additive_features, card_gate,
+                              confluence_flags_for, match_value, pattern_match, spread_fraction)
     from .weights import load_weights, score_path
-    contract = choose_fallback_contract(snap, side, settings, history)
+    sample = next((option for option in snap.options if option.side == side), None)
+    stock_features = additive_features(snap, sample, settings, history=history, spy_bars=spy_bars)
+    parts = strong_stock_parts(snap, side, settings, history, features=stock_features)
+    contract = choose_fallback_contract(snap, side, settings, history, parts)
     probe = contract["option"]
-    features = additive_features(snap, probe, settings, history=history, spy_bars=spy_bars)
+    features = additive_features(
+        snap, probe if probe is not None else sample, settings, history=history, spy_bars=spy_bars)
+    parts = strong_stock_parts(snap, side, settings, history, features=features)
     vol5 = features.pop("_vol5", None)
+    features.pop("_rvol", None)
+    features.pop("_push", None)
     flags = confluence_flags_for(snap, probe, {}, settings)
     _points, bypass_score, positive = score_path(features, side, load_weights(settings.weights_path), "bypass")
     bar = indexed[minute]
     volume = bar.volume
     if probe is None:
-        gate = card_gate(side, volume, None, settings, bid=None, option_volume_5m=None)
+        gate = card_gate(side, volume, None, settings, bid=None, option_volume_5m=None, parts=parts)
     else:
-        gate = card_gate(side, volume, spread_fraction(probe), settings, bid=probe.bid, option_volume_5m=vol5)
+        gate = card_gate(
+            side, volume, spread_fraction(probe), settings, bid=probe.bid,
+            option_volume_5m=vol5, parts=parts)
+    unmet = (
+        not settings.spread_legacy
+        and gate.get("spread_band") not in (None, 0)
+        and not gate.get("stock_bar_met")
+        and "wide_spread" in gate["blocked_by"]
+    )
+    _log_stock_bar(
+        snap, probe, gate.get("spread_band"), parts, stock_path=True,
+        unmet=unmet, bar_met=int(gate.get("stock_bar_met") or 0),
+    )
     # RVOL, push, and room are points. The bypass posts when those points clear
     # the bypass line and the contract that would post passes the blockers.
     q_true = bypass_score >= settings.bypass_threshold and gate["post_ok"]
@@ -808,6 +950,12 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
         "room_atr": room, "confluence_score": bypass_score, "bypass_score": bypass_score,
         "positive_features": positive, "confluence_flags": flags, "confluence_points": _points,
         "gate_post": int(gate["post_ok"]),
+        "spread_band": gate.get("spread_band"),
+        "stock_bar_met": int(gate.get("stock_bar_met") or 0),
+        "wide_spread_bar_unmet": int(unmet),
+        "stock_rvol": parts.get("rvol"),
+        "stock_push": parts.get("push"),
+        "stock_setups": parts.get("setups"),
         "base": gate["base"], "blockers": gate["blockers"], "overrides": gate["overrides"],
         "run_high": run_high, "run_low": run_low, "bars_since_last_fire": bars_since, "prev_fire_ts": prev_ts,
         "skip_flag": bool(skip_flag), "skip_ref_card_id": skip_id, "skip_ref_ts": skip_ts,
