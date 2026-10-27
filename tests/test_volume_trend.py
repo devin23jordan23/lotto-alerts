@@ -7,6 +7,7 @@ from lotto.volume_trend import (
     DEEP_SLOTS, EXTRA_UNIVERSE, EXTRA_UNIVERSE_MAX, PAID_MARKET_DATA_PER_MINUTE,
     PRIMARY_WEIGHTS, PROFILES, VOL_ALIASES, VOLUME_TREND_RULES,
     alignment_features, call_budget, evaluate_stacks, is_volume_trend, overlay_book,
+    penalty_opt_vol_points, penalty_spread_points,
     poll_cycle_calls, rally_breadth, rally_points, reference_close, score_volume_trend,
     sector_map_names, select_extra_names, spy_turn, spy_window_return, stacks_from_rules,
     volume_trend_lines, volume_trend_symbols,
@@ -16,7 +17,12 @@ from lotto.vt_measure import (
     measure_volume, option_rows, range_atr_score, room_score, rvol_cum_chain,
     sust_score, sustained_share, volume_steady,
 )
-from lotto.weights import active_profile, load_weights
+from lotto.config import model_v_settings
+from lotto.confluence import apply_card_layers
+from lotto.features import Candidate
+from lotto.model_v import option_extras
+from lotto.models import Snapshot
+from lotto.weights import active_profile, load_weights, score_path
 
 
 def _bar(minute, close, volume, span=0.4):
@@ -31,9 +37,9 @@ def _flat_tod(level=100.0):
 
 class ProfileTests(unittest.TestCase):
     def test_lines_and_live_book_stay_put(self):
-        self.assertEqual(volume_trend_lines("volume_trend")["post_threshold"], 108)
-        self.assertEqual(volume_trend_lines("volume_trend_aggressive")["post_threshold"], 96)
-        self.assertEqual(volume_trend_lines("volume_trend_conservative")["post_threshold"], 124)
+        self.assertEqual(volume_trend_lines("volume_trend")["post_threshold"], 100)
+        self.assertEqual(volume_trend_lines("volume_trend_aggressive")["post_threshold"], 89)
+        self.assertEqual(volume_trend_lines("volume_trend_conservative")["post_threshold"], 117)
         self.assertEqual(active_profile(load_weights(), "balanced")["post_threshold"], 84)
         self.assertEqual(active_profile(load_weights(), "conservative")["post_threshold"], 92)
         book = load_weights()
@@ -114,14 +120,14 @@ class SpySectorTests(unittest.TestCase):
             return out
 
         self.assertEqual(rally_points(rally_breadth(1, table(0.70, 1))), 18)
-        self.assertEqual(rally_points(rally_breadth(1, table(0.80, 1))), 41)
+        self.assertEqual(rally_points(rally_breadth(1, table(0.80, 1))), 18)
         self.assertEqual(rally_points(rally_breadth(1, table(0.95, 1))), 0)
         self.assertEqual(rally_points(rally_breadth(1, table(0.50, 1))), 0)
         self.assertEqual(rally_points(rally_breadth(-1, table(0.70, -1))), 18)
-        self.assertEqual(rally_points(rally_breadth(-1, table(0.80, -1))), 41)
+        self.assertEqual(rally_points(rally_breadth(-1, table(0.80, -1))), 18)
         self.assertEqual(rally_points(rally_breadth(-1, table(0.95, -1))), 0)
         self.assertEqual(rally_points(rally_breadth(1, table(0.70, -1))), 0)
-        self.assertEqual(rally_points(0.75), 41)
+        self.assertEqual(rally_points(0.75), 18)
         self.assertEqual(rally_points(0.90), 0)
 
     def test_etf_typical_and_peer_count_both_sides(self):
@@ -347,6 +353,69 @@ class StackTests(unittest.TestCase):
         self.assertNotIn("SPY_ALIGN_RALLY_DAY", _points)
         self.assertEqual(fired, [])
         self.assertLess(bypass, score)
+
+
+class PenaltyTests(unittest.TestCase):
+    def test_bands_halve_on_the_stock_bar_and_apply_once(self):
+        settings = model_v_settings()
+        strong = {"rvol": 2.0, "push": 2.0, "setups": 0}
+        weak = {"rvol": 0.1, "push": 0.1, "setups": 0}
+        self.assertEqual(penalty_spread_points(0.25), 0)
+        self.assertEqual(penalty_spread_points(0.30), -10)
+        self.assertEqual(penalty_spread_points(0.35), -10)
+        self.assertEqual(penalty_spread_points(0.37), -12)
+        self.assertEqual(penalty_spread_points(0.40), -12)
+        self.assertEqual(penalty_spread_points(0.41), -15)
+        self.assertEqual(penalty_spread_points(None), 0)
+        self.assertEqual(penalty_spread_points(0.30, parts=strong, settings=settings), -5)
+        self.assertEqual(penalty_spread_points(0.37, parts=strong, settings=settings), -6)
+        self.assertEqual(penalty_spread_points(0.50, parts=strong, settings=settings), -7.5)
+        self.assertEqual(penalty_spread_points(0.30, parts=weak, settings=settings), -10)
+        self.assertEqual(penalty_opt_vol_points(49), -8)
+        self.assertEqual(penalty_opt_vol_points(50), 0)
+        self.assertEqual(penalty_opt_vol_points(None), 0)
+        self.assertEqual(
+            penalty_opt_vol_points(10, parts={"rvol": 1.0, "push": 1.0, "setups": 0},
+                                   settings=settings, spread=0.10),
+            0,
+        )
+        self.assertEqual(
+            penalty_opt_vol_points(10, parts=weak, settings=settings, spread=0.10),
+            -8,
+        )
+        features = {"entry_spread": 0.30, "opt_volume_5m": 10}
+        points, score, _positive, _fired = score_volume_trend(
+            features, "CALL", load_weights(), "primary", "volume_trend_balanced",
+            parts=weak, settings=settings)
+        self.assertEqual(points["PENALTY_SPREAD"], -10)
+        self.assertEqual(points["PENALTY_OPT_VOL"], -8)
+        book_points, book_score, _book_positive = score_path(
+            features, "CALL", overlay_book(load_weights(), "volume_trend_balanced"))
+        self.assertEqual(book_points.get("PENALTY_SPREAD", 0), 0)
+        self.assertEqual(book_points.get("PENALTY_OPT_VOL", 0), 0)
+        self.assertEqual(score, book_score - 10 - 8)
+
+        at = datetime(2026, 6, 2, 10, 0, tzinfo=ET)
+        prior_at = at - timedelta(minutes=6)
+        bid, ask = 1.0, 2.3 / 1.7
+        option = Option("C100", at.date(), "CALL", 100, bid, ask, 40, 10, 0.4, 0.02, at)
+        prior_option = Option("C100", at.date(), "CALL", 100, bid, ask, 30, 10, 0.4, 0.02, prior_at)
+        bars = tuple(_bar(i, 100.0, 1000) for i in range(12))
+        snap = Snapshot("TEST", at, 100.0, at, 99.0, bars, (option,), prior_atr=1.0)
+        prior = Snapshot("TEST", prior_at, 100.0, prior_at, 99.0, bars[:6], (prior_option,), prior_atr=1.0)
+        candidate = Candidate(snap, option, 30, {}, {}, [], False)
+        profile = model_v_settings(profile="volume_trend_balanced", post_threshold=100)
+        extras = option_extras(candidate, profile, [prior])
+        self.assertLess(extras["spread_penalty"], 0)
+        apply_card_layers(candidate, profile, False, 30, [prior])
+        posted = candidate.metrics["confluence_points"]
+        self.assertEqual(posted["PENALTY_SPREAD"], -10)
+        self.assertEqual(posted["PENALTY_OPT_VOL"], -8)
+        self.assertEqual(candidate.score, candidate.metrics["confluence_score"])
+        self.assertNotEqual(
+            candidate.score,
+            candidate.metrics["confluence_score"] + extras["spread_penalty"],
+        )
 
 
 class ExtraUniverseTests(unittest.TestCase):

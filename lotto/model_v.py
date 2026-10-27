@@ -951,11 +951,13 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     from .volume_trend import is_volume_trend, prepare_features, score_volume_trend
     if is_volume_trend(settings.profile):
         direction = 1 if side == "CALL" else -1
+        features["opt_volume_5m"] = vol5
         features = prepare_features(
             features, snap, settings, direction=direction, spy_bars=spy_bars,
             option=probe if probe is not None else sample)
         _points, bypass_score, positive, _fired = score_volume_trend(
-            features, side, load_weights(settings.weights_path), "bypass", settings.profile)
+            features, side, load_weights(settings.weights_path), "bypass", settings.profile,
+            parts=parts, settings=settings)
     else:
         _points, bypass_score, positive = score_path(features, side, load_weights(settings.weights_path), "bypass")
     bar = indexed[minute]

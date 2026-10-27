@@ -8,8 +8,8 @@ window such as 3 is the same function with no interpolate. The row scores
 when SPY's return over that window, in the card's direction, is inside
 SPY_ALIGN_TURN_MIN/MAX (0.05% to 0.12%).
 
-SPY_ALIGN_RALLY_DAY is tiered from the sector-map names: 19 points at
-60–75% green (red for puts), 23 at 75–90%, and 0 at 90% or more.
+SPY_ALIGN_RALLY_DAY is tiered from the sector-map names: 18 points at
+60–75% green (red for puts), 18 at 75–90%, and 0 at 90% or more.
 SECTOR_ETF_PCT_TS is 32 when the sector ETF's percent from the open is
 1.5–2.5x its 20-day typical same-minute move. SECTOR_L2_PMH and
 SECTOR_ETF_PCT stay in the book at 0 as alternates. SECTOR_PEER_COUNT is 0;
@@ -94,7 +94,7 @@ VOLUME_TREND_RULES = {
     # Breadth of sector-map names. [lo, hi) maps to points. >= 0.90 is 0.
     "SPY_ALIGN_RALLY_TIERS": (
         {"lo": 0.60, "hi": 0.75, "points": 18},
-        {"lo": 0.75, "hi": 0.90, "points": 41},
+        {"lo": 0.75, "hi": 0.90, "points": 18},
     ),
     "SECTOR_ETF_TS_MIN": 1.5,
     "SECTOR_ETF_TS_MAX": 2.5,
@@ -145,23 +145,20 @@ VOLUME_TREND_RULES = {
     "ALT_HOLD_MIN": 1.0,
     "SECTOR_ETF_WEIGHT_LOW": 0.5,
     # Score rows only. Never a gate. Points must be <= 0.
-    # Spread bands are (ask-bid)/mid. At or below PENALTY_SPREAD_FREE (25%)
-    # the row is 0 even if a band lists a penalty. Drop Vince's numbers into
-    # the points fields; the cutoffs are re-matched with that drop.
+    # Spread is (ask-bid)/mid. Edges match spread_bands: <=25% is 0,
+    # <=35% is -10, <=40% is -12, above 40% is -15. A band's points are
+    # halved when that band's strong-stock bar is met.
     "PENALTY_SPREAD_FREE": 0.25,
     "PENALTY_SPREAD_BANDS": (
-        {"lo": 0.0, "hi": 0.25, "points": 0},
-        {"lo": 0.25, "hi": 0.35, "points": 0},
-        {"lo": 0.35, "hi": 0.50, "points": 0},
-        {"lo": 0.50, "hi": None, "points": 0},
+        {"hi": 0.25, "points": 0},
+        {"hi": 0.35, "points": -10},
+        {"hi": 0.40, "points": -12},
+        {"hi": None, "points": -15},
     ),
-    # Contract volume. A missing print scores 0 and does not block.
-    # Lower bands are the thin ones. points must be <= 0.
-    "PENALTY_OPT_VOL_BANDS": (
-        {"lo": 0, "hi": 50, "points": 0},
-        {"lo": 50, "hi": 100, "points": 0},
-        {"lo": 100, "hi": None, "points": 0},
-    ),
+    # 5-minute contract volume under this floor. 0 when the strong-stock
+    # bar that waives option volume is met. A missing print scores 0.
+    "PENALTY_OPT_VOL_THIN": 50,
+    "PENALTY_OPT_VOL_POINTS": -8,
     "SECTOR_ETF_WEIGHT": {
         "XLK": 1.0, "SMH": 1.0, "SOXX": 1.0, "MTUM": 1.0, "XLC": 1.0,
         "XLY": 1.0, "XOP": 1.0, "XLE": 1.0, "XLF": 1.0, "XLV": 1.0,
@@ -258,7 +255,7 @@ PRIMARY_WEIGHTS = {
     "SPY_ALIGN_TURN_3M": 15,
     "SPY_ALIGN_TURN_5M": 0,
     "SPY_ALIGN_TURN_10M": 0,
-    # Tier points (19 / 23 / 0) are added on the primary card. The weight stays 0.
+    # Tier points (18 / 18 / 0) are added on the primary card. The weight stays 0.
     "SPY_ALIGN_RALLY_DAY": 0,
     # Band points are applied in score_volume_trend. These stay 0 so the
     # weight book cannot add them a second time.
@@ -301,12 +298,12 @@ def _cutoff(post: float) -> dict:
     }
 
 
-# Provisional lines for the held-out volume rows plus Vince V2 sector/SPY.
-# Stack cutoffs are not in yet. Do not put these profiles in the JSON book.
+# Lines re-matched to the spread and option-volume penalty rows.
+# Do not put these profiles in the JSON book.
 PROFILES = {
-    "volume_trend_aggressive": _cutoff(96),
-    "volume_trend_balanced": _cutoff(108),
-    "volume_trend_conservative": _cutoff(124),
+    "volume_trend_aggressive": _cutoff(89),
+    "volume_trend_balanced": _cutoff(100),
+    "volume_trend_conservative": _cutoff(117),
 }
 
 # Fitted points that reversed on held-out days. The live weight above is 0.
@@ -503,7 +500,7 @@ def stack_view(features: dict) -> dict:
 
 
 def score_volume_trend(features: dict, side: str, book: dict, path: str = "primary",
-                       name: str = "volume_trend_balanced"):
+                       name: str = "volume_trend_balanced", parts=None, settings=None):
     """Primary score plus rally tiers and stacks. Bypass does not take those points.
 
     Sector and SPY weights live on the primary book only.
@@ -525,7 +522,7 @@ def score_volume_trend(features: dict, side: str, book: dict, path: str = "prima
             score += stack_points
             positive += 1
         score, positive = _scale_sector_points(points, score, positive, raw_features)
-    score = _apply_penalties(points, score, raw_features)
+    score = _apply_penalties(points, score, raw_features, parts=parts, settings=settings)
     return points, score, positive, fired
 
 
@@ -803,10 +800,54 @@ def _band_points(value, bands) -> float:
     return 0.0
 
 
-def penalty_spread_points(spread, rules=None) -> float:
+def _spread_penalty_raw(spread, rules) -> float:
+    """First band whose upper edge holds the spread. The last band is open."""
+    for band in rules.get("PENALTY_SPREAD_BANDS") or ():
+        try:
+            pts = float(band.get("points") or 0)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if not isfinite(pts) or pts > 0:
+            pts = 0.0
+        hi = band.get("hi")
+        if hi is None:
+            return pts
+        try:
+            hi = float(hi)
+        except (TypeError, ValueError):
+            continue
+        if spread <= hi + 1e-12:
+            return pts
+    return 0.0
+
+
+def _spread_bar_met(spread, parts, settings) -> bool:
+    """The wide-spread stock bar for this band. Band 0 has no bar."""
+    if settings is None:
+        return False
+    from .confluence import spread_band
+    from .model_v import stock_bar_status
+    band = spread_band(spread, settings)
+    if band is None or int(band) <= 0:
+        return False
+    return bool(stock_bar_status(parts, band, settings)[0])
+
+
+def _opt_vol_bar_met(spread, parts, settings) -> bool:
+    """The stock bar that waives a thin option print. Missing parts do not waive."""
+    if settings is None or not parts:
+        return False
+    from .confluence import spread_band
+    from .model_v import optb_volume_waived
+    band = None if spread is None else spread_band(spread, settings)
+    return bool(optb_volume_waived(parts, band, settings)[0])
+
+
+def penalty_spread_points(spread, rules=None, parts=None, settings=None) -> float:
     """Spread penalty. At or below 25% of mid the row is 0. Never a block.
 
-    spread is (ask-bid)/mid. A missing spread scores 0.
+    spread is (ask-bid)/mid. A missing spread scores 0. Points are halved
+    when that band's strong-stock bar is met.
     """
     rules = rules or VOLUME_TREND_RULES
     try:
@@ -818,12 +859,16 @@ def penalty_spread_points(spread, rules=None) -> float:
     free = float(rules.get("PENALTY_SPREAD_FREE", 0.25))
     if number <= free + 1e-12:
         return 0.0
-    return _band_points(number, rules.get("PENALTY_SPREAD_BANDS"))
+    points = _spread_penalty_raw(number, rules)
+    if points < 0 and _spread_bar_met(number, parts, settings):
+        return points / 2.0
+    return points
 
 
-def penalty_opt_vol_points(volume, rules=None) -> float:
-    """Thin-contract penalty. Points are <= 0. A missing volume scores 0.
+def penalty_opt_vol_points(volume, rules=None, parts=None, settings=None, spread=None) -> float:
+    """−8 when 5-minute contract volume is under 50. A missing print scores 0.
 
+    The row is 0 when the strong-stock bar that waives option volume is met.
     It does not block the card.
     """
     rules = rules or VOLUME_TREND_RULES
@@ -833,21 +878,38 @@ def penalty_opt_vol_points(volume, rules=None) -> float:
         return 0.0
     if not isfinite(number) or number < 0:
         return 0.0
-    return _band_points(number, rules.get("PENALTY_OPT_VOL_BANDS"))
+    try:
+        thin = float(rules.get("PENALTY_OPT_VOL_THIN", 50))
+        points = float(rules.get("PENALTY_OPT_VOL_POINTS", -8))
+    except (TypeError, ValueError):
+        return 0.0
+    if number >= thin or not isfinite(points) or points > 0:
+        return 0.0
+    if _opt_vol_bar_met(spread, parts, settings):
+        return 0.0
+    return points
 
 
-def _apply_penalties(points, score, features, rules=None) -> float:
-    """Subtract the two penalty rows. They never add points and never block."""
+def _apply_penalties(points, score, features, rules=None, parts=None, settings=None) -> float:
+    """Subtract the two penalty rows. They never add points and never block.
+
+    The weight-book keys stay 0, so score_path does not add them again.
+    Model V option_extras is not on this score.
+    """
     rules = rules or VOLUME_TREND_RULES
-    spread = penalty_spread_points((features or {}).get("entry_spread"), rules)
-    volume = penalty_opt_vol_points((features or {}).get("opt_volume"), rules)
+    features = features or {}
+    spread_value = features.get("entry_spread")
+    volume_value = features.get("opt_volume_5m") if "opt_volume_5m" in features else None
+    spread = penalty_spread_points(spread_value, rules, parts=parts, settings=settings)
+    volume = penalty_opt_vol_points(
+        volume_value, rules, parts=parts, settings=settings, spread=spread_value)
     points["PENALTY_SPREAD"] = spread
     points["PENALTY_OPT_VOL"] = volume
     return score + spread + volume
 
 
 def rally_points(breadth, rules=None) -> float:
-    """18 at 60–75%, 41 at 75–90%, 0 at 90% or above and below 60%."""
+    """18 at 60–75%, 18 at 75–90%, 0 at 90% or above and below 60%."""
     rules = rules or VOLUME_TREND_RULES
     number = _finite(breadth)
     if number is None:

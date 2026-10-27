@@ -1521,10 +1521,12 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     from .volume_trend import is_volume_trend, prepare_features, score_volume_trend
     if is_volume_trend(settings.profile):
         direction = 1 if option.side == "CALL" else -1
+        features["opt_volume_5m"] = vol5
         features = prepare_features(
             features, snap, settings, direction=direction, spy_bars=spy_bars, option=option)
         points, score, positive, _fired = score_volume_trend(
-            features, option.side, book, "primary", settings.profile)
+            features, option.side, book, "primary", settings.profile,
+            parts=parts, settings=settings)
     else:
         points, score, positive = score_path(features, option.side, book, "primary")
     trigger = None

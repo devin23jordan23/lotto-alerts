@@ -18,14 +18,14 @@ No orders are placed. Scores are research rules, not probabilities or promised r
 
 `volume_trend_aggressive`, `volume_trend_balanced`, and `volume_trend_conservative` are code profiles. `volume_trend` is the balanced one. They are not in the JSON book, so the live `balanced` line stays 84 until `LOTTO_PROFILE` changes. **Do not merge this branch to main.** Merging deploys it.
 
-The three profiles share one weight block. Only the post line differs: 96, 108, and 124. Those cutoffs stay until the penalty rows land.
+The three profiles share one weight block. Only the post line differs: 89, 100, and 117.
 
 Primary cards only for the new sector and SPY points:
 
 | Row | Points | When |
 |---|---|---|
 | `SPY_ALIGN_TURN_3M` | 18 | SPY return over `SPY_ALIGN_TURN_WINDOW_MIN` (3.5, interpolated) is 0.05%–0.12% in the card's direction |
-| `SPY_ALIGN_RALLY_DAY` | 19 / 23 / 0 | 60–75% / 75–90% / ≥90% of sector-map names green (red for puts) |
+| `SPY_ALIGN_RALLY_DAY` | 18 / 18 / 0 | 60–75% / 75–90% / ≥90% of sector-map names green (red for puts) |
 | `SECTOR_ETF_PCT_TS` | 32 | Sector ETF % from the open is 1.5–2.5× its 20-day same-minute typical move |
 | `SPY_ALIGN_OPEN` | 1 | SPY on the card's side of the open and of VWAP |
 | `SECTOR_L2_PMH`, `SECTOR_ETF_PCT` | 0 | Alternates, still computed |
@@ -35,7 +35,16 @@ Primary cards only for the new sector and SPY points:
 
 Ace's volume names are the scored keys (`BRK_VS_DAY`, `BRK_TOD_10/5/3`, `RVOL_CUM`, `SUST_VOL_TOD_1M`, `HOLD_ON_VOL`, and the rest in `lotto/volume_trend.py`). `VOL_*` names are aliases and stay at weight 0. `RVOL_CHAIN_ge1.5` (+6) and the 1.0–1.5 dead zone (−9) score the same `RVOL_CUM` chain. `BRK_VS_10_ge1.5` (+15) stays the break bar versus the prior 10 bars of today. `VOL_BREAK_BAR` aliases `BRK_BAND`, the 1.2–3× score versus the smoothed 10-day time-of-day norm, tapering above 4×.
 
-`STACKS` in that same file is the list to edit. Each entry has a name, conditions (`feature`, `op`, `threshold`), and points. Every entry whose conditions all hold adds its points. Missing features are false. `OPT_VOL_ADJ_STRIKES` stays coded. The A+ stack and the 3-of-4 partial are still in the list, and both default to 0 points (`STACK_BONUS` and `STACK_BONUS_3OF4`). Held-out data did not support a stack bonus: the 3-of-4 A+ stack was +2.3pp in the fit and −6.7pp on the test. Nothing in a stack blocks a card. The old-book volume rows are unchanged. The new `VOL_*` rows sit on top of them. Cutoffs stay 96 / 108 / 124.
+`STACKS` in that same file is the list to edit. Each entry has a name, conditions (`feature`, `op`, `threshold`), and points. Every entry whose conditions all hold adds its points. Missing features are false. `OPT_VOL_ADJ_STRIKES` stays coded. The A+ stack and the 3-of-4 partial are still in the list, and both default to 0 points (`STACK_BONUS` and `STACK_BONUS_3OF4`). Held-out data did not support a stack bonus: the 3-of-4 A+ stack was +2.3pp in the fit and −6.7pp on the test. Nothing in a stack blocks a card. The old-book volume rows are unchanged. The new `VOL_*` rows sit on top of them. Cutoffs are 89 / 100 / 117.
+
+Penalty rows are points only. They do not gate. Spread is `(ask−bid)/mid`, on the same edges as the wide-spread stock bars. A band's points are halved when that band's strong-stock bar is met. `PENALTY_OPT_VOL` uses the 5-minute contract print. It is 0 when the stock bar that waives a thin print is met.
+
+| Row | Points | When |
+|---|---|---|
+| `PENALTY_SPREAD` | 0 / −10 / −12 / −15 | ≤25% / 25–35% / 35–40% / >40% of mid. Halved when that band's stock bar is met |
+| `PENALTY_OPT_VOL` | −8 / 0 | 5-minute contract volume < 50, and 0 when the strong-stock bar is met |
+
+The posted volume-trend score keeps these two rows. Model V's `option_extras` spread penalty stays on the old `score_v2` label and is not added again. The weight book does not carry a second spread or option-volume penalty. `sp5` is still the tight-spread bonus.
 
 The chain is 10-day cumulative, then 5, then 3, then any same-time days, then the bar versus the day so far, then a linear time-scaled full-day volume, then 1.0. The source is logged. Early bars (index under 10) extend the day-so-far average back to 04:00. Holds score only after `HOLD_W` bars exist past the break. Puts mirror.
 
