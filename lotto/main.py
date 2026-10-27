@@ -506,6 +506,7 @@ def main():
                 if row:
                     LOG.info('Live decision %s: %s', symbol, json.dumps(dict(row)))
             maybe_nightly(store,client,symbols,data_dir,now)
+            if is_volume_trend(engine.settings.profile): ensure_etf_typicals(client, now)
             client.warm_universe(symbols, now)
         except Exception as exc:
             detail = str(exc) if type(exc) is RuntimeError else type(exc).__name__

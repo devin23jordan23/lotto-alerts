@@ -7,9 +7,11 @@ from lotto.volume_trend import (
     DEEP_SLOTS, EXTRA_UNIVERSE, EXTRA_UNIVERSE_MAX, NO_SECTOR_ETF, PAID_MARKET_DATA_PER_MINUTE,
     PRIMARY_WEIGHTS, PROFILES, SECTOR_BASKETS, VOL_ALIASES, VOLUME_TREND_RULES,
     alias_rows, alignment_features, baskets_for, call_budget, candidate_etfs, choose_sector_etf,
-    etf_for, etf_multiplier, etf_typical_score, etf_typical_table, evaluate_stacks, is_volume_trend,
+    ensure_etf_typicals, etf_for, etf_multiplier, etf_typical_score, etf_typical_table,
+    evaluate_stacks, is_volume_trend,
     overlay_book, penalty_opt_vol_points, penalty_spread_points, poll_cycle_calls, rally_breadth,
     rally_points, reference_close, score_volume_trend, sector_feature_choice, sector_map_names,
+    sector_quote_symbols,
     select_extra_names, spy_turn, spy_window_return, stacks_from_rules, vol_bin_flags,
     volume_trend_lines, volume_trend_symbols,
 )
@@ -527,6 +529,27 @@ class ParityTests(unittest.TestCase):
         self.assertEqual(feats["SECTOR_ETF_PCT_TS"], 1.0)
         self.assertEqual(feats["_sector_etf"], "XLK")
         self.assertEqual(feats["_sector_etf_weight"], 1.0)
+
+    def test_etf_typicals_reload_once_per_session_day(self):
+        class Client:
+            def __init__(self):
+                self.baselines = {}
+                self.calls = []
+
+            def baseline(self, symbol, now):
+                day = now.astimezone(ET).date()
+                self.calls.append((symbol, day))
+                self.baselines[(symbol, day)] = {}
+
+        client = Client()
+        monday = datetime(2026, 10, 26, 14, 0, tzinfo=ET)
+        tuesday = datetime(2026, 10, 27, 14, 0, tzinfo=ET)
+        ensure_etf_typicals(client, monday)
+        ensure_etf_typicals(client, monday)
+        count = len(sector_quote_symbols())
+        self.assertEqual(len(client.calls), count)
+        ensure_etf_typicals(client, tuesday)
+        self.assertEqual(len(client.calls), count * 2)
 
     def test_sector_weight_picks_smh_soxx_xop_and_scales_the_low_group(self):
         for etf in ("XLI", "XLU", "XLB", "XLP", "XLRE"):

@@ -758,13 +758,19 @@ def sector_quote_symbols() -> tuple:
 
 
 def ensure_etf_typicals(client, now) -> None:
-    """Baseline each sector ETF once so the same-minute typical table exists.
+    """Baseline each sector ETF that is missing today's New York session.
 
-    baseline() is the existing candle pull. It stores the table on the client.
+    It reloads once per session day so the table always holds the last 20
+    completed sessions. baseline() is the existing candle pull. It stores the
+    table on the client. An ETF already baselined for that date is skipped.
     """
     if client is None or not hasattr(client, "baseline"):
         return
+    day = now.astimezone(ET).date()
+    done = getattr(client, "baselines", None) or {}
     for etf in sector_quote_symbols():
+        if (etf, day) in done:
+            continue
         try:
             client.baseline(etf, now)
         except Exception as exc:
@@ -1021,8 +1027,9 @@ def rally_points(breadth, rules=None) -> float:
 def etf_typical_score(direction: int, etf_pct, typical_abs, rules=None) -> float:
     """1 when the ETF's % from the open is 1.5–2.5x the 20-day same-minute typical move.
 
-    typical_abs is the average absolute percent-from-open at this minute
-    over the prior 20 sessions. Puts need a down move of the same multiple.
+    typical_abs is the median absolute percent-from-open at this minute
+    over the prior 20 sessions (zero readings are skipped). Puts need a down
+    move of the same multiple.
     A missing typical scores 0. It is not an error.
     """
     rules = rules or VOLUME_TREND_RULES
