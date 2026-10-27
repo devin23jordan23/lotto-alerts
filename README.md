@@ -18,7 +18,7 @@ No orders are placed. Scores are research rules, not probabilities or promised r
 
 `volume_trend_aggressive`, `volume_trend_balanced`, and `volume_trend_conservative` are code profiles. `volume_trend` is the balanced one. They are not in the JSON book, so the live `balanced` line stays 84 until `LOTTO_PROFILE` changes. **Do not merge this branch to main.** Merging deploys it.
 
-The three profiles share one weight block. Only the post line differs: 90, 102, and 120.
+The three profiles share one weight block. Only the post line differs: 75, 102, and 120.
 
 Primary cards only for the new sector and SPY points:
 
@@ -40,7 +40,7 @@ The fitted volume rows are 3 to 11 points: `RVOL_CUM_15_25` is 7, `RVOL_CUM_ge25
 
 Ace's volume names are the scored keys (`BRK_VS_DAY`, `BRK_TOD_10/5/3`, `RVOL_CUM`, `SUST_VOL_TOD_1M`, `HOLD_ON_VOL`, and the rest in `lotto/volume_trend.py`). `VOL_*` names are aliases and stay at weight 0. `VOL_RVOL_TOD` names `RVOL_CUM_15_25` and `RVOL_CUM_ge25`. `VOL_PRE_BREAK` names `BU_5_TOD_10`. `VOL_BREAK_BAR` names `BRK_TOD_BRK_08_12`, `BRK_TOD_BRK_12_3`, and `BRK_TOD_BRK_ge3`. An alias adds no points. `RVOL_CHAIN_ge1.5` (+6) and the 1.0–1.5 dead zone (−9) score the same `RVOL_CUM` chain. `BRK_VS_10_ge1.5` (+15) stays the break bar versus the prior 10 bars of today. The backtested book has `BU_5_DAY_ge1` at 0. All three volume-trend profiles keep that 0 so the row does not double-count `BU_5_TOD_10`. The live JSON profiles, including balanced, are unchanged and do not carry the row.
 
-`STACKS` in that same file is the list to edit. Each entry has a name, conditions (`feature`, `op`, `threshold`), and points. Every entry whose conditions all hold adds its points. Missing features are false. `OPT_VOL_ADJ_STRIKES` stays coded. The A+ stack and the 3-of-4 partial are still in the list, and both default to 0 points (`STACK_BONUS` and `STACK_BONUS_3OF4`). Held-out data did not support a stack bonus: the 3-of-4 A+ stack was +2.3pp in the fit and −6.7pp on the test. Nothing in a stack blocks a card. The old-book volume rows are unchanged. The new `VOL_*` rows sit on top of them. Cutoffs are 90 / 102 / 120.
+`STACKS` in that same file is the list to edit. Each entry has a name, conditions (`feature`, `op`, `threshold`), and points. Every entry whose conditions all hold adds its points. Missing features are false. `OPT_VOL_ADJ_STRIKES` stays coded. The A+ stack and the 3-of-4 partial are still in the list, and both default to 0 points (`STACK_BONUS` and `STACK_BONUS_3OF4`). Held-out data did not support a stack bonus: the 3-of-4 A+ stack was +2.3pp in the fit and −6.7pp on the test. Nothing in a stack blocks a card. The old-book volume rows are unchanged. The new `VOL_*` rows sit on top of them. Cutoffs are 75 / 102 / 120.
 
 Penalty rows are points only. They do not gate. Spread is `(ask−bid)/mid`, on the same edges as the wide-spread stock bars. A band's points are halved when that band's strong-stock bar is met. `PENALTY_OPT_VOL` uses the 5-minute contract print. It is 0 when the stock bar that waives a thin print is met.
 

@@ -43,7 +43,7 @@ def _flat_tod(level=100.0):
 class ProfileTests(unittest.TestCase):
     def test_lines_and_live_book_stay_put(self):
         self.assertEqual(volume_trend_lines("volume_trend")["post_threshold"], 102)
-        self.assertEqual(volume_trend_lines("volume_trend_aggressive")["post_threshold"], 90)
+        self.assertEqual(volume_trend_lines("volume_trend_aggressive")["post_threshold"], 75)
         self.assertEqual(volume_trend_lines("volume_trend_conservative")["post_threshold"], 120)
         self.assertEqual(active_profile(load_weights(), "balanced")["post_threshold"], 84)
         self.assertEqual(active_profile(load_weights(), "conservative")["post_threshold"], 92)
