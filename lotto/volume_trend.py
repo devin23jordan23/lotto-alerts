@@ -1,4 +1,4 @@
-"""Volume-trend profiles. Same weights in all three; only the post line differs.
+"""Volume-trend profiles. Same weights in all three; only the post line differs: 90, 102, and 120.
 
 SPY_ALIGN_TURN_3M is 15. Its window is SPY_ALIGN_TURN_WINDOW_MIN = 3.5.
 3.5 minutes is 210 seconds. The reference close is the linear interpolate
@@ -263,9 +263,9 @@ PRIMARY_WEIGHTS = {
     "BASKET_RANK": 0,
     "BASKET_REL": 0,
     "BASKET_LEADER_RANK": 0,
-    # Sector divergence. Flat weights stay 0. A _PUT key, when present, is the
-    # put weight; omitting it uses the call weight. Tiers live in DIVERGENCE_TIERS.
-    "DIV_ETF_WRONG_SIDE_10": 0,
+    # Calls pay 40. The _PUT key is set to 0 so puts do not inherit 40.
+    # The other two flags stay 0 on both sides. Tiers live in DIVERGENCE_TIERS.
+    "DIV_ETF_WRONG_SIDE_10": 40,
     "DIV_ETF_WRONG_SIDE_10_PUT": 0,
     "DIV_STOCK_ORB_ETF_NOT": 0,
     "DIV_STOCK_ORB_ETF_NOT_PUT": 0,
@@ -318,12 +318,12 @@ def _cutoff(post: float) -> dict:
     }
 
 
-# Lines re-matched to the spread and option-volume penalty rows.
+# Post lines: aggressive 90, balanced 102, conservative 120.
 # Do not put these profiles in the JSON book.
 PROFILES = {
-    "volume_trend_aggressive": _cutoff(89),
-    "volume_trend_balanced": _cutoff(100),
-    "volume_trend_conservative": _cutoff(117),
+    "volume_trend_aggressive": _cutoff(90),
+    "volume_trend_balanced": _cutoff(102),
+    "volume_trend_conservative": _cutoff(120),
 }
 
 # Fitted points that reversed on held-out days. The live weight above is 0.

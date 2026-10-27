@@ -42,9 +42,9 @@ def _flat_tod(level=100.0):
 
 class ProfileTests(unittest.TestCase):
     def test_lines_and_live_book_stay_put(self):
-        self.assertEqual(volume_trend_lines("volume_trend")["post_threshold"], 100)
-        self.assertEqual(volume_trend_lines("volume_trend_aggressive")["post_threshold"], 89)
-        self.assertEqual(volume_trend_lines("volume_trend_conservative")["post_threshold"], 117)
+        self.assertEqual(volume_trend_lines("volume_trend")["post_threshold"], 102)
+        self.assertEqual(volume_trend_lines("volume_trend_aggressive")["post_threshold"], 90)
+        self.assertEqual(volume_trend_lines("volume_trend_conservative")["post_threshold"], 120)
         self.assertEqual(active_profile(load_weights(), "balanced")["post_threshold"], 84)
         self.assertEqual(active_profile(load_weights(), "conservative")["post_threshold"], 92)
         book = load_weights()
@@ -718,10 +718,13 @@ class DivergenceTests(unittest.TestCase):
         self.assertEqual(book["profiles"]["balanced"]["post_threshold"], 84)
         for name in DIVERGENCE_FLAGS:
             self.assertNotIn(name, book["weights"])
-            self.assertEqual(PRIMARY_WEIGHTS[name], 0)
             self.assertEqual(PRIMARY_WEIGHTS[f"{name}_PUT"], 0)
+        self.assertEqual(PRIMARY_WEIGHTS["DIV_ETF_WRONG_SIDE_10"], 40)
+        self.assertEqual(PRIMARY_WEIGHTS["DIV_STOCK_ORB_ETF_NOT"], 0)
+        self.assertEqual(PRIMARY_WEIGHTS["DIV_ETF_OR30_AGAINST"], 0)
+        self.assertEqual(VOLUME_TREND_RULES["DIVERGENCE_TIERS"], {})
         over = overlay_book(book, "volume_trend_balanced")
-        self.assertEqual(over["weights"]["DIV_ETF_WRONG_SIDE_10"]["call"], 0)
+        self.assertEqual(over["weights"]["DIV_ETF_WRONG_SIDE_10"]["call"], 40)
         self.assertEqual(over["weights"]["DIV_ETF_WRONG_SIDE_10"]["put"], 0)
         self.assertNotIn("DIV_ETF_WRONG_SIDE_10_PUT", over["weights"])
         self.assertNotIn("DIV_ETF_WRONG_SIDE_10", book["weights"])
@@ -743,10 +746,25 @@ class DivergenceTests(unittest.TestCase):
             {**base, **{name: 1.0 for name in DIVERGENCE_FLAGS}},
             "CALL", book, "primary", "volume_trend_balanced",
         )
-        self.assertEqual(quiet[1], loud[1])
-        self.assertEqual(quiet[2], loud[2])
-        for name in DIVERGENCE_FLAGS:
-            self.assertEqual(loud[0][name], 0)
+        self.assertEqual(loud[1], quiet[1] + 40)
+        self.assertEqual(loud[0]["DIV_ETF_WRONG_SIDE_10"], 40)
+        self.assertEqual(loud[0]["DIV_STOCK_ORB_ETF_NOT"], 0)
+        self.assertEqual(loud[0]["DIV_ETF_OR30_AGAINST"], 0)
+
+    def test_wrong_side_pays_calls_and_not_puts(self):
+        book = load_weights()
+        flags = {"DIV_ETF_WRONG_SIDE_10": 1.0}
+        call_points, call_score, _, _ = score_volume_trend(
+            flags, "CALL", book, "primary", "volume_trend_balanced")
+        put_points, put_score, _, _ = score_volume_trend(
+            flags, "PUT", book, "primary", "volume_trend_balanced")
+        bare_call = score_volume_trend({}, "CALL", book, "primary", "volume_trend_balanced")
+        bare_put = score_volume_trend({}, "PUT", book, "primary", "volume_trend_balanced")
+        self.assertEqual(call_points["DIV_ETF_WRONG_SIDE_10"], 40)
+        self.assertEqual(put_points["DIV_ETF_WRONG_SIDE_10"], 0)
+        self.assertEqual(call_score, bare_call[1] + 40)
+        self.assertEqual(put_score, bare_put[1])
+        self.assertEqual(book["profiles"]["balanced"]["post_threshold"], 84)
 
 
 if __name__ == "__main__":
