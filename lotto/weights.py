@@ -94,7 +94,7 @@ def active_profile(book: dict | None = None, name: str | None = None) -> dict:
     if canonical not in profiles:
         LOG.warning(
             "Unknown LOTTO_PROFILE %r; using conservative. "
-            "Expected aggressive, middle, or conservative.",
+            "Expected aggressive, middle, balanced, or conservative.",
             requested,
         )
         requested = "conservative"

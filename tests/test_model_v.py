@@ -1762,8 +1762,9 @@ class ReviewFixTests(unittest.TestCase):
 
     def test_profile_selection_and_an_uncapped_post_line(self):
         book = load_weights()
-        self.assertEqual(set(book["profiles"]), {"aggressive", "middle", "conservative"})
-        self.assertEqual(active_profile(book, "loose")["post_threshold"], 74)
+        self.assertEqual(set(book["profiles"]), {"aggressive", "middle", "balanced", "conservative"})
+        self.assertEqual(active_profile(book, "loose")["post_threshold"], 70)
+        self.assertEqual(active_profile(book, "balanced")["post_threshold"], 84)
         self.assertEqual(active_profile(book, "moderate")["min_positive_features"], 0)
         self.assertEqual(active_profile(book, "moderate")["strong_feature_min"], 10)
         conservative = active_profile(book, "conservative")
@@ -1794,7 +1795,12 @@ class ReviewFixTests(unittest.TestCase):
             loose = env_settings()
             self.assertEqual(loose.profile, "loose")
             self.assertEqual((loose.post_threshold, loose.bypass_threshold, loose.min_positive_features),
-                             (74, 40, 0))
+                             (70, 40, 0))
+            os.environ["LOTTO_PROFILE"] = "balanced"
+            balanced = env_settings()
+            self.assertEqual(balanced.profile, "balanced")
+            self.assertEqual((balanced.post_threshold, balanced.bypass_threshold, balanced.min_positive_features),
+                             (84, 40, 0))
             os.environ["LOTTO_PROFILE"] = "conservative"
             strict = env_settings()
             self.assertEqual(strict.profile, "conservative")
@@ -2101,8 +2107,9 @@ class ReviewFixTests(unittest.TestCase):
         }.items():
             self.assertEqual(book["weights"][name], {"call": weight, "put": weight})
         for name, line in {
-            "aggressive": (74, 40, 0, 10),
-            "middle": (83, 40, 0, 10),
+            "aggressive": (70, 40, 0, 10),
+            "middle": (77, 40, 0, 10),
+            "balanced": (84, 40, 0, 10),
             "conservative": (92, 40, 0, 10),
         }.items():
             row = book["profiles"][name]
@@ -2127,10 +2134,11 @@ class ReviewFixTests(unittest.TestCase):
     def test_named_profiles_and_aliases_resolve_their_lines(self):
         book = load_weights()
         lines = {
-            "aggressive": (74, 40, 0, 10),
-            "middle": (83, 40, 0, 10),
+            "aggressive": (70, 40, 0, 10),
+            "middle": (77, 40, 0, 10),
+            "balanced": (84, 40, 0, 10),
             "conservative": (92, 40, 0, 10),
-            "loose": (74, 40, 0, 10),
+            "loose": (70, 40, 0, 10),
             "moderate": (92, 40, 0, 10),
         }
         for name, line in lines.items():
@@ -2311,7 +2319,7 @@ class SpreadBandTests(unittest.TestCase):
         def high_score(features, side, book=None, path="primary"):
             return {"flow200": 120.0}, 120.0, 4
 
-        for post in (74, 83, 92):
+        for post in (70, 77, 84, 92):
             snap = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (wide,), prior_atr=50, source="replay")
             with patch("lotto.confluence.additive_features", boosted), \
                     patch("lotto.weights.score_path", high_score), \
