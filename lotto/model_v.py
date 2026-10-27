@@ -535,19 +535,51 @@ def _inside_strike_window(option: Option, snap: Snapshot, settings: Settings) ->
     return abs(option.strike - spot) / spot <= settings.strike_window_pct + 1e-12
 
 
-def meets_bar(parts, band, settings: Settings | None = None) -> bool:
-    """True when the stock clears the bar for this spread band. Band 0 has none."""
+def _optb_tolerance(settings: Settings | None) -> float:
+    if settings is None or not settings.optb or settings.spread_legacy:
+        return 0.0
+    return float(settings.stock_bar_tolerance)
+
+
+def _component_state(value: float, need: float, tolerance: float) -> str:
+    if value >= need:
+        return "full"
+    if tolerance > 0 and value >= need * (1.0 - tolerance):
+        return "near"
+    return "miss"
+
+
+def _bar_pair(rvol: float, push: float, need_rvol: float, need_push: float,
+              setups: int, need_setups: int, tolerance: float) -> tuple[bool, str | None]:
+    """One of RVOL or push may sit inside the tolerance. Setups stay exact."""
+    if setups < int(need_setups):
+        return False, None
+    rvol_state = _component_state(rvol, float(need_rvol), tolerance)
+    push_state = _component_state(push, float(need_push), tolerance)
+    if rvol_state == "miss" or push_state == "miss":
+        return False, None
+    if rvol_state == "near" and push_state == "near":
+        return False, None
+    if rvol_state == "near":
+        return True, "rvol"
+    if push_state == "near":
+        return True, "push"
+    return True, None
+
+
+def stock_bar_status(parts, band, settings: Settings | None = None) -> tuple[bool, str | None]:
+    """Whether the spread band's bar is met, and which term used the tolerance."""
     if band is None:
-        return False
+        return False, None
     if int(band) <= 0:
-        return True
+        return True, None
     if settings is None:
         from .config import model_v_settings
         settings = model_v_settings()
     bars = tuple(settings.spread_stock_bars)
     index = int(band) - 2
     if index < 0 or index >= len(bars):
-        return False
+        return False, None
     need_rvol, need_push, need_setups = bars[index]
     parts = parts or {}
     try:
@@ -555,10 +587,46 @@ def meets_bar(parts, band, settings: Settings | None = None) -> bool:
         push = float(parts.get("push"))
         setups = int(parts.get("setups"))
     except (TypeError, ValueError):
-        return False
+        return False, None
     if not isfinite(rvol) or not isfinite(push):
-        return False
-    return rvol >= float(need_rvol) and push >= float(need_push) and setups >= int(need_setups)
+        return False, None
+    return _bar_pair(
+        rvol, push, need_rvol, need_push, setups, int(need_setups), _optb_tolerance(settings),
+    )
+
+
+def fallback_bar_status(parts, settings: Settings) -> tuple[bool, str | None]:
+    """The bypass stock bar: RVOL >= fb_rvol_min and push30 >= fb_push_atr_min.
+
+    That is the strong-stock check the stock path already uses. The normal
+    spread band has no bar of its own, so option-volume relief uses this one.
+    """
+    parts = parts or {}
+    try:
+        rvol = float(parts.get("rvol"))
+        push = float(parts.get("push"))
+    except (TypeError, ValueError):
+        return False, None
+    if not isfinite(rvol) or not isfinite(push):
+        return False, None
+    return _bar_pair(
+        rvol, push, settings.fb_rvol_min, settings.fb_push_atr_min,
+        0, 0, _optb_tolerance(settings),
+    )
+
+
+def optb_volume_waived(parts, band, settings: Settings) -> tuple[bool, str | None]:
+    """True when OPTB lets the stock carry a thin option print."""
+    if not settings.optb or settings.spread_legacy or band is None:
+        return False, None
+    if int(band) <= 0:
+        return fallback_bar_status(parts, settings)
+    return stock_bar_status(parts, band, settings)
+
+
+def meets_bar(parts, band, settings: Settings | None = None) -> bool:
+    """True when the stock clears the bar for this spread band. Band 0 has none."""
+    return stock_bar_status(parts, band, settings)[0]
 
 
 def strong_stock_parts(snap: Snapshot, side: str, settings: Settings, history=None,
@@ -644,6 +712,7 @@ def _quote_passes(option: Option, snap: Snapshot, settings: Settings, history=No
         return False
     from .confluence import option_volume_passes, spread_band, spread_fraction
     fraction = spread_fraction(option)
+    waive = False
     if settings.spread_legacy:
         if fraction is None or not isfinite(fraction) or fraction > settings.blocker_spread_legacy:
             return False
@@ -651,8 +720,9 @@ def _quote_passes(option: Option, snap: Snapshot, settings: Settings, history=No
         band = spread_band(fraction, settings)
         if band is None or (band > 0 and not meets_bar(parts, band, settings)):
             return False
+        waive = optb_volume_waived(parts, band, settings)[0]
     volume = option_volume_5m(option, history, snap)
-    return option_volume_passes(volume, option.volume, settings)
+    return waive or option_volume_passes(volume, option.volume, settings)
 
 
 def choose_fallback_contract(snap: Snapshot, side: str, settings: Settings | None = None,
@@ -885,6 +955,8 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     _log_stock_bar(
         snap, probe, gate.get("spread_band"), parts, stock_path=True,
         unmet=unmet, bar_met=int(gate.get("stock_bar_met") or 0),
+        waived=int(gate.get("optb_volume_waived") or 0),
+        tolerance=gate.get("bar_tolerance_used"),
     )
     # RVOL, push, and room are points. The bypass posts when those points clear
     # the bypass line and the contract that would post passes the blockers.
@@ -957,6 +1029,8 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
         "stock_rvol": parts.get("rvol"),
         "stock_push": parts.get("push"),
         "stock_setups": parts.get("setups"),
+        "optb_volume_waived": int(gate.get("optb_volume_waived") or 0),
+        "bar_tolerance_used": gate.get("bar_tolerance_used"),
         "base": gate["base"], "blockers": gate["blockers"], "overrides": gate["overrides"],
         "run_high": run_high, "run_low": run_low, "bars_since_last_fire": bars_since, "prev_fire_ts": prev_ts,
         "skip_flag": bool(skip_flag), "skip_ref_card_id": skip_id, "skip_ref_ts": skip_ts,

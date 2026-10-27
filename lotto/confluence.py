@@ -200,7 +200,7 @@ def card_gate(side, volume, spread, settings: Settings, bid=None, option_volume_
     spread_legacy restores the hard cap and the 5-minute-only volume rule.
     A bid at the floor blocks. Exactly the volume floor passes.
     """
-    from .model_v import meets_bar
+    from .model_v import optb_volume_waived, stock_bar_status
     base = {
         "direction": int(side in {"CALL", "PUT"}),
         "volume": int(volume is not None and volume >= settings.base_volume_min),
@@ -209,6 +209,8 @@ def card_gate(side, volume, spread, settings: Settings, bid=None, option_volume_
     blockers = []
     band = None
     bar_met = 0
+    waived = 0
+    tolerance_used = None
     if settings.spread_legacy:
         cap = settings.blocker_spread_legacy
         if spread is None or not isinstance(spread, (int, float)) or not isfinite(spread) or spread > cap:
@@ -219,13 +221,19 @@ def card_gate(side, volume, spread, settings: Settings, bid=None, option_volume_
             blockers.append("wide_spread")
         elif band <= 0:
             bar_met = 1
+            carried, tolerance_used = optb_volume_waived(parts, band, settings)
+            waived = int(carried)
         else:
-            bar_met = 1 if meets_bar(parts, band, settings) else 0
-            if not bar_met:
+            met, tolerance_used = stock_bar_status(parts, band, settings)
+            bar_met = int(met)
+            if not met:
                 blockers.append("wide_spread")
+                tolerance_used = None
+            elif settings.optb:
+                waived = 1
     if bid is None or not isinstance(bid, (int, float)) or not isfinite(bid) or bid <= settings.blocker_bid:
         blockers.append("low_bid")
-    if not option_volume_passes(option_volume_5m, option_volume_day, settings):
+    if not waived and not option_volume_passes(option_volume_5m, option_volume_day, settings):
         blockers.append("option_volume")
     blocked_by = list(missing) + blockers
     return {
@@ -236,6 +244,8 @@ def card_gate(side, volume, spread, settings: Settings, bid=None, option_volume_
         "post_ok": not blocked_by,
         "spread_band": band,
         "stock_bar_met": bar_met,
+        "optb_volume_waived": waived,
+        "bar_tolerance_used": tolerance_used,
     }
 
 
@@ -1399,16 +1409,16 @@ def _log_ace_flags(snap, option, features) -> None:
 
 
 def _log_stock_bar(snap, option, band, parts, stock_path: bool, unmet: bool = False,
-                   bar_met: int = 0) -> None:
+                   bar_met: int = 0, waived: int = 0, tolerance=None) -> None:
     """RVOL, push, and the live setup count when the band or the stock path is used."""
-    if not stock_path and (band or 0) < 1 and not unmet:
+    if not stock_path and (band or 0) < 1 and not unmet and not waived and not tolerance:
         return
     parts = parts or {}
     rvol = parts.get("rvol")
     push = parts.get("push")
     LOG.info(
         "spread_band=%s stock_bar_met=%s wide_spread_bar_unmet=%s rvol=%s push=%s setups=%s "
-        "stock_path=%s symbol=%s contract=%s",
+        "stock_path=%s optb_volume_waived=%s bar_tolerance_used=%s symbol=%s contract=%s",
         band,
         int(bar_met),
         int(bool(unmet)),
@@ -1416,6 +1426,8 @@ def _log_stock_bar(snap, option, band, parts, stock_path: bool, unmet: bool = Fa
         "none" if push is None else f"{float(push):.4f}",
         parts.get("setups"),
         int(bool(stock_path)),
+        int(waived),
+        tolerance or "none",
         getattr(snap, "symbol", ""),
         getattr(option, "symbol", ""),
     )
@@ -1496,6 +1508,8 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
         stock_path=rolled or option is not own_option,
         unmet=unmet,
         bar_met=int(gate.get("stock_bar_met") or 0),
+        waived=int(gate.get("optb_volume_waived") or 0),
+        tolerance=gate.get("bar_tolerance_used"),
     )
     _log_ace_flags(snap, option, features)
     book = load_weights(settings.weights_path)
@@ -1530,6 +1544,8 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     metrics["spread_band"] = gate.get("spread_band")
     metrics["stock_bar_met"] = int(gate.get("stock_bar_met") or 0)
     metrics["wide_spread_bar_unmet"] = int(unmet)
+    metrics["optb_volume_waived"] = int(gate.get("optb_volume_waived") or 0)
+    metrics["bar_tolerance_used"] = gate.get("bar_tolerance_used")
     metrics["stock_rvol"] = parts.get("rvol")
     metrics["stock_push"] = parts.get("push")
     metrics["stock_setups"] = parts.get("setups")
