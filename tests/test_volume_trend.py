@@ -4,10 +4,12 @@ import unittest
 
 from lotto.models import ET, Bar, Option
 from lotto.volume_trend import (
-    DEEP_SLOTS, EXTRA_UNIVERSE, EXTRA_UNIVERSE_MAX, NO_SECTOR_ETF, PAID_MARKET_DATA_PER_MINUTE,
+    DEEP_SLOTS, DIVERGENCE_FLAGS, EXTRA_UNIVERSE, EXTRA_UNIVERSE_MAX, NO_SECTOR_ETF,
+    PAID_MARKET_DATA_PER_MINUTE,
     PRIMARY_WEIGHTS, PROFILES, SECTOR_BASKETS, VOL_ALIASES, VOLUME_TREND_RULES,
     alias_rows, alignment_features, baskets_for, call_budget, candidate_etfs, choose_sector_etf,
-    ensure_etf_typicals, etf_for, etf_multiplier, etf_typical_score, etf_typical_table,
+    _divergence_tier_points, divergence_sector, divergence_weight_spec, ensure_etf_typicals,
+    etf_for, etf_multiplier, etf_typical_score, etf_typical_table,
     evaluate_stacks, is_volume_trend,
     overlay_book, penalty_opt_vol_points, penalty_spread_points, poll_cycle_calls, rally_breadth,
     rally_points, reference_close, score_volume_trend, sector_feature_choice, sector_map_names,
@@ -621,6 +623,130 @@ class ParityTests(unittest.TestCase):
         self.assertEqual(etf_for("WULF"), "XLK")
         for name in EXTRA_UNIVERSE:
             self.assertIsNotNone(etf_for(name), name)
+
+
+def _px(minute, open_, high, low, close):
+    end = datetime(2026, 6, 2, 9, 31, tzinfo=ET) + timedelta(minutes=minute)
+    return Bar(end, open_, high, low, close, 1000)
+
+
+def _flat(count, high, low, close, open_=100.0):
+    return [_px(i, open_ if i == 0 else close, high, low, close) for i in range(count)]
+
+
+class DivergenceTests(unittest.TestCase):
+    def test_flags_fire_and_mirror(self):
+        below = _flat(10, 99.5, 98.5, 99.0)
+        calls = divergence_sector(
+            symbol="AAPL", stock_bars=below, etf_bars=below, direction=1,
+            spy_pct=0.2, spy_above_vwap=1, card_time=below[-1].end,
+        )
+        self.assertEqual(calls["_div_etf"], "XLK")
+        self.assertEqual(calls["DIV_ETF_WRONG_SIDE_10"], 1.0)
+        short = divergence_sector(
+            symbol="AAPL", stock_bars=below[:9], etf_bars=below[:9], direction=1,
+            spy_pct=0.2, spy_above_vwap=1, card_time=below[8].end,
+        )
+        self.assertEqual(short["DIV_ETF_WRONG_SIDE_10"], 0.0)
+        dark = divergence_sector(
+            symbol="AAPL", stock_bars=below, etf_bars=below, direction=1,
+            spy_pct=-0.2, spy_above_vwap=-1, card_time=below[-1].end,
+        )
+        self.assertEqual(dark["DIV_ETF_WRONG_SIDE_10"], 0.0)
+
+        above = _flat(10, 101.5, 100.5, 101.0)
+        puts = divergence_sector(
+            symbol="AAPL", stock_bars=above, etf_bars=above, direction=-1,
+            spy_pct=-0.2, spy_above_vwap=-1, card_time=above[-1].end,
+        )
+        self.assertEqual(puts["DIV_ETF_WRONG_SIDE_10"], 1.0)
+        puts_off = divergence_sector(
+            symbol="AAPL", stock_bars=above, etf_bars=above, direction=-1,
+            spy_pct=0.2, spy_above_vwap=1, card_time=above[-1].end,
+        )
+        self.assertEqual(puts_off["DIV_ETF_WRONG_SIDE_10"], 0.0)
+
+        stock = _flat(15, 100.0, 99.0, 100.0) + [_px(15, 100.0, 101.0, 99.5, 100.8)]
+        etf = _flat(16, 100.0, 99.0, 100.0)
+        orb = divergence_sector(
+            symbol="NVDA", stock_bars=stock, etf_bars=etf, direction=1,
+            spy_pct=0.1, spy_above_vwap=1, card_time=stock[-1].end,
+        )
+        self.assertEqual(orb["DIV_STOCK_ORB_ETF_NOT"], 1.0)
+        both = divergence_sector(
+            symbol="NVDA", stock_bars=stock, etf_bars=stock, direction=1,
+            spy_pct=0.1, spy_above_vwap=1, card_time=stock[-1].end,
+        )
+        self.assertEqual(both["DIV_STOCK_ORB_ETF_NOT"], 0.0)
+        put_stock = _flat(15, 101.0, 100.0, 100.0) + [_px(15, 100.0, 100.5, 99.0, 99.2)]
+        put_etf = _flat(16, 101.0, 100.0, 100.0)
+        put_orb = divergence_sector(
+            symbol="NVDA", stock_bars=put_stock, etf_bars=put_etf, direction=-1,
+            spy_pct=-0.1, spy_above_vwap=-1, card_time=put_stock[-1].end,
+        )
+        self.assertEqual(put_orb["DIV_STOCK_ORB_ETF_NOT"], 1.0)
+
+        against = _flat(30, 101.0, 99.0, 100.0) + [_px(30, 100.0, 100.2, 98.0, 98.5)]
+        broke = divergence_sector(
+            symbol="AAPL", stock_bars=against, etf_bars=against, direction=1,
+            spy_pct=0.2, spy_above_vwap=1, card_time=against[-1].end,
+        )
+        self.assertEqual(broke["DIV_ETF_OR30_AGAINST"], 1.0)
+        held = divergence_sector(
+            symbol="AAPL", stock_bars=against, etf_bars=against, direction=1,
+            spy_pct=0.2, spy_above_vwap=1, card_time=against[29].end,
+        )
+        self.assertEqual(held["DIV_ETF_OR30_AGAINST"], 0.0)
+        put_against = _flat(30, 101.0, 99.0, 100.0) + [_px(30, 100.0, 102.0, 99.8, 101.5)]
+        put_broke = divergence_sector(
+            symbol="AAPL", stock_bars=put_against, etf_bars=put_against, direction=-1,
+            spy_pct=-0.2, spy_above_vwap=-1, card_time=put_against[-1].end,
+        )
+        self.assertEqual(put_broke["DIV_ETF_OR30_AGAINST"], 1.0)
+
+    def test_no_sector_etf_is_false_and_weight_zero_keeps_the_score(self):
+        bars = _flat(12, 99.5, 98.5, 99.0)
+        for symbol in ("QQQ", "SPY", "IWM", "SPX"):
+            flags = divergence_sector(
+                symbol=symbol, stock_bars=bars, etf_bars=bars, direction=1,
+                spy_pct=0.2, spy_above_vwap=1, card_time=bars[-1].end,
+            )
+            self.assertEqual(flags["_div_etf"], "")
+            for name in DIVERGENCE_FLAGS:
+                self.assertFalse(flags[name])
+        book = load_weights()
+        self.assertEqual(book["profiles"]["balanced"]["post_threshold"], 84)
+        for name in DIVERGENCE_FLAGS:
+            self.assertNotIn(name, book["weights"])
+            self.assertEqual(PRIMARY_WEIGHTS[name], 0)
+            self.assertEqual(PRIMARY_WEIGHTS[f"{name}_PUT"], 0)
+        over = overlay_book(book, "volume_trend_balanced")
+        self.assertEqual(over["weights"]["DIV_ETF_WRONG_SIDE_10"]["call"], 0)
+        self.assertEqual(over["weights"]["DIV_ETF_WRONG_SIDE_10"]["put"], 0)
+        self.assertNotIn("DIV_ETF_WRONG_SIDE_10_PUT", over["weights"])
+        self.assertNotIn("DIV_ETF_WRONG_SIDE_10", book["weights"])
+        self.assertEqual(
+            divergence_weight_spec("DIV_ETF_WRONG_SIDE_10", {"DIV_ETF_WRONG_SIDE_10": 4}),
+            {"call": 4.0, "put": 4.0},
+        )
+        self.assertEqual(
+            divergence_weight_spec(
+                "DIV_ETF_WRONG_SIDE_10",
+                {"DIV_ETF_WRONG_SIDE_10": 4, "DIV_ETF_WRONG_SIDE_10_PUT": 1},
+            ),
+            {"call": 4.0, "put": 1.0},
+        )
+        self.assertIsNone(_divergence_tier_points("DIV_ETF_WRONG_SIDE_10", {"DIV_ETF_WRONG_SIDE_10": 1}))
+        base = {"SPY_ALIGN_TURN_3M": 1.0, "SECTOR_ETF_PCT_TS": 1.0}
+        quiet = score_volume_trend(base, "CALL", book, "primary", "volume_trend_balanced")
+        loud = score_volume_trend(
+            {**base, **{name: 1.0 for name in DIVERGENCE_FLAGS}},
+            "CALL", book, "primary", "volume_trend_balanced",
+        )
+        self.assertEqual(quiet[1], loud[1])
+        self.assertEqual(quiet[2], loud[2])
+        for name in DIVERGENCE_FLAGS:
+            self.assertEqual(loud[0][name], 0)
 
 
 if __name__ == "__main__":

@@ -163,6 +163,10 @@ VOLUME_TREND_RULES = {
     },
     "SECTOR_ETF_WEIGHT_LOW_NAMES": ("XLI", "XLU", "XLB", "XLP", "XLRE"),
     "BASKET_LEADER_TOPN": 3,
+    # Empty until a tier list is dropped in. A tier replaces that flag's flat weight.
+    "DIVERGENCE_TIERS": {},
+    "DIV_WRONG_SIDE_MINUTES": 10,
+    "DIV_OR_WINDOWS": (15, 30),
     "rf_min_minutes": 5,
     "rf_vol_ratio": 1.3,
     "rf_prior_bars": 5,
@@ -259,6 +263,14 @@ PRIMARY_WEIGHTS = {
     "BASKET_RANK": 0,
     "BASKET_REL": 0,
     "BASKET_LEADER_RANK": 0,
+    # Sector divergence. Flat weights stay 0. A _PUT key, when present, is the
+    # put weight; omitting it uses the call weight. Tiers live in DIVERGENCE_TIERS.
+    "DIV_ETF_WRONG_SIDE_10": 0,
+    "DIV_ETF_WRONG_SIDE_10_PUT": 0,
+    "DIV_STOCK_ORB_ETF_NOT": 0,
+    "DIV_STOCK_ORB_ETF_NOT_PUT": 0,
+    "DIV_ETF_OR30_AGAINST": 0,
+    "DIV_ETF_OR30_AGAINST_PUT": 0,
     "SPY_ALIGN_OPEN": 1,
     "SPY_ALIGN_TURN_3M": 15,
     "SPY_ALIGN_TURN_5M": 0,
@@ -441,6 +453,28 @@ def _spec(points: float) -> dict:
     return {"call": points, "put": points}
 
 
+DIVERGENCE_FLAGS = (
+    "DIV_ETF_WRONG_SIDE_10",
+    "DIV_STOCK_ORB_ETF_NOT",
+    "DIV_ETF_OR30_AGAINST",
+)
+
+
+def divergence_weight_spec(key: str, primary: dict) -> dict:
+    """Call weight, and the put weight. A missing KEY_PUT uses the call weight."""
+    call = float((primary or {}).get(key) or 0)
+    put_key = f"{key}_PUT"
+    if put_key in (primary or {}):
+        put = float(primary[put_key])
+    else:
+        put = call
+    return {"call": call, "put": put}
+
+
+def _put_override_key(key: str) -> bool:
+    return key.endswith("_PUT") and key[:-4] in DIVERGENCE_FLAGS
+
+
 def overlay_book(book: dict, name: str = "volume_trend_balanced") -> dict:
     """Copy of the v4c book with this profile's numbers. Does not mutate the cache."""
     block = PROFILES.get(canonical_profile(name)) or PROFILES["volume_trend_balanced"]
@@ -449,10 +483,15 @@ def overlay_book(book: dict, name: str = "volume_trend_balanced") -> dict:
     penalties = book.setdefault("penalties", {})
     bypass = book.setdefault("bypass_weights", {})
     for key, points in block["primary"].items():
+        if _put_override_key(key):
+            continue
         target = penalties if points < 0 else weights
         other = weights if target is penalties else penalties
         other.pop(key, None)
-        target[key] = _spec(points)
+        if key in DIVERGENCE_FLAGS:
+            target[key] = divergence_weight_spec(key, block["primary"])
+        else:
+            target[key] = _spec(points)
     for key, points in block["bypass"].items():
         bypass[key] = _spec(points)
     for spec in weights.values():
@@ -571,6 +610,7 @@ def score_volume_trend(features: dict, side: str, book: dict, path: str = "prima
             score += stack_points
             positive += 1
         score, positive = _scale_sector_points(points, score, positive, raw_features)
+        score, positive = _apply_divergence_tiers(points, score, positive, raw_features)
     score = _apply_penalties(points, score, raw_features, parts=parts, settings=settings)
     return points, score, positive, fired
 
@@ -1197,6 +1237,174 @@ def _spy_open(direction, spy_pct, above_vwap) -> float:
     return 1.0 if spy_pct < 0 and above < 0 else 0.0
 
 
+def _bars_through(bars, card_time):
+    """Completed bars whose end is at or before the card. Later bars are ignored."""
+    rows = []
+    for bar in bars or []:
+        end = getattr(bar, "end", None)
+        if card_time is not None and end is not None and end > card_time:
+            continue
+        rows.append(bar)
+    return rows
+
+
+def _session_open(bars):
+    """Open of the 9:30 bar. None when that bar is not in the list."""
+    for bar in bars or []:
+        if _minute_index(bar) == 0:
+            opened = _finite(getattr(bar, "open", None))
+            if opened is not None and opened > 0:
+                return opened
+    return None
+
+
+def _wrong_side_minutes(bars, direction: int) -> int:
+    """Consecutive minutes ending now on the wrong side of the session open.
+
+    Calls: close below the open. Puts: close above the open. A missing minute
+    ends the streak. The count is 0 when the session open bar is absent.
+    """
+    rows = [bar for bar in bars or [] if _minute_index(bar) is not None]
+    opened = _session_open(rows)
+    if opened is None or not rows:
+        return 0
+    streak = 0
+    previous = None
+    for bar in reversed(rows):
+        minute = _minute_index(bar)
+        if previous is not None and minute != previous - 1:
+            break
+        close = _finite(getattr(bar, "close", None))
+        if close is None:
+            break
+        wrong = close < opened if direction == 1 else close > opened
+        if not wrong:
+            break
+        streak += 1
+        previous = minute
+    return streak
+
+
+def _or_window(bars, minutes: int):
+    """The first `minutes` session bars, or None when that window is incomplete."""
+    window = []
+    for bar in bars or []:
+        minute = _minute_index(bar)
+        if minute is None or minute >= minutes:
+            continue
+        window.append(bar)
+    if len(window) < minutes:
+        return None
+    return window
+
+
+def _broke_or(bars, minutes: int, direction: int) -> bool:
+    """A later bar traded through the opening-range high (calls) or low (puts)."""
+    window = _or_window(bars, minutes)
+    if not window:
+        return False
+    if direction == 1:
+        extreme = max(bar.high for bar in window)
+        return any(
+            _minute_index(bar) is not None and _minute_index(bar) >= minutes and bar.high > extreme
+            for bar in bars
+        )
+    extreme = min(bar.low for bar in window)
+    return any(
+        _minute_index(bar) is not None and _minute_index(bar) >= minutes and bar.low < extreme
+        for bar in bars
+    )
+
+
+def _etf_bars_for(snap, etf: str):
+    """Minute bars already on the snap for this primary ETF. No new request."""
+    if not etf:
+        return ()
+    table = getattr(snap, "vt_etf_bars", None) or {}
+    if isinstance(table, dict) and etf in table:
+        return table[etf] or ()
+    return ()
+
+
+def divergence_sector(*, symbol: str, stock_bars, etf_bars, direction: int,
+                      spy_pct, spy_above_vwap, card_time=None, rules=None) -> dict:
+    """DIVERGENCE_SECTOR flags. The ETF is choose_sector_etf's primary.
+
+    QQQ, SPY, IWM, and SPX have no sector ETF, so every flag is 0. Each flag
+    also requires SPY_ALIGN_OPEN (SPY on the card's side of its open and of
+    VWAP). Puts mirror. Bars after card_time are not read.
+    """
+    rules = rules or VOLUME_TREND_RULES
+    flags = {name: 0.0 for name in DIVERGENCE_FLAGS}
+    etf = etf_for(symbol)
+    flags["_div_etf"] = etf or ""
+    flags["_div_wrong_side_minutes"] = 0.0
+    if not etf:
+        return flags
+    direction = 1 if int(direction) >= 0 else -1
+    stock = _bars_through(stock_bars, card_time)
+    sector = _bars_through(etf_bars, card_time)
+    flags["_div_wrong_side_minutes"] = float(_wrong_side_minutes(sector, direction))
+    if _spy_open(direction, _finite(spy_pct), spy_above_vwap) < 1:
+        return flags
+    need = int(rules.get("DIV_WRONG_SIDE_MINUTES") or 10)
+    if flags["_div_wrong_side_minutes"] >= need:
+        flags["DIV_ETF_WRONG_SIDE_10"] = 1.0
+    windows = tuple(rules.get("DIV_OR_WINDOWS") or (15, 30))
+    for window in windows:
+        # Both ranges have to be visible. A missing ETF window is not a break.
+        if _or_window(stock, int(window)) is None or _or_window(sector, int(window)) is None:
+            continue
+        if _broke_or(stock, int(window), direction) and not _broke_or(sector, int(window), direction):
+            flags["DIV_STOCK_ORB_ETF_NOT"] = 1.0
+            break
+    against = -direction
+    if _broke_or(sector, 30, against):
+        flags["DIV_ETF_OR30_AGAINST"] = 1.0
+    return flags
+
+
+def _divergence_tier_points(flag: str, features: dict, rules=None):
+    """Points from DIVERGENCE_TIERS, or None when that flag has no tiers."""
+    rules = rules or VOLUME_TREND_RULES
+    tiers = (rules.get("DIVERGENCE_TIERS") or {}).get(flag) or ()
+    if not tiers:
+        return None
+    for tier in tiers:
+        feature = tier.get("feature") or flag
+        value = _finite((features or {}).get(feature))
+        if value is None:
+            continue
+        lo = tier.get("lo")
+        hi = tier.get("hi")
+        if lo is not None and value < float(lo):
+            continue
+        if hi is not None and value >= float(hi):
+            continue
+        try:
+            points = float(tier.get("points") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return points if isfinite(points) else 0.0
+    return 0.0
+
+
+def _apply_divergence_tiers(points, score, positive, features, rules=None):
+    """A configured tier replaces the flat weight. An empty map changes nothing."""
+    for flag in DIVERGENCE_FLAGS:
+        tier = _divergence_tier_points(flag, features, rules)
+        if tier is None:
+            continue
+        previous = float(points.get(flag) or 0)
+        score += tier - previous
+        if previous > 0:
+            positive -= 1
+        if tier > 0:
+            positive += 1
+        points[flag] = tier
+    return score, positive
+
+
 def _bar_end_close(bars):
     rows = []
     if not bars:
@@ -1780,6 +1988,28 @@ def enrich_features(features: dict, snap, settings, prior=None, spy_bars=None) -
     if etf_pct is None and str(getattr(snap, "symbol", "")).upper() not in NO_SECTOR_ETF:
         etf_pct = _finite(getattr(snap, "vt_etf_pct", None))
     features["RS_SECTOR"] = 1.0 if stock_pct is not None and etf_pct is not None and direction * (stock_pct - etf_pct) > 0 else 0.0
+    primary_etf = etf_for(getattr(snap, "symbol", ""))
+    divergence = divergence_sector(
+        symbol=getattr(snap, "symbol", ""),
+        stock_bars=bars,
+        etf_bars=_etf_bars_for(snap, primary_etf),
+        direction=direction,
+        spy_pct=spy_pct,
+        spy_above_vwap=_above,
+        card_time=getattr(snap, "at", None),
+        rules=rules,
+    )
+    features.update(divergence)
+    LOG.debug(
+        "DIVERGENCE_SECTOR symbol=%s etf=%s side=%s DIV_ETF_WRONG_SIDE_10=%s "
+        "DIV_STOCK_ORB_ETF_NOT=%s DIV_ETF_OR30_AGAINST=%s",
+        getattr(snap, "symbol", ""),
+        divergence.get("_div_etf") or "",
+        side,
+        divergence["DIV_ETF_WRONG_SIDE_10"],
+        divergence["DIV_STOCK_ORB_ETF_NOT"],
+        divergence["DIV_ETF_OR30_AGAINST"],
+    )
     features["PUSH_VOL_B"] = push_vol_b(bars, direction, atr, chain, rules)
     features["RF_NEWHI_VOL"] = rf_newhi_vol(bars, side, prior, getattr(snap, "at", None), rules)
     from .vt_measure import measure_volume, option_rows
@@ -2564,3 +2794,13 @@ def attach_cycle_context(snap, client, symbol, day, minute, parsed, profile) -> 
     object.__setattr__(snap, "vt_etf_typical_by_etf", by_etf)
     primary = etf_for(symbol)
     object.__setattr__(snap, "vt_etf_typical", by_etf.get(primary) if primary else None)
+    cached = getattr(client, "bar_cache", None) if client is not None else None
+    packed = (cached or {}).get((primary, day)) if primary else None
+    if primary and isinstance(packed, dict) and not (getattr(snap, "vt_etf_bars", None) or {}).get(primary):
+        rows = tuple(
+            packed[key] for key in sorted(packed)
+            if getattr(packed[key], "end", None) is not None
+        )
+        held = dict(getattr(snap, "vt_etf_bars", None) or {})
+        held[primary] = rows
+        object.__setattr__(snap, "vt_etf_bars", held)

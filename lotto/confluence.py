@@ -1518,7 +1518,7 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     )
     _log_ace_flags(snap, option, features)
     book = load_weights(settings.weights_path)
-    from .volume_trend import is_volume_trend, prepare_features, score_volume_trend
+    from .volume_trend import DIVERGENCE_FLAGS, is_volume_trend, prepare_features, score_volume_trend
     if is_volume_trend(settings.profile):
         direction = 1 if option.side == "CALL" else -1
         features["opt_volume_5m"] = vol5
@@ -1567,6 +1567,11 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     metrics["s12_qualifying"] = int(bool(s12_ok))
     metrics["model_score"] = model_score
     metrics["card_score"] = card_score
+    if is_volume_trend(settings.profile):
+        metrics["divergence_sector"] = {
+            "etf": features.get("_div_etf") or "",
+            **{name: float(features.get(name) or 0) for name in DIVERGENCE_FLAGS},
+        }
     if stale:
         metrics["stale_quote"] = 1
         if "stale quote" not in candidate.reasons:
