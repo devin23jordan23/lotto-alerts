@@ -14,7 +14,7 @@ from lotto.volume_trend import (
     overlay_book, penalty_opt_vol_points, penalty_spread_points, poll_cycle_calls, rally_breadth,
     rally_points, reference_close, score_volume_trend, sector_feature_choice, sector_map_names,
     sector_quote_symbols,
-    select_extra_names, spy_turn, spy_window_return, stacks_from_rules, vol_bin_flags,
+    install_extra_universe, select_extra_names, spy_turn, spy_window_return, stacks_from_rules, vol_bin_flags,
     volume_trend_lines, volume_trend_symbols,
 )
 from lotto.vt_measure import (
@@ -480,6 +480,46 @@ class ExtraUniverseTests(unittest.TestCase):
         finally:
             if previous is not None:
                 os.environ["EXTRA_UNIVERSE_MAX"] = previous
+
+    def test_tuesday_premarket_probe_keeps_a_friday_weekly(self):
+        """8:55 AM ET Tuesday used to skip every extra name.
+
+        The probe calls the same option_chain as the live fetch. On
+        2026-10-27 that asked for expirations through 2026-10-28. F, DIS,
+        KO, VZ, OXY, and APP list the Friday weekly (2026-10-30), so the
+        chain came back empty and each name logged 'has no chain'.
+        """
+        from datetime import timezone
+
+        from lotto.discovery import Discovery
+        from lotto.schwab import Schwab
+
+        when = datetime(2026, 10, 27, 12, 55, tzinfo=timezone.utc)
+        client = Schwab.__new__(Schwab)
+        client.discovery = Discovery(60)
+        seen = []
+
+        def get(_path, params):
+            seen.append(dict(params))
+            if params.get("toDate", "") < "2026-10-30":
+                return {"callExpDateMap": {}, "putExpDateMap": {}}
+            return {"callExpDateMap": {"2026-10-30:3": {"45.0": [{
+                "symbol": "OXY   261030C00045000",
+                "strikePrice": 45, "bid": 0.4, "ask": 0.45, "totalVolume": 20,
+                "openInterest": 10, "delta": 0.35, "gamma": 0.08,
+                "quoteTimeInLong": int(when.timestamp() * 1000),
+            }]}}}
+
+        client.get = get
+        client.baseline = lambda _symbol, _now: {}
+        settings = model_v_settings(profile="volume_trend_balanced")
+        merged, loaded, _budget = install_extra_universe(["SPY"], client, settings, now=when)
+        self.assertEqual(seen[0]["fromDate"], "2026-10-27")
+        self.assertEqual(seen[0]["toDate"], "2026-10-30")
+        self.assertEqual(seen[0]["strikeCount"], 40)
+        self.assertIn("OXY", loaded)
+        self.assertIn("OXY", merged)
+        self.assertEqual(len(loaded), 20)
 
 
 class ParityTests(unittest.TestCase):

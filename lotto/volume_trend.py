@@ -2460,11 +2460,12 @@ def select_extra_names(existing, has_chain, n: int, ranked=None) -> list:
     return loaded
 
 
-def install_extra_universe(symbols, client, settings) -> tuple:
+def install_extra_universe(symbols, client, settings, now=None) -> tuple:
     """Add the ranked names that fit the budget and have a chain.
 
     Returns (symbols, loaded, budget). A chain miss is logged and skipped.
-    Deep capacity and the sweep cap stay where they are.
+    Deep capacity and the sweep cap stay where they are. `now` is the probe
+    clock; the live worker leaves it unset.
     """
     from datetime import datetime, timezone
 
@@ -2472,11 +2473,11 @@ def install_extra_universe(symbols, client, settings) -> tuple:
     LOG.info("Call budget %s", json.dumps(budget))
     strikes = VOLUME_TREND_RULES["strike_count"] if is_volume_trend(getattr(settings, "profile", "")) else 80
     max_dte = getattr(settings, "max_dte", 1)
+    clock = now or datetime.now(timezone.utc)
 
     def has_chain(name: str) -> bool:
-        now = datetime.now(timezone.utc)
         try:
-            data = client.option_chain(name, now, max_dte, strikes)
+            data = client.option_chain(name, clock, max_dte, strikes)
         except Exception as exc:
             LOG.warning("EXTRA_UNIVERSE %s chain check failed (%s); skipping", name, type(exc).__name__)
             return False
@@ -2487,7 +2488,7 @@ def install_extra_universe(symbols, client, settings) -> tuple:
             return False
         if not parsed:
             return False
-        _backfill_rvol(client, name, now)
+        _backfill_rvol(client, name, clock)
         return True
 
     loaded = select_extra_names(symbols, has_chain, budget["extra_names"])

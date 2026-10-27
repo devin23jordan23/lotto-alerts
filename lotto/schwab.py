@@ -53,6 +53,18 @@ def api_symbol(symbol):
     return "$SPX" if symbol == "SPX" else symbol
 
 
+def chain_to_date(day, max_dte: int):
+    """Last expiration the /chains request should include.
+
+    max_dte is how far out a card may trade, 0 or 1. Most names list only
+    the Friday weekly. Monday through Wednesday that Friday is past
+    today+max_dte, so the request comes back with no contracts.
+    """
+    end = day + timedelta(days=max(0, int(max_dte)))
+    friday = day + timedelta(days=(4 - day.weekday()) % 7)
+    return friday if friday > end else end
+
+
 def number(value):
     try:
         result = float(value)
@@ -520,10 +532,11 @@ class Schwab:
         return tuple(result)
 
     def option_chain(self, symbol, now, max_dte, strike_count=80):
+        day = now.astimezone(ET).date()
         params = {"symbol": api_symbol(symbol), "contractType": "ALL", "strategy": "SINGLE",
                   "includeUnderlyingQuote": "true", "strikeCount": int(strike_count),
-                  "fromDate": now.astimezone(ET).date().isoformat(),
-                  "toDate": (now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()}
+                  "fromDate": day.isoformat(),
+                  "toDate": chain_to_date(day, max_dte).isoformat()}
         data = self.get('/chains', params)
         options = self.parse_chain(data, allow_spx=symbol == 'SPX')
         def usable(o):
