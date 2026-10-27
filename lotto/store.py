@@ -86,6 +86,10 @@ class Store:
             CREATE INDEX IF NOT EXISTS stock_ideas_day ON stock_ideas(day,symbol,side,at);
             CREATE TABLE IF NOT EXISTS stock_decisions (
                 symbol TEXT, at TEXT, side TEXT, reason TEXT, metrics TEXT);
+            CREATE TABLE IF NOT EXISTS shadow_cards (
+                id TEXT PRIMARY KEY, profile TEXT NOT NULL, day TEXT, symbol TEXT,
+                side TEXT, contract TEXT, score REAL, breakdown TEXT, at TEXT);
+            CREATE INDEX IF NOT EXISTS shadow_cards_at ON shadow_cards(at);
         """)
         # Railway volumes retain older databases. Do not recast historical alerts
         # as active trades when the phase distinction did not exist yet.
@@ -343,6 +347,28 @@ class Store:
                 self.db.execute("UPDATE alerts SET quality_tier=?,quality_policy=? WHERE id=?",
                                 (tier or quality.tier,quality.policy_id,ident))
             self.db.execute("UPDATE quality_shadow SET alert_id=? WHERE candidate_id=?",(ident,ident))
+        return ident
+
+    def record_shadow_card(self, profile: str, candidate: Candidate, breakdown: dict, score: float) -> str:
+        """A card the shadow profile would have posted. Not an alert and not a Discord send."""
+        snap, option = candidate.snapshot, candidate.option
+        at = snap.at.isoformat()
+        ident = sha256(
+            f"shadow:{profile}:{snap.day}:{snap.symbol}:{option.symbol}:{at}".encode()
+        ).hexdigest()[:16]
+        with self.db:
+            self.db.execute(
+                """INSERT OR IGNORE INTO shadow_cards
+                   (id, profile, day, symbol, side, contract, score, breakdown, at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (ident, profile, snap.day, snap.symbol, option.side, option.symbol,
+                 float(score), json.dumps(breakdown, default=str), at),
+            )
+        logging.getLogger(__name__).info(
+            "shadow_card profile=%s ticker=%s side=%s contract=%s score=%s at=%s rows=%s",
+            profile, snap.symbol, option.side, option.symbol, score, at,
+            json.dumps(breakdown, default=str, sort_keys=True),
+        )
         return ident
 
     def research_candidate(self, candidate: Candidate, reason: str) -> None:

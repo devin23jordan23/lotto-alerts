@@ -95,6 +95,9 @@ class Settings:
     weights_path: str = WEIGHTS_PATH
     # LOTTO_PROFILE names a block in the weights book. Unset matches conservative.
     profile: str = "conservative"
+    # SHADOW_PROFILE scores a second profile beside the live one. Empty is off.
+    # Shadow cards are logged. They are not queued and they are not sent.
+    shadow_profile: str = ""
     # Additive post line from the active profile. Not capped. Conservative is 92.
     post_threshold: float = 92
     bypass_threshold: float = 40

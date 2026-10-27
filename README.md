@@ -5,17 +5,39 @@ No orders are placed. Scores are research rules, not probabilities or promised r
 
 ## Model V profiles
 
-`LOTTO_PROFILE` selects the v4c post line. Moderate is the default. The additive score is the only post decision. Hybrid bars at 40/61 and the handoff floors stay on the card as labels. There is no daily cap, top-N, or cooldown. A primary card also needs `min_positive_features` rows with value at least 0.5. Bypass cards clear `bypass_threshold` and the blockers only. ⚡ marks a posted card whose score is at least that profile's post line and that has at least 10 such features.
+`LOTTO_PROFILE` selects the line. Unset matches `conservative`. The live book is v4c. `loose` is aggressive (70), `moderate` is conservative (92), and `balanced` is 84. The additive score is the only post decision. Hybrid bars at 40/61 and the handoff floors stay on the card as labels. There is no daily cap, top-N, or cooldown. Bypass cards clear `bypass_threshold` and the blockers only.
 
-Held-out numbers are Vince's three-tier pass on the fixed v4c weights (median of five draws). Jul20+ is the clean window for those weights.
+| Profile | Post | Bypass | Min positive | Bolt features |
+|---|---|---|---|---|
+| aggressive (`loose`) | 70 | 40 | 0 | 10 |
+| middle | 76 | 40 | 0 | 10 |
+| balanced | 84 | 40 | 0 | 10 |
+| conservative (`moderate`, default) | 92 | 40 | 0 | 10 |
 
-| Profile | Post | Bypass | Min positive | Bolt features | Held-out true win | Alerts/day | Runners kept (held-out) | Full year, 142 days | Jul20+ |
-|---|---|---|---|---|---|---|---|---|---|
-| loose | 20 | 40 | 0 | 10 | 41.4% [38.6–41.6] | 33.1 [33.0–34.6] | 20.4% (75–106 per draw) | 41.2%, 35.0/day, 135/698 (19.3%) | 40.5% (n 1412, CI 38.0–43.1), 43.2/day, 29/144 |
-| moderate (default) | 110 | 40 | 0 | 10 | 48.5% [45.5–49.3] | 10.8 [10.7–12.0] | 6.4% (20–31) | 47.5%, 11.5/day, 42/698 (6.0%) | 45.2% (n 516, CI 40.9–49.5), 13.8/day, 15/144 |
-| conservative | 140 | 40 | 0 | 10 | 48.6% [45.1–49.2] | 3.7 [3.2–3.9] | 4.0% (15–19) | 49.8% (CI 45.0–54.5), 3.7/day, 29/698 (4.2%) | 47.0% (n 166, CI 39.5–54.6), 4.6/day, 8/144 |
+### volume_trend
 
-The ⚡ subset of each tier, full year: loose 48.4% at 3.7/day (Jul20+ 49.7%, n 195); moderate 48.7% at 3.7/day (Jul20+ 49.2%, n 191); conservative 52.0% at 1.8/day (n 252; Jul20+ 46.5%, n 99). The MIN 60 + bypass 40 reference was 43.7% held-out, 24.6/day, 13.2% of runners.
+`volume_trend_aggressive`, `volume_trend_balanced`, and `volume_trend_conservative` are code profiles. `volume_trend` is the balanced one. They are not in the JSON book, so the live `balanced` line stays 84 until `LOTTO_PROFILE` changes. **Do not merge this branch to main.** Merging deploys it.
+
+The three profiles share one weight block. Only the post line differs: 90, 102, and 120. Those lines are provisional for Vince's V2 sector and SPY rows. The volume rows and stacks still have provisional 6–10 point weights. The fitted cutoffs for those rows are not in yet.
+
+Primary cards only for the new sector and SPY points:
+
+| Row | Points | When |
+|---|---|---|
+| `SPY_ALIGN_TURN_3M` | 18 | SPY return over `SPY_ALIGN_TURN_WINDOW_MIN` (3.5, interpolated) is 0.05%–0.12% in the card's direction |
+| `SPY_ALIGN_RALLY_DAY` | 19 / 23 / 0 | 60–75% / 75–90% / ≥90% of sector-map names green (red for puts) |
+| `SECTOR_ETF_PCT_TS` | 32 | Sector ETF % from the open is 1.5–2.5× its 20-day same-minute typical move |
+| `SPY_ALIGN_OPEN` | 1 | SPY on the card's side of the open and of VWAP |
+| `SECTOR_L2_PMH`, `SECTOR_ETF_PCT` | 0 | Alternates, still computed |
+| `SECTOR_PEER_COUNT` | 0 | Exactly 3 peers. Set the weight to 33 to turn that alternate on |
+
+`SPY_ALIGN_TURN_WINDOW_MIN` is a float. 3.5 minutes is a 210-second lookback. The reference price is the linear interpolate between the two 1-minute closes that bracket that time. Set the key to 3 for a whole-minute window.
+
+Ace's volume names are the scored keys (`BRK_VS_DAY`, `BRK_TOD_10/5/3`, `RVOL_CUM`, `SUST_VOL_TOD_1M`, `HOLD_ON_VOL`, and the rest in `lotto/volume_trend.py`). `VOL_*` names are aliases and stay at weight 0. `RVOL_CHAIN_ge1.5` (+6) and the 1.0–1.5 dead zone (−9) score the same `RVOL_CUM` chain. `BRK_VS_10_ge1.5` (+15) stays the break bar versus the prior 10 bars of today. `VOL_BREAK_BAR` aliases `BRK_BAND`, the 1.2–3× score versus the smoothed 10-day time-of-day norm, tapering above 4×.
+
+`STACKS` in that same file is the list to edit. Each entry has a name, conditions (`feature`, `op`, `threshold`), and points. Every entry whose conditions all hold adds its points. Missing features are false. `OPT_VOL_ADJ_STRIKES` stays coded. The A+ stack and the 3-of-4 partial are still in the list, and both default to 0 points (`STACK_BONUS` and `STACK_BONUS_3OF4`). Held-out data did not support a stack bonus: the 3-of-4 A+ stack was +2.3pp in the fit and −6.7pp on the test. Nothing in a stack blocks a card. The old-book volume rows are unchanged. The new `VOL_*` rows sit on top of them. Cutoffs stay 96 / 108 / 124.
+
+The chain is 10-day cumulative, then 5, then 3, then any same-time days, then the bar versus the day so far, then a linear time-scaled full-day volume, then 1.0. The source is logged. Early bars (index under 10) extend the day-so-far average back to 04:00. Holds score only after `HOLD_W` bars exist past the break. Puts mirror.
 
 ## Universe and collection
 

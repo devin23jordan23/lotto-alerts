@@ -80,7 +80,11 @@ class Discovery:
                             if s in ranks and now-at < timedelta(minutes=12)}
         held = {s:since for s,since in self.promoted.items() if s in ranks and now-since < timedelta(minutes=25)}
         protected = [s for s in held if s in self.flow_leases and s not in self.explore_leases]
-        selected = sorted(self.always_deep & ranks.keys())
+        priority = tuple(getattr(self, "deep_priority", ()) or ())
+        selected = sorted(
+            self.always_deep & ranks.keys(),
+            key=lambda symbol: (0, priority.index(symbol)) if symbol in priority else (1, symbol),
+        )
         # A whole-universe sweep can reveal strong option flow in a name that
         # has never held a deep slot. Reserve part of the core for those fresh
         # events before existing 25-minute leases fill every available slot.
@@ -97,6 +101,15 @@ class Discovery:
                 selected.append(symbol)
         for symbol in sorted((s for s in held if s not in self.explore_leases and s not in selected),
                              key=lambda s:-ranks[s]):
+            if len(selected) < core_capacity:
+                selected.append(symbol)
+        # Static runner rank fills slots the live flow and leases did not take.
+        # A live flow spike stays ahead of it.
+        runner = getattr(self, "runner_rank", {}) or {}
+        for symbol in sorted(
+            (s for s in ranks if s in runner and s not in selected),
+            key=lambda s: (-float(runner[s]), s),
+        ):
             if len(selected) < core_capacity:
                 selected.append(symbol)
         for symbol in sorted(ranks, key=lambda s:(-ranks[s], s)):

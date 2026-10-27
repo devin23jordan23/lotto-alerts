@@ -339,6 +339,16 @@ class Schwab:
         if not hasattr(self, "fallback_rvol"):
             self.fallback_rvol = {}
         self.fallback_rvol[key] = {"sessions": len(full_days), "base": handoff_base}
+        from .volume_trend import pack_range_levels, pack_tod, pack_vt_rvol
+        if not hasattr(self, "vt_rvol"):
+            self.vt_rvol = {}
+        self.vt_rvol[key] = pack_vt_rvol(full_days, observations)
+        if not hasattr(self, "vt_tod"):
+            self.vt_tod = {}
+        self.vt_tod[key] = pack_tod(profiles, day)
+        if not hasattr(self, "vt_levels"):
+            self.vt_levels = {}
+        self.vt_levels[key] = pack_range_levels(daily, day)
         baseline = {minute: median(values) for minute, values in observations.items() if len(values) >= 10}
         if symbol == "SPX":
             # Schwab index candles have zero volume; use traded SPY volume only
@@ -350,6 +360,13 @@ class Schwab:
             spy_fallback = getattr(self, "fallback_rvol", {}).get(("SPY", day))
             if spy_fallback is not None:
                 self.fallback_rvol[key] = spy_fallback
+            spy_key = ("SPY", day)
+            if getattr(self, "vt_rvol", {}).get(spy_key) is not None:
+                self.vt_rvol[key] = self.vt_rvol[spy_key]
+            if getattr(self, "vt_tod", {}).get(spy_key) is not None:
+                self.vt_tod[key] = self.vt_tod[spy_key]
+            if getattr(self, "vt_levels", {}).get(spy_key) is not None:
+                self.vt_levels[key] = self.vt_levels[spy_key]
         if not baseline:
             LOG.warning("%s has fewer than ten usable historical sessions; no alerts until baseline is available", symbol)
         self.baselines[key] = baseline
@@ -455,9 +472,9 @@ class Schwab:
                                              number(raw.get("vega"))))
         return tuple(result)
 
-    def option_chain(self, symbol, now, max_dte):
+    def option_chain(self, symbol, now, max_dte, strike_count=80):
         params = {"symbol": api_symbol(symbol), "contractType": "ALL", "strategy": "SINGLE",
-                  "includeUnderlyingQuote": "true", "strikeCount": 80,
+                  "includeUnderlyingQuote": "true", "strikeCount": int(strike_count),
                   "fromDate": now.astimezone(ET).date().isoformat(),
                   "toDate": (now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()}
         data = self.get('/chains', params)
@@ -651,8 +668,11 @@ class Schwab:
         sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "26")))
         sweep_universe = [s for s in symbols if s not in standby or s in selected]
         sweep_targets = self.coverage.due(sweep_universe, now, selected, sweep_limit)
+        from .volume_trend import VOLUME_TREND_RULES, is_volume_trend
+        vt_chain = is_volume_trend(os.getenv("LOTTO_PROFILE", ""))
+        chain_strikes = VOLUME_TREND_RULES["strike_count"] if vt_chain else 80
         def chain(symbol):
-            return self.option_chain(symbol, now, max_dte)
+            return self.option_chain(symbol, now, max_dte, chain_strikes)
         def deep(symbol):
             bars = self.bars(symbol, datetime.now(timezone.utc))
             return bars, chain(symbol)
@@ -675,8 +695,14 @@ class Schwab:
                 except Exception as exc:
                     LOG.warning("Universe chain sweep %s unavailable (%s)", symbol, type(exc).__name__)
             # Continue unfinished cold-start work first; a slow baseline must not starve later names.
-            selected.sort(key=lambda s: (s not in tracked, s not in self.discovery.always_deep,
-                                         getattr(self, "last_polled", {}).get(s, 0)))
+            runner = getattr(self.discovery, "runner_rank", {}) or {}
+            selected.sort(key=lambda s: (
+                s not in tracked,
+                s not in self.discovery.always_deep,
+                s not in runner,
+                -float(runner.get(s) or 0),
+                getattr(self, "last_polled", {}).get(s, 0),
+            ))
             if not hasattr(self, "last_polled"):
                 self.last_polled = {}
             deep_jobs = {pool.submit(deep, symbol): symbol for symbol in selected}
@@ -708,6 +734,9 @@ class Schwab:
                                           parsed.get(symbol, {}).get("price"), promoted=True)
                 q = parsed.get(symbol, {})
                 spot, previous, spot_time = q.get("price"), q.get("previous"), q.get("at")
+                if vt_chain and spot:
+                    from .volume_trend import filter_chain_options
+                    options = filter_chain_options(options, float(spot))
                 if data.get("isDelayed") is True or not spot_time or not spot or not previous:
                     raise ValueError("missing fresh underlying or delayed entitlement")
                 existing = {o.symbol for o in options}
@@ -763,6 +792,10 @@ class Schwab:
                 object.__setattr__(snap, "prior_atr21", getattr(self, "atrs21", {}).get(day_key))
                 object.__setattr__(snap, "fallback_rvol_sessions", fb.get("sessions"))
                 object.__setattr__(snap, "fallback_rvol_base", (fb.get("base") or {}).get(rvol_minute))
+                from .volume_trend import attach_cycle_context
+                attach_cycle_context(
+                    snap, self, symbol, now.astimezone(ET).date(), rvol_minute, parsed,
+                    os.getenv("LOTTO_PROFILE", ""))
                 result.append(snap)
             except Exception as exc:
                 LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)

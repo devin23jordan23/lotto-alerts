@@ -67,7 +67,13 @@ def priced(option: Option, snap: Snapshot, settings: Settings) -> bool:
     if not 0 <= dte <= settings.max_dte:
         return False
     age = (snap.at - option.quote_time).total_seconds()
-    return -5 <= age <= 900
+    limit = 900
+    from .volume_trend import VOLUME_TREND_RULES, delta_ok, is_volume_trend, resolved_delta
+    if is_volume_trend(getattr(settings, "profile", "")):
+        limit = float(VOLUME_TREND_RULES["quote_max_age_seconds"])
+        if not delta_ok(resolved_delta(option, snap), option.ask):
+            return False
+    return -5 <= age <= limit
 
 
 def dte_of(option: Option, snap: Snapshot) -> int:
@@ -764,7 +770,12 @@ def choose_fallback_contract(snap: Snapshot, side: str, settings: Settings | Non
             by_strike = {}
             for option in pool:
                 by_strike.setdefault(option.strike, []).append(option)
-            for strike in _otm_strike_order(by_strike, snap.spot, side, offset):
+            from .volume_trend import fallback_strike_order, is_volume_trend
+            if is_volume_trend(settings.profile):
+                strike_order = fallback_strike_order(by_strike, snap.spot, side)
+            else:
+                strike_order = _otm_strike_order(by_strike, snap.spot, side, offset)
+            for strike in strike_order:
                 quoted = [option for option in by_strike[strike] if _quoted_fallback(option)]
                 quoted.sort(key=lambda option: option.symbol)
                 if not quoted:
@@ -937,7 +948,16 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     features.pop("_rvol", None)
     features.pop("_push", None)
     flags = confluence_flags_for(snap, probe, {}, settings)
-    _points, bypass_score, positive = score_path(features, side, load_weights(settings.weights_path), "bypass")
+    from .volume_trend import is_volume_trend, prepare_features, score_volume_trend
+    if is_volume_trend(settings.profile):
+        direction = 1 if side == "CALL" else -1
+        features = prepare_features(
+            features, snap, settings, direction=direction, spy_bars=spy_bars,
+            option=probe if probe is not None else sample)
+        _points, bypass_score, positive, _fired = score_volume_trend(
+            features, side, load_weights(settings.weights_path), "bypass", settings.profile)
+    else:
+        _points, bypass_score, positive = score_path(features, side, load_weights(settings.weights_path), "bypass")
     bar = indexed[minute]
     volume = bar.volume
     if probe is None:

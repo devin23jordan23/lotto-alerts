@@ -233,7 +233,12 @@ def card_gate(side, volume, spread, settings: Settings, bid=None, option_volume_
                 waived = 1
     if bid is None or not isinstance(bid, (int, float)) or not isfinite(bid) or bid <= settings.blocker_bid:
         blockers.append("low_bid")
-    if not waived and not option_volume_passes(option_volume_5m, option_volume_day, settings):
+    from .volume_trend import is_volume_trend
+    if is_volume_trend(getattr(settings, "profile", "")):
+        # PENALTY_SPREAD and PENALTY_OPT_VOL are score rows. They do not block.
+        blockers = [name for name in blockers if name != "wide_spread"]
+        LOG.info("volume_trend spread and contract volume score as penalties, not gates")
+    elif not waived and not option_volume_passes(option_volume_5m, option_volume_day, settings):
         blockers.append("option_volume")
     blocked_by = list(missing) + blockers
     return {
@@ -1513,7 +1518,15 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     )
     _log_ace_flags(snap, option, features)
     book = load_weights(settings.weights_path)
-    points, score, positive = score_path(features, option.side, book, "primary")
+    from .volume_trend import is_volume_trend, prepare_features, score_volume_trend
+    if is_volume_trend(settings.profile):
+        direction = 1 if option.side == "CALL" else -1
+        features = prepare_features(
+            features, snap, settings, direction=direction, spy_bars=spy_bars, option=option)
+        points, score, positive, _fired = score_volume_trend(
+            features, option.side, book, "primary", settings.profile)
+    else:
+        points, score, positive = score_path(features, option.side, book, "primary")
     trigger = None
     if candidate.setup is not None:
         trigger = candidate.setup.trigger
