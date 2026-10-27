@@ -47,6 +47,31 @@ def universe_symbols(raw: str) -> list[str]:
     return sorted(symbols | REQUIRED_UNIVERSE) if symbols else []
 
 
+def excluded_symbols() -> set[str]:
+    """LOTTO_EXCLUDE_SYMBOLS. Comma-separated, case-insensitive, default empty."""
+    raw = os.getenv("LOTTO_EXCLUDE_SYMBOLS", "")
+    return {part.strip().upper() for part in raw.split(",") if part.strip()}
+
+
+def apply_exclusions(symbols, standby=None, continuous=None):
+    """Drop excluded names after every universe source has been combined.
+
+    Covers the core list, standby (including UOA names), EXTRA_UNIVERSE names
+    already merged into the core, and the continuous / coverage-plan list.
+    """
+    blocked = excluded_symbols()
+
+    def keep(name) -> bool:
+        return str(name).strip().upper() not in blocked
+
+    symbols = [name for name in symbols if keep(name)]
+    if standby is not None:
+        standby = [name for name in standby if keep(name)]
+    if continuous is not None:
+        continuous = {name for name in continuous if keep(name)}
+    return symbols, standby, continuous, blocked
+
+
 def _env_on(name: str, default: str = "off") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "on", "true", "yes"}
 
@@ -292,7 +317,7 @@ def main():
     data_dir = Path(os.getenv("DATA_DIR", "data"))
     data_dir.mkdir(parents=True, exist_ok=True)
     if args.mode == "check":
-        symbols=universe_symbols(os.getenv("LOTTO_UNIVERSE") or DEFAULT_UNIVERSE)
+        symbols, _, _, _ = apply_exclusions(universe_symbols(os.getenv("LOTTO_UNIVERSE") or DEFAULT_UNIVERSE))
         result=check(Schwab(str(data_dir)),symbols,data_dir)
         print(json.dumps(result,indent=2))
         raise SystemExit(0 if result['ready'] else 1)
@@ -357,7 +382,11 @@ def main():
         pin_deep_names(client.discovery)
         symbols, _loaded, _budget = install_extra_universe(symbols, client, engine.settings)
         ensure_etf_typicals(client, datetime.now(timezone.utc))
+    symbols, standby, continuous, blocked = apply_exclusions(
+        symbols, standby, client.discovery.always_deep)
+    client.discovery.always_deep = continuous
     engine.runner_names = frozenset(standby)
+    LOG.info("Excluded symbols: %s core=%d", ",".join(sorted(blocked)), len(symbols))
     if not symbols:
         raise SystemExit("LOTTO_UNIVERSE must contain at least one symbol")
     poll_seconds = max(30, int(os.getenv("LOTTO_POLL_SECONDS", "60")))
