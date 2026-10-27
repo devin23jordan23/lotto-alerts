@@ -632,16 +632,17 @@ def _otm_strike_order(strikes, spot: float, side: str, offset: int) -> list:
 
 def _quote_passes(option: Option, snap: Snapshot, settings: Settings, history=None,
                   parts=None) -> bool:
-    """Spread band, bid, ask, real 5-minute volume, and the strike window.
+    """Spread band, bid, ask, option volume, and the strike window.
 
-    No 5-minute reading is a miss. Day volume does not stand in for it.
-    spread_legacy restores the hard 15% cap.
+    A 5-minute print at the floor passes. With the day-volume swap on,
+    cumulative session volume also passes. spread_legacy restores the hard
+    15% cap and ignores day volume.
     """
     if not _live_ask(option) or not _inside_strike_window(option, snap, settings):
         return False
     if option.bid is None or not isfinite(option.bid) or option.bid <= settings.blocker_bid:
         return False
-    from .confluence import spread_band, spread_fraction
+    from .confluence import option_volume_passes, spread_band, spread_fraction
     fraction = spread_fraction(option)
     if settings.spread_legacy:
         if fraction is None or not isfinite(fraction) or fraction > settings.blocker_spread_legacy:
@@ -651,7 +652,7 @@ def _quote_passes(option: Option, snap: Snapshot, settings: Settings, history=No
         if band is None or (band > 0 and not meets_bar(parts, band, settings)):
             return False
     volume = option_volume_5m(option, history, snap)
-    return volume is not None and volume >= settings.blocker_option_volume_5m
+    return option_volume_passes(volume, option.volume, settings)
 
 
 def choose_fallback_contract(snap: Snapshot, side: str, settings: Settings | None = None,
@@ -874,7 +875,7 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     else:
         gate = card_gate(
             side, volume, spread_fraction(probe), settings, bid=probe.bid,
-            option_volume_5m=vol5, parts=parts)
+            option_volume_5m=vol5, option_volume_day=probe.volume, parts=parts)
     unmet = (
         not settings.spread_legacy
         and gate.get("spread_band") not in (None, 0)
@@ -1192,8 +1193,9 @@ def option_volume_5m(option, history=None, snap=None) -> float | None:
     """Contracts printed in the last five minutes.
 
     The number is the delta from a print about five minutes earlier. With no
-    such print the reading is unknown. Day volume is not a substitute, and an
-    unknown reading blocks the card.
+    such print the reading is unknown. This function does not look at day
+    volume. The card gate accepts cumulative session volume on its own when
+    the day-volume swap is on.
     """
     if option is None or snap is None or not history:
         return None

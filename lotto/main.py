@@ -189,7 +189,7 @@ def env_settings() -> Settings:
     for field in fields(base):
         raw = os.getenv("LOTTO_" + field.name.upper())
         if raw is not None and field.name not in {"model", "preset", *PWIN_FIELDS}:
-            if field.name in {"standby_names", "spread_legacy"}:
+            if field.name in {"standby_names", "spread_legacy", "day_volume_swap"}:
                 updates[field.name] = 1 if raw.strip().lower() in {"1", "on", "true", "yes"} else 0
             elif field.name == "spread_bands":
                 updates[field.name] = tuple(
@@ -235,7 +235,7 @@ def env_settings() -> Settings:
                 )
     if model == "V":
         from .weights import active_profile, load_weights
-        requested = str(updates.get("profile") or "moderate")
+        requested = str(updates.get("profile") or base.profile or "conservative")
         overridden = [
             name for name in ("LOTTO_POST_THRESHOLD", "LOTTO_BYPASS_THRESHOLD", "LOTTO_MIN_POSITIVE_FEATURES")
             if os.getenv(name) is not None
@@ -250,13 +250,13 @@ def env_settings() -> Settings:
                 )
         except (OSError, ValueError) as exc:
             LOG.error(
-                "Weights book failed to load (%s); moderate defaults are in use "
-                "(post>=90 bypass>=40 min_positive_features>=0 bolt>=10)",
+                "Weights book failed to load (%s); conservative defaults are in use "
+                "(post>=92 bypass>=40 min_positive_features>=0 bolt>=10)",
                 type(exc).__name__,
             )
             updates.update({
-                "profile": "moderate",
-                "post_threshold": 90,
+                "profile": "conservative",
+                "post_threshold": 92,
                 "bypass_threshold": 40,
                 "min_positive_features": 0,
                 "strong_feature_min": 10,

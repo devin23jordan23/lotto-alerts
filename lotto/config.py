@@ -93,10 +93,10 @@ class Settings:
     fb_min_minutes: int = 0
     fb_max_spread_pct: float = 15
     weights_path: str = WEIGHTS_PATH
-    # LOTTO_PROFILE names a block in the weights book. Defaults match moderate.
-    profile: str = "moderate"
-    # Additive post line from the active profile. Not capped. Moderate is 90.
-    post_threshold: float = 90
+    # LOTTO_PROFILE names a block in the weights book. Unset matches conservative.
+    profile: str = "conservative"
+    # Additive post line from the active profile. Not capped. Conservative is 92.
+    post_threshold: float = 92
     bypass_threshold: float = 40
     # Primary cards also need this many features with value >= 0.5.
     # Bypass cards do not read this field.
@@ -126,13 +126,19 @@ class Settings:
     # the top of the next stock bar. Above the last edge there is no ceiling.
     spread_bands: tuple = (0.25, 0.35, 0.40)
     # (rvol, push30_atr21, setups) for the bands above 25%: S2, S3, S4.
+    # judgment bars, unfitted (Vince 2026-10-26), keep LLY/MRNA/AAOI/CAT
+    # The setups term stays in the triple so a later bar can turn it back on.
     spread_stock_bars: tuple = (
-        (2.0, 1.0, 2),
-        (2.5, 1.25, 3),
-        (3.0, 1.5, 3),
+        (0.90, 0.65, 0),
+        (1.25, 0.65, 0),
+        (1.35, 0.75, 0),
     )
     blocker_spread_legacy: float = 0.15
     spread_legacy: int = 0
+    # On: the 5-minute floor still passes, and cumulative session volume >= 100
+    # also passes. spread_legacy forces this off.
+    day_volume_swap: int = 1
+    blocker_option_volume_day: float = 100
     # 1 is the first strike OTM. 0 is nearest ATM, which spread_legacy forces.
     fallback_strike_offset: int = 1
     # Reserved per-feature knobs. The scorer does not read them. The live
@@ -343,6 +349,8 @@ class Settings:
             raise ValueError("Invalid blocker setting")
         if self.spread_legacy not in (0, 1) or self.blocker_spread_legacy <= 0:
             raise ValueError("Invalid spread legacy setting")
+        if self.day_volume_swap not in (0, 1) or self.blocker_option_volume_day < 0:
+            raise ValueError("Invalid day-volume swap")
         if self.fallback_strike_offset < 0:
             raise ValueError("Invalid fallback strike offset")
         bands = tuple(self.spread_bands)
@@ -363,6 +371,7 @@ class Settings:
                 raise ValueError("Invalid spread stock bar")
         if self.spread_legacy:
             object.__setattr__(self, "fallback_strike_offset", 0)
+            object.__setattr__(self, "day_volume_swap", 0)
         if (self.post_threshold < 0 or self.bypass_threshold < 0
                 or self.strong_feature_min < 0 or self.bolt_min_score < 0
                 or self.min_positive_features < 0):

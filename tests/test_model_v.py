@@ -66,8 +66,8 @@ class ModelVTests(unittest.TestCase):
         self.assertEqual(live.fallback_rule, "post")
         self.assertEqual((live.fb_rvol_min, live.fb_push_atr_min, live.fb_room_atr_max, live.fb_max_spread_pct),
                          (0, 0.75, 1.0, 15))
-        self.assertEqual(live.post_threshold, 90)
-        self.assertEqual(live.profile, "moderate")
+        self.assertEqual(live.post_threshold, 92)
+        self.assertEqual(live.profile, "conservative")
         self.assertEqual(live.min_positive_features, 0)
         self.assertEqual(model_v_settings(post_threshold=45).post_threshold, 45)
         self.assertEqual(model_v_settings(post_threshold=75).post_threshold, 75)
@@ -805,7 +805,9 @@ class FallbackRuleTests(unittest.TestCase):
         snap = Snapshot("DEMO", at, 100, at, 100, (), (wide, tight), source="replay")
         chosen = choose_fallback_contract(snap, "CALL", history=_volume_history(snap))
         self.assertEqual(chosen["strike"], 102)
-        self.assertIsNone(choose_fallback_contract(snap, "CALL")["option"])
+        self.assertEqual(choose_fallback_contract(snap, "CALL")["strike"], 102)
+        self.assertIsNone(choose_fallback_contract(
+            snap, "CALL", model_v_settings(spread_legacy=1))["option"])
         self.assertEqual(quote_spread_fail(wide.bid, wide.ask, 30)[0], 1)
         no_ask = _contract(at, 105, bid=0, ask=0)
         later = _contract(at, 106, bid=1, ask=1.1, dte=1)
@@ -832,19 +834,19 @@ class FallbackRuleTests(unittest.TestCase):
         closes = [100] * 14 + [101, 102, 102, 102]
         frames = [closes[:index] for index in (16, 17, 18)]
         with self.assertLogs("lotto.main", level="WARNING") as caught:
-            self.assertEqual(profile_status(model_v_settings()), "moderate")
+            self.assertEqual(profile_status(model_v_settings()), "conservative")
             self.assertEqual(fallback_rule_status(model_v_settings()), "post")
             strong_score_status(model_v_settings())
             freshness_status(model_v_settings())
             weights_file_status(model_v_settings())
         logged = "\n".join(caught.output)
         self.assertIn(
-            "Profile: moderate post>=90 bypass>=40 min_positive_features>=0 bolt_features>=10",
+            "Profile: conservative post>=92 bypass>=40 min_positive_features>=0 bolt_features>=10",
             logged)
         self.assertIn(
-            "Fallback rule: post post>=90 bypass>=40 atr=21 contract=roll spread<=15% bid>0.05 opt_vol>=50",
+            "Fallback rule: post post>=92 bypass>=40 atr=21 contract=roll spread<=15% bid>0.05 opt_vol>=50",
             logged)
-        self.assertIn("Strong score: ⚡ on cards with score>=90 and >= 10 positive features", logged)
+        self.assertIn("Strong score: ⚡ on cards with score>=92 and >= 10 positive features", logged)
         self.assertIn(
             "Freshness: quote_age_s bar_age_s min_since_trigger logged; stale quote >5s is a flag and -4, not a gate",
             logged)
@@ -1700,27 +1702,34 @@ class ReviewFixTests(unittest.TestCase):
         start = datetime(2026, 10, 26, 10, 30, tzinfo=ET)
         bars = _bars(start, 6, lambda _minute: 100.0, high_pad=0.05, low_pad=0.05, volume=5000)
         at = bars[-1].end
-        option = replace(_contract(at, 100, "CALL", bid=1.0, ask=1.05, dte=0), volume=250, quote_time=at)
-        snap = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (option,), prior_atr=50, source="replay")
-        scored = apply_v2(Candidate(snap, option, 30, {}, {}, [], False), model_v_settings(), [])
+        thin = replace(_contract(at, 100, "CALL", bid=1.0, ask=1.05, dte=0), volume=50, quote_time=at)
+        snap = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (thin,), prior_atr=50, source="replay")
+        scored = apply_v2(Candidate(snap, thin, 30, {}, {}, [], False), model_v_settings(), [])
         self.assertFalse(scored.qualifying)
         self.assertIn("option_volume", scored.metrics["gate_blocked_by"])
-        self.assertGreaterEqual(option.volume, 200)
+        fat = replace(thin, volume=100)
+        day = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (fat,), prior_atr=50, source="replay")
+        passed = apply_v2(Candidate(day, fat, 30, {}, {}, [], False), model_v_settings(), [])
+        self.assertNotIn("option_volume", passed.metrics["gate_blocked_by"])
         self.assertIsNone(choose_fallback_contract(snap, "CALL")["option"])
+        self.assertEqual(choose_fallback_contract(day, "CALL")["strike"], 100)
+        self.assertIsNone(choose_fallback_contract(
+            day, "CALL", model_v_settings(spread_legacy=1))["option"])
 
         settings = model_v_settings(fallback_rule="log")
         tape = _fallback_snap(_session([100, 101, 102], volume=600))
-        self.assertIsNone(evaluate_fallback(tape, "CALL", settings, new_fallback_state()))
+        quiet_tape = replace(tape, options=tuple(replace(option, volume=40) for option in tape.options))
+        self.assertIsNone(evaluate_fallback(quiet_tape, "CALL", settings, new_fallback_state()))
         fired = evaluate_fallback(
             tape, "CALL", settings, new_fallback_state(), history=_volume_history(tape))
         self.assertEqual(fired["gate_post"], 1)
 
-        tight = _contract(at, 102, bid=1.0, ask=1.05)
+        tight = replace(_contract(at, 102, bid=1.0, ask=1.05), volume=90)
         roll = Snapshot("DEMO", at, 100, at, 100, (), (tight,), source="replay")
         self.assertIsNone(choose_fallback_contract(
-            roll, "CALL", history=_volume_history(roll, prior_volume=151))["option"])
+            roll, "CALL", history=_volume_history(roll, prior_volume=41))["option"])
         self.assertEqual(choose_fallback_contract(
-            roll, "CALL", history=_volume_history(roll, prior_volume=150))["strike"], 102)
+            roll, "CALL", history=_volume_history(roll, prior_volume=40))["strike"], 102)
 
     def test_one_dte_posts_at_the_additive_line_below_the_s12_bar(self):
         start = datetime(2026, 10, 26, 10, 30, tzinfo=ET)
@@ -1749,11 +1758,11 @@ class ReviewFixTests(unittest.TestCase):
     def test_profile_selection_and_an_uncapped_post_line(self):
         book = load_weights()
         self.assertEqual(set(book["profiles"]), {"aggressive", "middle", "conservative"})
-        self.assertEqual(active_profile(book, "loose")["post_threshold"], 5)
+        self.assertEqual(active_profile(book, "loose")["post_threshold"], 74)
         self.assertEqual(active_profile(book, "moderate")["min_positive_features"], 0)
         self.assertEqual(active_profile(book, "moderate")["strong_feature_min"], 10)
         conservative = active_profile(book, "conservative")
-        self.assertEqual(conservative["post_threshold"], 90)
+        self.assertEqual(conservative["post_threshold"], 92)
         self.assertEqual(conservative["min_positive_features"], 0)
         self.assertEqual(conservative["strong_feature_min"], 10)
         self.assertNotIn("conservative_alt_confluence", book["profiles"])
@@ -1767,24 +1776,24 @@ class ReviewFixTests(unittest.TestCase):
                           clamped["min_positive_features"], clamped["strong_feature_min"]), (0, 0, 0, 0))
         with self.assertLogs("lotto.weights", level="WARNING") as unknown:
             fallback = active_profile(book, "conservativ")
-        self.assertEqual(fallback["profile"], "moderate")
-        self.assertEqual(fallback["post_threshold"], 90)
+        self.assertEqual(fallback["profile"], "conservative")
+        self.assertEqual(fallback["post_threshold"], 92)
         self.assertIn("Unknown LOTTO_PROFILE", "\n".join(unknown.output))
         saved = {key: os.environ.pop(key) for key in list(os.environ) if key.startswith("LOTTO_")}
         try:
             moderate = env_settings()
-            self.assertEqual(moderate.profile, "moderate")
+            self.assertEqual(moderate.profile, "conservative")
             self.assertEqual((moderate.post_threshold, moderate.bypass_threshold, moderate.min_positive_features),
-                             (90, 40, 0))
+                             (92, 40, 0))
             os.environ["LOTTO_PROFILE"] = "loose"
             loose = env_settings()
             self.assertEqual(loose.profile, "loose")
             self.assertEqual((loose.post_threshold, loose.bypass_threshold, loose.min_positive_features),
-                             (5, 40, 0))
+                             (74, 40, 0))
             os.environ["LOTTO_PROFILE"] = "conservative"
             strict = env_settings()
             self.assertEqual(strict.profile, "conservative")
-            self.assertEqual(strict.post_threshold, 90)
+            self.assertEqual(strict.post_threshold, 92)
             self.assertEqual(strict.min_positive_features, 0)
             self.assertEqual(strict.strong_feature_min, 10)
             os.environ["LOTTO_PROFILE"] = "moderate"
@@ -1792,7 +1801,7 @@ class ReviewFixTests(unittest.TestCase):
             os.environ["LOTTO_BYPASS_THRESHOLD"] = "15"
             with self.assertLogs("lotto.main", level="WARNING") as overridden:
                 forced = env_settings()
-            self.assertEqual(forced.post_threshold, 90)
+            self.assertEqual(forced.post_threshold, 92)
             self.assertEqual(forced.bypass_threshold, 40)
             self.assertIn("overrides LOTTO_POST_THRESHOLD", "\n".join(overridden.output))
         finally:
@@ -2087,9 +2096,9 @@ class ReviewFixTests(unittest.TestCase):
         }.items():
             self.assertEqual(book["weights"][name], {"call": weight, "put": weight})
         for name, line in {
-            "aggressive": (5, 40, 0, 10),
-            "middle": (75, 40, 0, 10),
-            "conservative": (90, 40, 0, 10),
+            "aggressive": (74, 40, 0, 10),
+            "middle": (83, 40, 0, 10),
+            "conservative": (92, 40, 0, 10),
         }.items():
             row = book["profiles"][name]
             self.assertEqual(
@@ -2113,11 +2122,11 @@ class ReviewFixTests(unittest.TestCase):
     def test_named_profiles_and_aliases_resolve_their_lines(self):
         book = load_weights()
         lines = {
-            "aggressive": (5, 40, 0, 10),
-            "middle": (75, 40, 0, 10),
-            "conservative": (90, 40, 0, 10),
-            "loose": (5, 40, 0, 10),
-            "moderate": (90, 40, 0, 10),
+            "aggressive": (74, 40, 0, 10),
+            "middle": (83, 40, 0, 10),
+            "conservative": (92, 40, 0, 10),
+            "loose": (74, 40, 0, 10),
+            "moderate": (92, 40, 0, 10),
         }
         for name, line in lines.items():
             chosen = active_profile(book, name)
@@ -2129,7 +2138,8 @@ class ReviewFixTests(unittest.TestCase):
             )
         with self.assertLogs("lotto.weights", level="WARNING") as unknown:
             fallback = active_profile(book, "no-such-profile")
-        self.assertEqual(fallback["post_threshold"], 90)
+        self.assertEqual(fallback["post_threshold"], 92)
+        self.assertEqual(fallback["profile"], "conservative")
         self.assertEqual(
             (fallback["bypass_threshold"], fallback["min_positive_features"], fallback["strong_feature_min"]),
             (40, 0, 10),
@@ -2141,7 +2151,7 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(
             (chosen["post_threshold"], chosen["bypass_threshold"],
              chosen["min_positive_features"], chosen["strong_feature_min"]),
-            (90.0, 40.0, 0, 10),
+            (92.0, 40.0, 0, 10),
         )
 
     def test_weights_book_load_failure_uses_moderate_defaults(self):
@@ -2158,14 +2168,14 @@ class ReviewFixTests(unittest.TestCase):
                          "LOTTO_MIN_POSITIVE_FEATURES"):
                 os.environ.pop(name, None)
             os.environ.update(saved)
-        self.assertEqual(live.profile, "moderate")
+        self.assertEqual(live.profile, "conservative")
         self.assertEqual(
             (live.post_threshold, live.bypass_threshold, live.min_positive_features, live.strong_feature_min),
-            (90, 40, 0, 10),
+            (92, 40, 0, 10),
         )
         text = "\n".join(logs.output)
         self.assertIn("Weights book failed to load", text)
-        self.assertIn("moderate defaults are in use", text)
+        self.assertIn("conservative defaults are in use", text)
 
 
 class SpreadBandTests(unittest.TestCase):
@@ -2182,12 +2192,14 @@ class SpreadBandTests(unittest.TestCase):
         settings = self._settings()
         self.assertEqual(tuple(settings.spread_bands), (0.25, 0.35, 0.40))
         self.assertEqual(tuple(settings.spread_stock_bars), (
-            (2.0, 1.0, 2), (2.5, 1.25, 3), (3.0, 1.5, 3),
+            (0.90, 0.65, 0), (1.25, 0.65, 0), (1.35, 0.75, 0),
         ))
+        self.assertEqual(settings.day_volume_swap, 1)
+        self.assertEqual(settings.blocker_option_volume_day, 100)
         miss = {"rvol": 0.0, "push": 0.0, "setups": 0}
-        s2 = {"rvol": 2.0, "push": 1.0, "setups": 2}
-        s3 = {"rvol": 2.5, "push": 1.25, "setups": 3}
-        s4 = {"rvol": 3.0, "push": 1.5, "setups": 3}
+        s2 = {"rvol": 0.90, "push": 0.65, "setups": 0}
+        s3 = {"rvol": 1.25, "push": 0.65, "setups": 0}
+        s4 = {"rvol": 1.35, "push": 0.75, "setups": 0}
         self.assertEqual(spread_band(0.24, settings), 0)
         self.assertEqual(spread_band(0.25, settings), 0)
         self.assertEqual(spread_band(0.2500001, settings), 2)
@@ -2205,6 +2217,19 @@ class SpreadBandTests(unittest.TestCase):
         self.assertFalse(self._gate(0.40, s2)["post_ok"])
         self.assertTrue(self._gate(0.55, s4)["post_ok"])
         self.assertFalse(self._gate(0.55, s3)["post_ok"])
+        self.assertFalse(self._gate(0.55, {"rvol": 1.349, "push": 0.75, "setups": 0})["post_ok"])
+        self.assertFalse(self._gate(0.55, {"rvol": 1.35, "push": 0.749, "setups": 0})["post_ok"])
+        kept = self._settings(spread_stock_bars=((0.90, 0.65, 2), (1.25, 0.65, 2), (1.35, 0.75, 2)))
+        self.assertFalse(self._gate(0.35, {"rvol": 2.0, "push": 2.0, "setups": 1}, kept)["post_ok"])
+        self.assertTrue(self._gate(0.35, {"rvol": 2.0, "push": 2.0, "setups": 2}, kept)["post_ok"])
+        self.assertTrue(card_gate(
+            "CALL", 100, 0.05, settings, bid=1.0, option_volume_5m=50, option_volume_day=0)["post_ok"])
+        self.assertFalse(card_gate(
+            "CALL", 100, 0.05, settings, bid=1.0, option_volume_5m=49, option_volume_day=99)["post_ok"])
+        self.assertTrue(card_gate(
+            "CALL", 100, 0.05, settings, bid=1.0, option_volume_5m=None, option_volume_day=100)["post_ok"])
+        self.assertFalse(card_gate(
+            "CALL", 100, 0.05, settings, bid=1.0, option_volume_5m=None, option_volume_day=99)["post_ok"])
         self.assertTrue(meets_bar(miss, 0, settings))
         self.assertFalse(meets_bar(miss, 2, settings))
         for bad in (None, float("nan")):
@@ -2266,15 +2291,22 @@ class SpreadBandTests(unittest.TestCase):
             features = additive_features(*args, **kwargs)
             for name in ("a_drive", "a_open_reclaim", "a_spike_rev"):
                 features[name] = 1.0
-            features["_rvol"] = 3.0
-            features["_push"] = 1.5
+            features["_rvol"] = 1.35
+            features["_push"] = 0.75
+            features["_vol5"] = 200
+            return features
+
+        def just_under(*args, **kwargs):
+            features = additive_features(*args, **kwargs)
+            features["_rvol"] = 1.349
+            features["_push"] = 0.75
             features["_vol5"] = 200
             return features
 
         def high_score(features, side, book=None, path="primary"):
             return {"flow200": 120.0}, 120.0, 4
 
-        for post in (5, 75, 90):
+        for post in (74, 83, 92):
             snap = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (wide,), prior_atr=50, source="replay")
             with patch("lotto.confluence.additive_features", boosted), \
                     patch("lotto.weights.score_path", high_score), \
@@ -2292,18 +2324,23 @@ class SpreadBandTests(unittest.TestCase):
             self.assertIn(note, alert_payload(scored, "ACTIVE")["embeds"][0]["description"])
             text = "\n".join(logs.output)
             self.assertIn("spread_band=4", text)
-            self.assertIn("rvol=3.0000", text)
-            self.assertIn("push=1.5000", text)
+            self.assertIn("rvol=1.3500", text)
+            self.assertIn("push=0.7500", text)
             self.assertIn("setups=", text)
 
         bare = Snapshot("DEMO", at, 100.0, at, bars[0].open, bars, (wide,), prior_atr=50, source="replay")
-        with self.assertLogs("lotto.confluence", level="INFO") as missed:
+        with patch("lotto.confluence.additive_features", just_under), \
+                patch("lotto.weights.score_path", high_score), \
+                self.assertLogs("lotto.confluence", level="INFO") as missed:
             blocked = apply_v2(
-                Candidate(snap, wide, 30, {}, {}, [], False),
-                self._settings(post_threshold=5), _volume_history(bare, prior_volume=0))
+                Candidate(bare, wide, 30, {}, {}, [], False),
+                self._settings(post_threshold=74), _volume_history(bare, prior_volume=0))
         self.assertFalse(blocked.qualifying)
+        self.assertEqual(blocked.option.strike, 100)
+        self.assertEqual(blocked.option.bid, 0.20)
         self.assertIn("wide_spread", blocked.metrics["gate_blocked_by"])
         self.assertEqual(blocked.metrics["wide_spread_bar_unmet"], 1)
+        self.assertEqual(blocked.metrics["spread_band"], 4)
         self.assertIn("wide_spread_bar_unmet=1", "\n".join(missed.output))
 
         tight = replace(_contract(at, 102, "CALL", bid=1.0, ask=1.05), volume=250, quote_time=at)
@@ -2345,9 +2382,20 @@ class SpreadBandTests(unittest.TestCase):
             both_dark, "CALL", self._settings(), _volume_history(both_dark, prior_volume=0))
         self.assertEqual(stepped_out["strike"], 102)
 
-        legacy = self._settings(spread_legacy=1, fallback_strike_offset=1)
+        legacy = self._settings(spread_legacy=1, fallback_strike_offset=1, day_volume_swap=1)
         self.assertEqual(legacy.fallback_strike_offset, 0)
+        self.assertEqual(legacy.day_volume_swap, 0)
+        self.assertEqual(legacy.post_threshold, 92)
         self.assertEqual(legacy.blocker_spread_legacy, 0.15)
+        self.assertFalse(card_gate(
+            "CALL", 100, 0.05, legacy, bid=1.0, option_volume_5m=None, option_volume_day=500,
+        )["post_ok"])
+        self.assertTrue(card_gate(
+            "CALL", 100, 0.05, legacy, bid=1.0, option_volume_5m=50, option_volume_day=0,
+        )["post_ok"])
+        self.assertFalse(card_gate(
+            "CALL", 100, 0.05, legacy, bid=1.0, option_volume_5m=49, option_volume_day=500,
+        )["post_ok"])
         self.assertEqual(choose_fallback_contract(calls, "CALL", legacy, history)["strike"], 100)
 
         def old_block(spread):
@@ -2371,13 +2419,22 @@ class SpreadBandTests(unittest.TestCase):
             self.assertEqual(live.spread_stock_bars[2], (3.0, 1.5, 3))
             self.assertEqual(live.fallback_strike_offset, 2)
             self.assertEqual(live.blocker_spread_legacy, 0.15)
+            self.assertEqual(live.day_volume_swap, 1)
+            self.assertEqual(live.blocker_option_volume_day, 100)
+            self.assertEqual(live.post_threshold, 92)
+            os.environ["LOTTO_DAY_VOLUME_SWAP"] = "yes"
+            os.environ["LOTTO_BLOCKER_OPTION_VOLUME_DAY"] = "80"
             os.environ["LOTTO_SPREAD_LEGACY"] = "1"
             reverted = env_settings()
             self.assertEqual(reverted.spread_legacy, 1)
             self.assertEqual(reverted.fallback_strike_offset, 0)
+            self.assertEqual(reverted.day_volume_swap, 0)
+            self.assertEqual(reverted.blocker_option_volume_day, 80)
+            self.assertEqual(reverted.post_threshold, 92)
         finally:
             for name in ("LOTTO_SPREAD_BANDS", "LOTTO_SPREAD_STOCK_BARS", "LOTTO_BLOCKER_SPREAD_LEGACY",
-                         "LOTTO_SPREAD_LEGACY", "LOTTO_FALLBACK_STRIKE_OFFSET"):
+                         "LOTTO_SPREAD_LEGACY", "LOTTO_FALLBACK_STRIKE_OFFSET",
+                         "LOTTO_DAY_VOLUME_SWAP", "LOTTO_BLOCKER_OPTION_VOLUME_DAY"):
                 os.environ.pop(name, None)
             os.environ.update(saved)
 

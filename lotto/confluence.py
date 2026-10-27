@@ -173,15 +173,32 @@ def setup_count(features) -> int:
     return count
 
 
+def option_volume_passes(volume_5m, day_volume, settings: Settings) -> bool:
+    """5-minute floor, or cumulative session volume when the swap is on.
+
+    The 5-minute reading still passes at its own floor. The swap adds a
+    second pass: Option.volume >= blocker_option_volume_day. A missing
+    5-minute print blocks only when the swap is off. spread_legacy forces
+    the swap off.
+    """
+    if (isinstance(volume_5m, (int, float)) and not isinstance(volume_5m, bool)
+            and isfinite(volume_5m) and volume_5m >= settings.blocker_option_volume_5m):
+        return True
+    if settings.spread_legacy or not settings.day_volume_swap:
+        return False
+    return (isinstance(day_volume, (int, float)) and not isinstance(day_volume, bool)
+            and isfinite(day_volume) and day_volume >= settings.blocker_option_volume_day)
+
+
 def card_gate(side, volume, spread, settings: Settings, bid=None, option_volume_5m=None,
-              parts=None) -> dict:
-    """Direction, stock volume, spread band, bid, and 5-minute option volume.
+              option_volume_day=None, parts=None) -> dict:
+    """Direction, stock volume, spread band, bid, and option volume.
 
     Nothing in the score lifts a miss. Spread is (ask-bid)/mid. At or under
     the first band edge there is no stock bar. A wider spread passes only
     when the stock meets that band's bar. A missing spread still blocks.
-    spread_legacy restores the hard cap. A bid at the floor blocks. Exactly
-    the volume floor passes.
+    spread_legacy restores the hard cap and the 5-minute-only volume rule.
+    A bid at the floor blocks. Exactly the volume floor passes.
     """
     from .model_v import meets_bar
     base = {
@@ -208,8 +225,7 @@ def card_gate(side, volume, spread, settings: Settings, bid=None, option_volume_
                 blockers.append("wide_spread")
     if bid is None or not isinstance(bid, (int, float)) or not isfinite(bid) or bid <= settings.blocker_bid:
         blockers.append("low_bid")
-    if (option_volume_5m is None or not isinstance(option_volume_5m, (int, float))
-            or not isfinite(option_volume_5m) or option_volume_5m < settings.blocker_option_volume_5m):
+    if not option_volume_passes(option_volume_5m, option_volume_day, settings):
         blockers.append("option_volume")
     blocked_by = list(missing) + blockers
     return {
@@ -1441,7 +1457,8 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     features.pop("_push", None)
     gate = card_gate(
         option.side, volume, spread_fraction(option), settings,
-        bid=getattr(option, "bid", None), option_volume_5m=vol5, parts=parts,
+        bid=getattr(option, "bid", None), option_volume_5m=vol5,
+        option_volume_day=getattr(option, "volume", None), parts=parts,
     )
     rolled = False
     if any(name in gate["blocked_by"] for name in ("wide_spread", "low_bid", "option_volume")):
@@ -1459,7 +1476,8 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
             features.pop("_push", None)
             gate = card_gate(
                 option.side, volume, spread_fraction(option), settings,
-                bid=option.bid, option_volume_5m=vol5, parts=parts,
+                bid=option.bid, option_volume_5m=vol5,
+                option_volume_day=getattr(option, "volume", None), parts=parts,
             )
     unmet = (
         not settings.spread_legacy

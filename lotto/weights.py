@@ -81,31 +81,31 @@ def active_profile(book: dict | None = None, name: str | None = None) -> dict:
 
     post_threshold is used as written. A value above 60 stays. Negative
     thresholds clamp to 0. loose selects aggressive and moderate selects
-    conservative. An unknown name logs a warning and uses moderate (90).
-    Missing keys use the moderate preset: 90 / 40 / 0 / 10.
+    conservative. An unknown name logs a warning and uses conservative (92).
+    Missing keys use the conservative preset: 92 / 40 / 0 / 10.
     """
     if book is None:
         book = load_weights()
     profiles = book.get("profiles") if isinstance(book, dict) else None
     if not isinstance(profiles, dict):
         profiles = {}
-    requested = str(name or "moderate").strip().lower() or "moderate"
+    requested = str(name or "conservative").strip().lower() or "conservative"
     canonical = PROFILE_ALIASES.get(requested, requested)
     if canonical not in profiles:
         LOG.warning(
-            "Unknown LOTTO_PROFILE %r; using moderate. "
+            "Unknown LOTTO_PROFILE %r; using conservative. "
             "Expected aggressive, middle, or conservative.",
             requested,
         )
-        requested = "moderate"
-        canonical = PROFILE_ALIASES["moderate"]
+        requested = "conservative"
+        canonical = "conservative"
     raw = profiles.get(canonical)
     if not isinstance(raw, dict):
         raw = {}
     bolt = raw.get("bolt_min_features", raw.get("bolt_min_positive_features", 10))
     return {
         "profile": requested,
-        "post_threshold": max(0.0, _number(raw.get("post_threshold"), 90)),
+        "post_threshold": max(0.0, _number(raw.get("post_threshold"), 92)),
         "bypass_threshold": max(0.0, _number(raw.get("bypass_threshold"), 40)),
         "min_positive_features": max(0, _whole(raw.get("min_positive_features"), 0)),
         "strong_feature_min": max(0, _whole(bolt, 10)),
