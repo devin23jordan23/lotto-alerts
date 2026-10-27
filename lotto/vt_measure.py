@@ -417,12 +417,38 @@ def _cum_curves(snap, minute):
     return out
 
 
+def counted_volume(bar, direction: int, signed: bool) -> float:
+    """Share volume. Signed volume keeps only bars that close with the card."""
+    try:
+        vol = float(bar.volume)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+    if vol < 0 or vol != vol:
+        return 0.0
+    if not signed:
+        return vol
+    try:
+        opened = float(bar.open)
+        close = float(bar.close)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+    if direction > 0 and close > opened:
+        return vol
+    if direction < 0 and close < opened:
+        return vol
+    return 0.0
+
+
 def measure_volume(bars, direction: int, levels, atr, tod=None, premarket=None,
-                   cum_curves=None, full_day=None, rules=None, symbol: str = "") -> dict:
+                   cum_curves=None, full_day=None, rules=None, symbol: str = "",
+                   signed: bool = False) -> dict:
     """Raw ratios plus 0-1 scores. `bars` is the causal list ending at the card."""
     from .volume_trend import VOLUME_TREND_RULES
     rules = rules or VOLUME_TREND_RULES
     direction = 1 if int(direction) >= 0 else -1
+
+    def _vol(bar) -> float:
+        return counted_volume(bar, direction, signed)
     rows = list(bars or [])
     tod = tod or {}
     widen = int(rules["DAY_EXTEND_UNDER"])
@@ -441,7 +467,7 @@ def measure_volume(bars, direction: int, levels, atr, tod=None, premarket=None,
     day_ratio_value = None
     average = day_average(rows, use, premarket, widen)
     if average and average > 0:
-        day_ratio_value = rows[use].volume / average
+        day_ratio_value = _vol(rows[use]) / average
     else:
         day_ratio_value = 1.0
     raw["BRK_VS_DAY"] = float(day_ratio_value)
@@ -449,7 +475,7 @@ def measure_volume(bars, direction: int, levels, atr, tod=None, premarket=None,
 
     for width, key in ((5, "BU_5_DAY"), (3, "BU_3_DAY")):
         if use >= width:
-            pre = sum(rows[j].volume for j in range(use - width, use)) / width
+            pre = sum(_vol(rows[j]) for j in range(use - width, use)) / width
             base_index = use - width
             base = day_average(rows, base_index, premarket, widen)
             if base is None or base <= 0:
@@ -464,14 +490,14 @@ def measure_volume(bars, direction: int, levels, atr, tod=None, premarket=None,
     if use >= int(rules["brk_prior_bars"]):
         window = [rows[j].volume for j in range(use - int(rules["brk_prior_bars"]), use)]
         prior10 = sum(window) / len(window)
-    vs10 = rows[use].volume / prior10 if prior10 and prior10 > 0 else 1.0
+    vs10 = _vol(rows[use]) / prior10 if prior10 and prior10 > 0 else 1.0
     raw["BRK_VS_10"] = float(vs10)
     flags["BRK_VS_10_ge1.5"] = 1.0 if vs10 >= float(rules["brk_min_ratio"]) else 0.0
     flags["BU_5_DAY_ge1"] = 1.0 if raw["BU_5_DAY"] >= float(rules["bu_min_ratio"]) else 0.0
 
     minute = minute_of(rows[use])
     for key in (10, 5, 3):
-        ratio, source = specific_tod(rows[use].volume, minute, tod, key, day_ratio_value)
+        ratio, source = specific_tod(_vol(rows[use]), minute, tod, key, day_ratio_value)
         name = f"BRK_TOD_{key}"
         raw[name] = float(ratio)
         flags[name] = ratio_score(ratio, full)
@@ -510,7 +536,7 @@ def measure_volume(bars, direction: int, levels, atr, tod=None, premarket=None,
                     if norm is None or norm <= 0:
                         norm = fallback if fallback and fallback > 0 else None
                     if norm is not None and norm > 0:
-                        norms.append(item.volume / norm)
+                        norms.append(_vol(item) / norm)
                 ratio = sum(norms) / len(norms) if norms else 1.0
                 source = f"TOD_{k}" if norms else "NEUTRAL"
             name = f"BU_{n}_TOD_{k}"
@@ -518,7 +544,7 @@ def measure_volume(bars, direction: int, levels, atr, tod=None, premarket=None,
             flags[name] = ratio_score(ratio, full)
             sources[name] = source
 
-    cum = sum(bar.volume for bar in rows)
+    cum = sum(_vol(bar) for bar in rows)
     minute_now = minute_of(rows[-1])
     curves = cum_curves if cum_curves is not None else {}
     chain, chain_source = rvol_cum_chain(cum, curves, fallback, full_day, minute_now)

@@ -5,7 +5,7 @@ No orders are placed. Scores are research rules, not probabilities or promised r
 
 ## Model V profiles
 
-`LOTTO_PROFILE` selects the line. Unset matches `conservative`. The live book is v4c. `loose` is aggressive (70), `moderate` is conservative (92), and `balanced` is 84. The additive score is the only post decision. Hybrid bars at 40/61 and the handoff floors stay on the card as labels. There is no daily cap or top-N. One posted card per ticker and side is held for 8 minutes (`LOTTO_COOLDOWN_MINUTES`; `0` turns it off). Bypass cards clear `bypass_threshold` and the blockers only.
+`LOTTO_PROFILE` selects the line. Unset matches `conservative`. The live book is v4c. `loose` is aggressive (70), `moderate` is conservative (92), and `balanced` is 84. The additive score is the only post decision unless a gate is turned on. `LOTTO_GATE_ALIGNMENT` and `LOTTO_GATE_S12_BAR` default off. `LOTTO_ALIGNMENT_PACK=1` turns on the proposed alignment penalties (SPY -25, SPY level break -10, QQQ -10, sector -20, both -15, s12 -1 per point capped at -30, plus the location, stock-volume, and flat/slow rows). A set per-term variable still wins. The pack does not turn the hard gates on. Hybrid bars at 40/61 and the handoff floors stay on the card as labels. There is no daily cap or top-N. One posted card per ticker and side is held for 8 minutes (`LOTTO_COOLDOWN_MINUTES`; `0` turns it off). `LOTTO_COOLDOWN_RESET_ON_LEVEL_BREAK=1` clears that hold after a fresh level break in the card's direction. Bypass cards clear `bypass_threshold` and the blockers only.
 
 | Profile | Post | Bypass | Min positive | Bolt features |
 |---|---|---|---|---|

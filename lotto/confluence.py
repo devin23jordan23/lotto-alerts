@@ -1329,6 +1329,14 @@ def additive_features(snap, option, settings: Settings, metrics=None, history=No
     vwap = metrics.get("vwap")
     if vwap is not None and atr and bars:
         vwap_pb = _bounce_score(bars, direction, vwap, atr, settings)
+    session = _session_vwap(bars) if bars else None
+    vwap_side = 0.0
+    if session is not None and bars:
+        close = float(bars[-1].close)
+        if close > session:
+            vwap_side = 1.0
+        elif close < session:
+            vwap_side = -1.0
     # bounce is the reversal setup only. A VWAP tag stays on vwap_pb.
     bounce = 1.0 if setup_name in {"REVERSAL", "INTRADAY_REVERSAL"} else 0.0
     spy_open = snap.market_return_from_open
@@ -1395,6 +1403,7 @@ def additive_features(snap, option, settings: Settings, metrics=None, history=No
         "_vol5": vol5,
         "_rvol": rvol,
         "_push": push,
+        "_vwap_side": vwap_side,
     }
 
 
@@ -1449,7 +1458,7 @@ def spread_fraction(option) -> float | None:
 
 
 def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: float, history=None,
-                      spy_bars=None) -> bool:
+                      spy_bars=None, qqq_bars=None, index_levels=None) -> bool:
     """Score the weights book, roll a failing contract, and set the ⚡ marker.
 
     The additive score is the post decision. It has to clear the profile
@@ -1529,6 +1538,10 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
             parts=parts, settings=settings)
     else:
         points, score, positive = score_path(features, option.side, book, "primary")
+        if getattr(settings, "broad_rows_side_aware", 0):
+            from .alignment import zero_broad_rows
+            points, score, positive = zero_broad_rows(
+                points, score, positive, features, option.side)
     trigger = None
     if candidate.setup is not None:
         trigger = candidate.setup.trigger
@@ -1538,6 +1551,14 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     stale = ages["quote_age_s"] is not None and ages["quote_age_s"] > settings.stale_quote_seconds
     penalty = float(settings.stale_quote_penalty) if stale else 0.0
     marked = score - penalty
+    from .alignment import apply_alignment_penalties
+    marked, align_rows = apply_alignment_penalties(
+        marked, candidate, settings, features, spy_bars=spy_bars,
+        qqq_bars=qqq_bars, index_levels=index_levels,
+    )
+    if align_rows:
+        points = dict(points)
+        points.update(align_rows)
     card_score = round(marked, 2)
     enough = positive >= settings.min_positive_features
     post_ok = gate["post_ok"] and marked >= settings.post_threshold and enough

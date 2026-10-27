@@ -214,7 +214,12 @@ def env_settings() -> Settings:
     for field in fields(base):
         raw = os.getenv("LOTTO_" + field.name.upper())
         if raw is not None and field.name not in {"model", "preset", *PWIN_FIELDS}:
-            if field.name in {"standby_names", "spread_legacy", "day_volume_swap", "optb"}:
+            if field.name in {
+                "standby_names", "spread_legacy", "day_volume_swap", "optb",
+                "gate_alignment", "gate_s12_bar", "alignment_pack",
+                "broad_rows_side_aware", "cooldown_reset_on_level_break",
+                "sector_peer_side_aware", "signed_volume",
+            }:
                 updates[field.name] = 1 if raw.strip().lower() in {"1", "on", "true", "yes"} else 0
             elif field.name == "spread_bands":
                 updates[field.name] = tuple(
@@ -291,6 +296,11 @@ def env_settings() -> Settings:
                 "min_positive_features": 0,
                 "strong_feature_min": 10,
             })
+    if int(updates.get("alignment_pack", getattr(base, "alignment_pack", 0)) or 0):
+        from .alignment import PACK
+        for name, proposed in PACK.items():
+            if os.getenv("LOTTO_" + name.upper()) is None:
+                updates[name] = proposed
     return replace(base, **updates)
 
 
@@ -396,11 +406,13 @@ def main():
         stop = True
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
-    LOG.info("Lotto worker started: %d symbols, delivery=%s, alert count limits=%s, post cooldown=%s",
+    LOG.info("Lotto worker started: %d symbols, delivery=%s, alert count limits=%s, post cooldown=%s, alignment gate=%s, s12 bar gate=%s",
              len(symbols), live_delivery,
              "disabled" if not any((engine.settings.max_alerts_per_day, engine.settings.max_alerts_per_ticker,
                                      engine.settings.max_alerts_per_cycle)) else "configured",
-             "off" if engine.settings.cooldown_minutes <= 0 else f"{engine.settings.cooldown_minutes}m per ticker side")
+             "off" if engine.settings.cooldown_minutes <= 0 else f"{engine.settings.cooldown_minutes}m per ticker side",
+             "on" if engine.settings.gate_alignment else "off",
+             "on" if engine.settings.gate_s12_bar else "off")
     LOG.info("Strategy %s settings: %s",STRATEGY_VERSION,json.dumps(asdict(engine.settings),sort_keys=True))
     LOG.info('Quality policy: mode=%s policy=%s secondary_delivery=%s disabled=%s',
              engine.quality.mode,engine.quality.policy,

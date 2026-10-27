@@ -612,6 +612,9 @@ def score_volume_trend(features: dict, side: str, book: dict, path: str = "prima
         score, positive = _scale_sector_points(points, score, positive, raw_features)
         score, positive = _apply_divergence_tiers(points, score, positive, raw_features)
     score = _apply_penalties(points, score, raw_features, parts=parts, settings=settings)
+    if settings is not None and getattr(settings, "broad_rows_side_aware", 0):
+        from .alignment import zero_broad_rows
+        points, score, positive = zero_broad_rows(points, score, positive, raw_features, side)
     return points, score, positive, fired
 
 
@@ -1143,7 +1146,7 @@ def alignment_features(*, direction: int, peers=None, etf_pct=None, spy_pct=None
                        qqq_pct=None, spy_above_vwap=None, spy_bars=None,
                        name_pcts=None, minute=None, etf_last=None, etf_pmh=None,
                        etf_pml=None, etf_typical=None, pct_by_symbol=None,
-                       rules=None, symbol: str = "") -> dict:
+                       rules=None, symbol: str = "", peer_side_aware: bool = False) -> dict:
     """Every SECTOR_* and SPY_ALIGN_* value, calls and puts. Weights are separate."""
     rules = rules or VOLUME_TREND_RULES
     direction = 1 if int(direction) >= 0 else -1
@@ -1158,6 +1161,10 @@ def alignment_features(*, direction: int, peers=None, etf_pct=None, spy_pct=None
     l2 = sum(1 for row in rows if _beyond_extreme(row, direction, "pmh", "pml"))
     l3 = sum(1 for row in rows if _beyond_extreme(row, direction, "pdh", "pdl"))
     count = len(same)
+    against = sum(1 for row in rows if row.get("pct") is not None and direction * row["pct"] < 0)
+    peer_on = count == int(rules["sector_peer_exact"])
+    if peer_side_aware and against >= count:
+        peer_on = False
     breadth = rally_breadth(direction, pct_by_symbol if pct_by_symbol is not None else {})
     lo = float(rules["sector_etf_band_lo"])
     hi = float(rules["sector_etf_band_hi"])
@@ -1171,7 +1178,7 @@ def alignment_features(*, direction: int, peers=None, etf_pct=None, spy_pct=None
         "SECTOR_ETF_PCT_TS": etf_typical_score(direction, etf, etf_typical, rules),
         "SECTOR_PM_RANGE_POS": _pm_range(direction, etf_last, etf_pmh, etf_pml, rules),
         "SECTOR_VS_SPY": _sector_vs_spy(direction, etf, _finite(spy_pct), rules),
-        "SECTOR_PEER_COUNT": 1.0 if count == int(rules["sector_peer_exact"]) else 0.0,
+        "SECTOR_PEER_COUNT": 1.0 if peer_on else 0.0,
         "SPY_ALIGN_OPEN": _spy_open(direction, _finite(spy_pct), spy_above_vwap),
         "SPY_ALIGN_TURN_3M": spy_turn(spy_bars, direction, float(rules["SPY_ALIGN_TURN_WINDOW_MIN"]), rules),
         "SPY_ALIGN_TURN_5M": spy_turn(spy_bars, direction, float(rules["SPY_ALIGN_TURN_5M_WINDOW_MIN"]), rules),
@@ -1616,7 +1623,7 @@ def _levels_for(snap, direction: int) -> list:
     return [getattr(snap, name, None) for name in names]
 
 
-def break_features(bars, direction: int, snap, rules=None) -> dict:
+def break_features(bars, direction: int, snap, rules=None, signed: bool = False) -> dict:
     rules = rules or VOLUME_TREND_RULES
     found = _fresh_break(
         bars, _levels_for(snap, direction), direction, int(rules["brk_window_bars"]))
@@ -1628,9 +1635,9 @@ def break_features(bars, direction: int, snap, rules=None) -> dict:
         if index >= prior_n:
             prior = _mean([bars[j].volume for j in range(index - prior_n, index)])
             if prior and prior > 0:
-                brk_ratio = bars[index].volume / prior
+                brk_ratio = _counted(bars[index], direction, signed) / prior
         if index >= pre_n:
-            pre = _mean([bars[j].volume for j in range(index - pre_n, index)])
+            pre = _mean([_counted(bars[j], direction, signed) for j in range(index - pre_n, index)])
             day = _mean([bars[j].volume for j in range(index)])
             if pre is not None and day and day > 0:
                 bu_ratio = pre / day
@@ -1639,28 +1646,36 @@ def break_features(bars, direction: int, snap, rules=None) -> dict:
     return {
         "BRK_VS_10_ge1.5": 1.0 if brk_ratio is not None and brk_ratio >= hot else 0.0,
         "BU_5_DAY_ge1": 1.0 if bu_ratio is not None and bu_ratio >= built else 0.0,
-        "VOL_BRK": _match(brk_ratio if brk_ratio is not None else _bar_vs_day(bars)),
+        "VOL_BRK": _match(brk_ratio if brk_ratio is not None else _bar_vs_day(bars, direction, signed)),
         "VOL_PRE": _match(bu_ratio if bu_ratio is not None else 1.0),
         "_brk_ratio": brk_ratio,
         "_break_index": None if found is None else found[0],
     }
 
 
-def _bar_vs_day(bars) -> float:
+def _counted(bar, direction: int, signed: bool) -> float:
+    """Bar volume, or 0 when signed volume is on and the bar fights the card."""
+    if not signed:
+        return float(getattr(bar, "volume", 0) or 0)
+    from .vt_measure import counted_volume
+    return counted_volume(bar, direction, True)
+
+
+def _bar_vs_day(bars, direction: int = 1, signed: bool = False) -> float:
     rows = list(bars or [])
     if len(rows) < 2:
         return 1.0
     average = _mean([bar.volume for bar in rows[:-1]])
     if not average or average <= 0:
         return 1.0
-    return rows[-1].volume / average
+    return _counted(rows[-1], direction, signed) / average
 
 
-def _window_ratio(bars, size: int) -> float:
+def _window_ratio(bars, size: int, direction: int = 1, signed: bool = False) -> float:
     rows = list(bars or [])
     if len(rows) < size * 2:
         return 1.0
-    recent = sum(bar.volume for bar in rows[-size:])
+    recent = sum(_counted(bar, direction, signed) for bar in rows[-size:])
     chunks = []
     end = len(rows) - size
     while end >= size and len(chunks) < 5:
@@ -1853,7 +1868,7 @@ def _upper(bars, direction: int) -> float:
     return sum(1 for bar in window if bar.close <= line) / len(window)
 
 
-def sector_feature_choice(snap, direction, spy_bars, rules=None) -> dict:
+def sector_feature_choice(snap, direction, spy_bars, rules=None, peer_side_aware: bool = False) -> dict:
     """Score each mapped ETF and keep the higher total after SECTOR_ETF_WEIGHT.
 
     QQQ, SPY, and IWM get SPY rows only. Their SECTOR_* values are 0.
@@ -1875,6 +1890,7 @@ def sector_feature_choice(snap, direction, spy_bars, rules=None) -> dict:
         pct_by_symbol=getattr(snap, "vt_pct_by_symbol", None),
         rules=rules,
         symbol=symbol,
+        peer_side_aware=bool(peer_side_aware),
     )
     if str(symbol).upper() in NO_SECTOR_ETF:
         align = alignment_features(**common, peers=[], etf_pct=None, etf_typical=None)
@@ -1952,11 +1968,12 @@ def enrich_features(features: dict, snap, settings, prior=None, spy_bars=None) -
     features["RVOL_CHAIN_1_15"] = dead
     features["_rvol"] = float(chain)
     features["_rvol_src"] = source
-    day_ratio = chain if source.startswith("RVOL") else _bar_vs_day(bars)
+    signed = bool(getattr(settings, "signed_volume", 0))
+    day_ratio = chain if source.startswith("RVOL") else _bar_vs_day(bars, direction, signed)
     features["VOL_DAY"] = _match(day_ratio)
-    features["VOL_5"] = _match(_window_ratio(bars, 5))
-    features["VOL_15"] = _match(_window_ratio(bars, 15))
-    broken = break_features(bars, direction, snap, rules)
+    features["VOL_5"] = _match(_window_ratio(bars, 5, direction, signed))
+    features["VOL_15"] = _match(_window_ratio(bars, 15, direction, signed))
+    broken = break_features(bars, direction, snap, rules, signed=signed)
     features.update(broken)
     atr = getattr(snap, "prior_atr21", None)
     if atr is None:
@@ -1971,7 +1988,10 @@ def enrich_features(features: dict, snap, settings, prior=None, spy_bars=None) -
     if broken.get("_break_index") is not None:
         tb["TB_ENTRY"] = min(1.0, tb["TB_ENTRY"] + 0.16 * extra)
     features.update(tb)
-    align = sector_feature_choice(snap, direction, spy_bars, rules)
+    align = sector_feature_choice(
+        snap, direction, spy_bars, rules,
+        peer_side_aware=bool(getattr(settings, "sector_peer_side_aware", 0)),
+    )
     spy_pct, _qqq_pct, _above = _spy_view(snap, spy_bars)
     for key, value in align.items():
         if key.startswith("_"):
@@ -2034,6 +2054,7 @@ def enrich_features(features: dict, snap, settings, prior=None, spy_bars=None) -
         full_day=getattr(snap, "vt_full_day", None),
         rules=rules,
         symbol=getattr(snap, "symbol", ""),
+        signed=signed,
     )
     features.update(measured["flags"])
     features.update(vol_bin_flags(measured["raw"], rules))
