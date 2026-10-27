@@ -1,4 +1,4 @@
-"""Volume-trend profiles. Same weights in all three; only the post line differs: 90, 102, and 120.
+"""Volume-trend profiles. Same weights in all three; only the post line differs: 75, 102, and 120.
 
 SPY_ALIGN_TURN_3M is 15. Its window is SPY_ALIGN_TURN_WINDOW_MIN = 3.5.
 3.5 minutes is 210 seconds. The reference close is the linear interpolate
@@ -318,10 +318,10 @@ def _cutoff(post: float) -> dict:
     }
 
 
-# Post lines: aggressive 90, balanced 102, conservative 120.
+# Post lines: aggressive 75, balanced 102, conservative 120.
 # Do not put these profiles in the JSON book.
 PROFILES = {
-    "volume_trend_aggressive": _cutoff(90),
+    "volume_trend_aggressive": _cutoff(75),
     "volume_trend_balanced": _cutoff(102),
     "volume_trend_conservative": _cutoff(120),
 }
