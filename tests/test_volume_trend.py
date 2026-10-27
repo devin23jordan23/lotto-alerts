@@ -259,6 +259,14 @@ class VolumeRowTests(unittest.TestCase):
         }
         book = overlay_book(load_weights(), "volume_trend_balanced")
         self.assertEqual(PRIMARY_WEIGHTS["BU_5_DAY_ge1"], 0)
+        for name in ("volume_trend_aggressive", "volume_trend_balanced", "volume_trend_conservative"):
+            self.assertEqual(PROFILES[name]["primary"]["BU_5_DAY_ge1"], 0)
+        live = load_weights()
+        self.assertNotIn("BU_5_DAY_ge1", live["weights"])
+        self.assertNotIn("BU_5_DAY_ge1", live.get("penalties") or {})
+        over = overlay_book(live, "volume_trend_balanced")
+        self.assertEqual(over["weights"]["BU_5_DAY_ge1"], {"call": 0, "put": 0})
+        self.assertNotIn("BU_5_DAY_ge1", live["weights"])
         for alias, rows in expected.items():
             self.assertEqual(alias_rows(VOL_ALIASES[alias]), rows)
             self.assertEqual(PRIMARY_WEIGHTS[alias], 0)

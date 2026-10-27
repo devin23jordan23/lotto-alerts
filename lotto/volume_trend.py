@@ -177,8 +177,9 @@ PRIMARY_WEIGHTS = {
     "RVOL_CHAIN_1_15": -9,
     "rvol_06_08": -9,
     "BRK_VS_10_ge1.5": 15,
-    # Added in this profile, not on the v4c book. Weight 0 so it does not
-    # double-count BU_5_TOD_10. The flag is still computed.
+    # Backtested book is 0. All three volume_trend profiles keep 0 so this
+    # row does not double-count BU_5_TOD_10. The live JSON profiles do not
+    # carry the row. The flag is still computed.
     "BU_5_DAY_ge1": 0,
     "TB_ENTRY": 0,
     "TB_HOLD": 0,
