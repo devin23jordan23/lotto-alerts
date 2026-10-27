@@ -367,9 +367,11 @@ def main():
         stop = True
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
-    LOG.info("Lotto worker started: %d symbols, delivery=%s, alert count limits=%s", len(symbols), live_delivery,
+    LOG.info("Lotto worker started: %d symbols, delivery=%s, alert count limits=%s, post cooldown=%s",
+             len(symbols), live_delivery,
              "disabled" if not any((engine.settings.max_alerts_per_day, engine.settings.max_alerts_per_ticker,
-                                     engine.settings.max_alerts_per_cycle)) else "configured")
+                                     engine.settings.max_alerts_per_cycle)) else "configured",
+             "off" if engine.settings.cooldown_minutes <= 0 else f"{engine.settings.cooldown_minutes}m per ticker side")
     LOG.info("Strategy %s settings: %s",STRATEGY_VERSION,json.dumps(asdict(engine.settings),sort_keys=True))
     LOG.info('Quality policy: mode=%s policy=%s secondary_delivery=%s disabled=%s',
              engine.quality.mode,engine.quality.policy,

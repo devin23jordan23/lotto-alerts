@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import logging
 import os
+import sqlite3
 
 from dataclasses import replace
 
@@ -96,6 +97,35 @@ def dedupe_ready_cards(ready: list) -> list:
     return [best[key] for key in order]
 
 
+def cooldown_underlying(symbol: str) -> str:
+    """SPX and the SPXW option root are one underlying for the post hold."""
+    name = (symbol or "").upper()
+    if name in {"SPX", "SPXW"}:
+        return "SPX"
+    return name
+
+
+def cooldown_reason(symbol: str, side: str, at: datetime, posted_at: datetime | None,
+                    minutes: int) -> str | None:
+    """None when this card may post. Otherwise the decision line for the hold.
+
+    The window is measured from the last posted card. A card at exactly
+    `minutes` is allowed. The line is `cooldown: TICKER SIDE posted Xs ago`.
+    """
+    if minutes <= 0 or posted_at is None:
+        return None
+    elapsed = (at - posted_at).total_seconds()
+    if elapsed >= minutes * 60:
+        return None
+    seconds = max(0, int(elapsed))
+    return f"cooldown: {(symbol or '').upper()} {(side or '').upper()} posted {seconds}s ago"
+
+
+# Deliveries that mean the scanner already emitted the card. Internal watches
+# and unsent research rows do not start the clock.
+_POSTED_DELIVERIES = ("pending", "sent", "uncertain", "failed", "expired", "dry_run")
+
+
 class Engine:
     def __init__(self, store: Store, settings: Settings | None = None, dry_run: bool = True, quality: QualityConfig | None = None):
         self.store = store
@@ -116,6 +146,8 @@ class Engine:
         self.fallback_log = None
         self.fallback_state = {}
         self.fallback_pending = []
+        self.post_cooldown = {}
+        self._seed_post_cooldown()
 
     def remember_stock_events(self, ideas) -> None:
         self.stock_events.extend(ideas)
@@ -317,9 +349,10 @@ class Engine:
     def process_model_v(self, snapshots: list[Snapshot]) -> list[dict]:
         """Score every priced contract on v2. Post only when it clears its path bar.
 
-        Nothing else posts. No cap, cooldown, repeat penalty, or hard gate.
-        The only suppression is an exact duplicate: same contract and trigger
-        inside the dedupe window.
+        Nothing else posts. No cap, repeat penalty, or hard gate. One posted
+        card per ticker and side is held for cooldown_minutes. The other
+        suppression is an exact duplicate: same contract and trigger inside
+        the dedupe window.
         """
         from .model_v import apply_v2, missing_v2, pick_one_otm, thin_candidate
         from .patterns import Setup
@@ -422,18 +455,68 @@ class Engine:
         ready = dedupe_ready_cards(ready)
         for candidate in sorted(ready, key=lambda c: (-c.metrics.get("card_score", c.score), c.snapshot.symbol)):
             snap = candidate.snapshot
+            held = self._cooldown_reason(candidate)
+            if held:
+                # The score and the contract stay in candidate_evaluations.
+                # This decision is the log line. The card is not queued.
+                self.store.decision(snap, "RUNNER", held, candidate)
+                continue
             if cfg.send_requote:
                 candidate.metrics["send_requote"] = 1
             phase = "ACTIVE"
             payload = alert_payload(candidate, phase)
             self._annotate_card(payload, candidate)
             ident = self.store.queue(candidate, payload, self.dry_run, phase, None, tier=None, sendable=True)
+            self._remember_post(candidate)
             posted = f"active alert {ident}"
             if candidate.metrics.get("fallback_reason"):
                 posted = f"{posted}: {candidate.metrics['fallback_reason']}"
             self.store.decision(snap, candidate.state, posted, candidate)
             alerts.append({"id": ident, "phase": phase, "parent_id": None, "payload": payload})
         return self._with_shadow(alerts, snapshots)
+
+    def _cooldown_reason(self, candidate) -> str | None:
+        snap = candidate.snapshot
+        side = candidate.option.side if candidate.option is not None else ""
+        key = (snap.day, cooldown_underlying(snap.symbol), (side or "").upper())
+        return cooldown_reason(
+            snap.symbol, side, snap.at, self.post_cooldown.get(key), self.settings.cooldown_minutes)
+
+    def _remember_post(self, candidate) -> None:
+        if self.settings.cooldown_minutes <= 0 or candidate.option is None:
+            return
+        snap = candidate.snapshot
+        side = candidate.option.side.upper()
+        key = (snap.day, cooldown_underlying(snap.symbol), side)
+        current = self.post_cooldown.get(key)
+        if current is None or snap.at > current:
+            self.post_cooldown[key] = snap.at
+
+    def _seed_post_cooldown(self) -> None:
+        """Reload today's posted cards so a restart does not send them again."""
+        if self.settings.cooldown_minutes <= 0:
+            return
+        today = datetime.now(ET).date().isoformat()
+        placeholders = ",".join("?" * len(_POSTED_DELIVERIES))
+        try:
+            rows = self.store.db.execute(
+                f"""SELECT symbol, side, at FROM alerts
+                    WHERE day=? AND IFNULL(phase, '')!='POTENTIAL'
+                      AND delivery IN ({placeholders})""",
+                (today, *_POSTED_DELIVERIES),
+            ).fetchall()
+        except sqlite3.Error:
+            logging.getLogger(__name__).warning("post cooldown seed failed")
+            return
+        for row in rows:
+            side = (row["side"] or "").upper()
+            if side not in {"CALL", "PUT"} or not row["at"] or not row["symbol"]:
+                continue
+            at = datetime.fromisoformat(row["at"])
+            key = (today, cooldown_underlying(row["symbol"]), side)
+            current = self.post_cooldown.get(key)
+            if current is None or at > current:
+                self.post_cooldown[key] = at
 
     def _with_shadow(self, alerts, snapshots):
         """Score SHADOW_PROFILE after the live cards are already built.

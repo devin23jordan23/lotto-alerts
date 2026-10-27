@@ -57,7 +57,7 @@ class ModelVTests(unittest.TestCase):
                          "LOTTO_STRENGTH_DISTRIBUTION_PATH", "LOTTO_ATR_DAYS",
                          "LOTTO_FALLBACK_RULE", "LOTTO_STRONG_SCORE", "LOTTO_FB_PUSH_ATR_MIN",
                          "LOTTO_PROFILE", "LOTTO_POST_THRESHOLD", "LOTTO_BYPASS_THRESHOLD",
-                         "LOTTO_MIN_POSITIVE_FEATURES"):
+                         "LOTTO_MIN_POSITIVE_FEATURES", "LOTTO_COOLDOWN_MINUTES"):
                 os.environ.pop(name, None)
             live = env_settings()
         self.assertEqual(live.model, "V")
@@ -67,6 +67,7 @@ class ModelVTests(unittest.TestCase):
         self.assertEqual((live.fb_rvol_min, live.fb_push_atr_min, live.fb_room_atr_max, live.fb_max_spread_pct),
                          (0, 0.75, 1.0, 15))
         self.assertEqual(live.post_threshold, 92)
+        self.assertEqual(live.cooldown_minutes, 8)
         self.assertEqual(live.profile, "conservative")
         self.assertEqual(live.min_positive_features, 0)
         self.assertEqual(model_v_settings(post_threshold=45).post_threshold, 45)
@@ -300,7 +301,15 @@ class ModelVTests(unittest.TestCase):
         third_snap = advance(drift, 1)
         with patch("lotto.engine.candidates", side_effect=lambda snap, history, cfg: fake(snap, history, cfg, 110)):
             third = engine.process([third_snap])
-        self.assertEqual(len(third), 1)
+        # A new event inside 8 minutes is still scored. It is not posted.
+        self.assertEqual(third, [])
+        cooled = store.db.execute(
+            "SELECT reason FROM decisions WHERE reason LIKE 'cooldown:%' ORDER BY at DESC").fetchone()
+        self.assertRegex(cooled["reason"], r"^cooldown: \S+ CALL posted \d+s ago$")
+        held = store.db.execute(
+            "SELECT COUNT(*) FROM candidate_evaluations WHERE at=?",
+            (third_snap.at.isoformat(),)).fetchone()[0]
+        self.assertGreater(held, 0)
         row = store.db.execute("SELECT features FROM decisions WHERE reason LIKE 'active alert%' ORDER BY at DESC").fetchone()
         parts = json.loads(row["features"])["parts"]
         self.assertNotIn("pen_repeat", parts)
@@ -942,7 +951,9 @@ class FallbackRuleTests(unittest.TestCase):
         first = [100] * 14 + [101, 102]
         near = first + [100, 101, 102]
         near_entry = near + [102, 102]
-        later = first + [102] * 4 + [100, 101, 102]
+        # Eight minutes after the first fire, so the post hold has expired and
+        # this still proves a new move can post.
+        later = first + [102] * 5 + [100, 101, 102]
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
             posted, rows = play("on", [first, first + [102], first + [102, 102], near, near + [102], near_entry], directory)

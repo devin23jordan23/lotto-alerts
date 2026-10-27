@@ -284,6 +284,9 @@ class Settings:
     max_alerts_per_day: int = 0
     max_alerts_per_ticker: int = 0
     max_alerts_per_cycle: int = 0
+    # One posted Discord card per underlying and side. 0 disables the hold.
+    # SPX and SPXW share a slot. The clock is the last card that was posted.
+    cooldown_minutes: int = 8
     rearm_minutes: int = 3
     max_quote_age_seconds: int = 90
     min_ask: float = 0.10
@@ -452,7 +455,8 @@ class Settings:
                      "max_quote_age_seconds", "min_cluster", "min_strike_volume_5m"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
-        for name in ("max_alerts_per_day", "max_alerts_per_ticker", "max_alerts_per_cycle"):
+        for name in ("max_alerts_per_day", "max_alerts_per_ticker", "max_alerts_per_cycle",
+                     "cooldown_minutes"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} cannot be negative")
         if self.active_quality_gate not in (0, 1):

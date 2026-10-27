@@ -5,7 +5,7 @@ No orders are placed. Scores are research rules, not probabilities or promised r
 
 ## Model V profiles
 
-`LOTTO_PROFILE` selects the line. Unset matches `conservative`. The live book is v4c. `loose` is aggressive (70), `moderate` is conservative (92), and `balanced` is 84. The additive score is the only post decision. Hybrid bars at 40/61 and the handoff floors stay on the card as labels. There is no daily cap, top-N, or cooldown. Bypass cards clear `bypass_threshold` and the blockers only.
+`LOTTO_PROFILE` selects the line. Unset matches `conservative`. The live book is v4c. `loose` is aggressive (70), `moderate` is conservative (92), and `balanced` is 84. The additive score is the only post decision. Hybrid bars at 40/61 and the handoff floors stay on the card as labels. There is no daily cap or top-N. One posted card per ticker and side is held for 8 minutes (`LOTTO_COOLDOWN_MINUTES`; `0` turns it off). Bypass cards clear `bypass_threshold` and the blockers only.
 
 | Profile | Post | Bypass | Min positive | Bolt features |
 |---|---|---|---|---|
@@ -197,7 +197,16 @@ delta/gamma ranking proxy holds IV and time fixed; it is not a return forecast.
 
 There are no daily, per-cycle, or per-ticker alert-count ceilings by default;
 `LOTTO_MAX_ALERTS_PER_DAY`, `LOTTO_MAX_ALERTS_PER_CYCLE`, and
-`LOTTO_MAX_ALERTS_PER_TICKER` are `0` (unlimited). One minute of confirmation requires two distinct
+`LOTTO_MAX_ALERTS_PER_TICKER` are `0` (unlimited). Posted cards do cool down:
+at most one Discord card per underlying and side (CALL or PUT) inside
+`LOTTO_COOLDOWN_MINUTES` (default 8; `0` disables it). The first card keeps
+the slot. A later card for that same ticker and side is still scored and
+saved, and the decision reason is `cooldown: TICKER SIDE posted Xs ago`, but
+it is not sent. The other side is not held. SPX and SPXW share one slot. The
+clock is the last posted card, kept for the session and reloaded from today's
+posted alerts when the worker starts.
+
+One minute of confirmation requires two distinct
 completed bars; poll jitter no longer adds another minute. Same-leg
 deduplication governs a new alert, including a new attempt in the
 same contract. A distinct price-level break or a recorded reset can alert again
