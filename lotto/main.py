@@ -209,6 +209,11 @@ def env_settings() -> Settings:
         updates["score_mode"] = str(updates["score_mode"]).lower()
     if "fallback_rule" in updates:
         updates["fallback_rule"] = str(updates["fallback_rule"]).strip().lower()
+    # SHADOW_PROFILE is the operator switch. LOTTO_SHADOW_PROFILE is the same field.
+    if os.getenv("SHADOW_PROFILE") is not None:
+        updates["shadow_profile"] = os.getenv("SHADOW_PROFILE", "").strip()
+    elif "shadow_profile" in updates:
+        updates["shadow_profile"] = str(updates["shadow_profile"]).strip()
     updates["model"] = model
     if model == "V":
         updates["preset"] = preset
@@ -343,6 +348,15 @@ def main():
         configured_universe = ",".join(filter(None, (os.getenv("UOA_CORE_UNIVERSE", ""), os.getenv("UOA_IN_PLAY", "")))) or DEFAULT_UNIVERSE
     symbols = universe_symbols(configured_universe)
     standby = [s for s in standby_symbols() if s not in symbols]
+    from .volume_trend import (
+        ensure_etf_typicals, install_extra_universe, is_volume_trend, pin_deep_names, volume_trend_symbols,
+    )
+    if is_volume_trend(engine.settings.profile):
+        symbols = volume_trend_symbols(symbols)
+        standby = [s for s in standby if s not in symbols]
+        pin_deep_names(client.discovery)
+        symbols, _loaded, _budget = install_extra_universe(symbols, client, engine.settings)
+        ensure_etf_typicals(client, datetime.now(timezone.utc))
     engine.runner_names = frozenset(standby)
     if not symbols:
         raise SystemExit("LOTTO_UNIVERSE must contain at least one symbol")
@@ -492,6 +506,7 @@ def main():
                 if row:
                     LOG.info('Live decision %s: %s', symbol, json.dumps(dict(row)))
             maybe_nightly(store,client,symbols,data_dir,now)
+            if is_volume_trend(engine.settings.profile): ensure_etf_typicals(client, now)
             client.warm_universe(symbols, now)
         except Exception as exc:
             detail = str(exc) if type(exc) is RuntimeError else type(exc).__name__

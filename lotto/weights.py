@@ -90,6 +90,10 @@ def active_profile(book: dict | None = None, name: str | None = None) -> dict:
     if not isinstance(profiles, dict):
         profiles = {}
     requested = str(name or "conservative").strip().lower() or "conservative"
+    from .volume_trend import volume_trend_lines
+    lines = volume_trend_lines(requested)
+    if lines is not None:
+        return lines
     canonical = PROFILE_ALIASES.get(requested, requested)
     if canonical not in profiles:
         LOG.warning(

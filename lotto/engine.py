@@ -312,7 +312,7 @@ class Engine:
             self.rearmed.discard((snap.day, snap.symbol))
             self.store.decision(snap, candidate.state, f"{phase.lower()} alert {ident}", candidate)
             alerts.append({"id": ident, "phase": phase, "parent_id": parent_id, "payload": payload})
-        return alerts
+        return self._with_shadow(alerts, snapshots)
 
     def process_model_v(self, snapshots: list[Snapshot]) -> list[dict]:
         """Score every priced contract on v2. Post only when it clears its path bar.
@@ -433,7 +433,112 @@ class Engine:
                 posted = f"{posted}: {candidate.metrics['fallback_reason']}"
             self.store.decision(snap, candidate.state, posted, candidate)
             alerts.append({"id": ident, "phase": phase, "parent_id": None, "payload": payload})
+        return self._with_shadow(alerts, snapshots)
+
+    def _with_shadow(self, alerts, snapshots):
+        """Score SHADOW_PROFILE after the live cards are already built.
+
+        A shadow failure is logged and the live return is unchanged.
+        """
+        try:
+            self.score_shadow(snapshots)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "shadow profile failed (%s); live cards unchanged", type(exc).__name__)
         return alerts
+
+    def shadow_profile_name(self) -> str:
+        """Empty means off. SHADOW_PROFILE wins when the environment sets it."""
+        if "SHADOW_PROFILE" in os.environ:
+            return os.environ.get("SHADOW_PROFILE", "").strip()
+        return str(getattr(self.settings, "shadow_profile", "") or "").strip()
+
+    def shadow_settings(self):
+        """Live settings with the shadow profile's line. None when shadow is off."""
+        name = self.shadow_profile_name()
+        if not name:
+            return None
+        from .weights import active_profile, load_weights
+        lines = active_profile(load_weights(self.settings.weights_path), name)
+        return replace(
+            self.settings,
+            profile=lines["profile"],
+            post_threshold=float(lines["post_threshold"]),
+            bypass_threshold=float(lines["bypass_threshold"]),
+            min_positive_features=int(lines["min_positive_features"]),
+            strong_feature_min=int(lines["strong_feature_min"]),
+        )
+
+    def score_shadow(self, snapshots: list[Snapshot]) -> None:
+        """Score this cycle on the shadow profile. Write shadow_cards only.
+
+        Does not queue alerts, does not call Discord, and does not touch the
+        live history, last-bar cursor, decisions, or alert rows.
+        """
+        cfg = self.shadow_settings()
+        if cfg is None or not snapshots:
+            return
+        from .model_v import apply_v2, missing_v2, same_event
+
+        if not hasattr(self, "shadow_last_bar"):
+            self.shadow_last_bar = {}
+        profile = cfg.profile
+        window = timedelta(minutes=self.settings.event_dedupe_minutes)
+        for snap in snapshots:
+            key = (snap.day, snap.symbol)
+            if not snap.bars:
+                continue
+            problems = snap.problems(
+                cfg.max_quote_age_seconds, min_bars=max(3, min(cfg.min_opening_bars, 3)))
+            if problems:
+                continue
+            if self.shadow_last_bar.get(key) == snap.bars[-1].end:
+                continue
+            self.shadow_last_bar[key] = snap.bars[-1].end
+            history = list(self.history.get(key, []))
+            try:
+                evaluated = candidates(snap, history, cfg)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "shadow candidates failed for %s (%s)", snap.symbol, type(exc).__name__)
+                continue
+            for candidate in evaluated:
+                try:
+                    apply_v2(candidate, cfg, history, self.index_bars,
+                             thin=not candidate.metrics.get("cluster_size"),
+                             a_bar=snap.symbol in self.runner_names)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "shadow score failed for %s (%s)", snap.symbol, type(exc).__name__)
+                    continue
+                if candidate.metrics.get("score_v2") is None and not candidate.qualifying:
+                    candidate.metrics.update(missing_v2("score did not compute"))
+                if not candidate.qualifying:
+                    continue
+                if self._shadow_duplicate(candidate, profile, window, same_event):
+                    continue
+                points = candidate.metrics.get("confluence_points") or {}
+                breakdown = {
+                    str(name): value for name, value in points.items()
+                    if isinstance(value, (int, float)) and value
+                }
+                score = candidate.metrics.get("card_score", candidate.score)
+                self.store.record_shadow_card(profile, candidate, breakdown, score)
+
+    def _shadow_duplicate(self, candidate, profile: str, window, same_event) -> bool:
+        snap = candidate.snapshot
+        trigger = candidate.setup.trigger if candidate.setup else candidate.metrics.get("handoff_trigger")
+        rows = self.store.db.execute(
+            """SELECT at, breakdown FROM shadow_cards
+               WHERE profile=? AND day=? AND symbol=? AND contract=? ORDER BY at DESC""",
+            (profile, snap.day, snap.symbol, candidate.option.symbol)).fetchall()
+        for row in rows:
+            at = datetime.fromisoformat(row["at"])
+            if snap.at - at >= window or snap.at < at:
+                continue
+            if same_event(trigger, trigger, snap.spot, snap.prior_atr):
+                return True
+        return False
 
     def _apply_stock_override(self, snap, scored, cfg, history) -> None:
         """Post the priced 1-OTM contract when every strong-stock check is on.
@@ -472,6 +577,9 @@ class Engine:
 
     def _option_side_skip(self, snap, side, ready):
         del side
+        from .volume_trend import drop_repeat_skip
+        if drop_repeat_skip(self.settings.profile):
+            return False, None, None
         start = snap.at - timedelta(minutes=self.settings.fb_same_move_before_min)
         for candidate in ready:
             if candidate.snapshot.symbol != snap.symbol:
