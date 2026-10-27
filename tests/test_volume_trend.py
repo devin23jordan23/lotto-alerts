@@ -6,7 +6,7 @@ from lotto.models import ET, Bar, Option
 from lotto.volume_trend import (
     DEEP_SLOTS, EXTRA_UNIVERSE, EXTRA_UNIVERSE_MAX, PAID_MARKET_DATA_PER_MINUTE,
     PRIMARY_WEIGHTS, PROFILES, VOL_ALIASES, VOLUME_TREND_RULES,
-    alignment_features, call_budget, evaluate_stacks, is_volume_trend, overlay_book,
+    alias_rows, alignment_features, call_budget, evaluate_stacks, is_volume_trend, overlay_book,
     penalty_opt_vol_points, penalty_spread_points,
     poll_cycle_calls, rally_breadth, rally_points, reference_close, score_volume_trend,
     sector_map_names, select_extra_names, spy_turn, spy_window_return, stacks_from_rules,
@@ -246,10 +246,30 @@ class VolumeRowTests(unittest.TestCase):
         self.assertEqual(close_loc_score(bottom, 1, rules), 0.0)
         self.assertEqual(close_loc_score(top, -1, rules), 0.0)
         self.assertGreater(range_atr_score(0.4, 2.0, rules), 0)
-        for alias, primary in VOL_ALIASES.items():
-            self.assertIn(primary, PRIMARY_WEIGHTS)
+        for alias, spec in VOL_ALIASES.items():
             self.assertEqual(PRIMARY_WEIGHTS[alias], 0)
-            self.assertIn(primary, PRIMARY_WEIGHTS)
+            for primary in alias_rows(spec):
+                self.assertIn(primary, PRIMARY_WEIGHTS)
+
+    def test_remapped_aliases_name_live_rows_and_add_no_points(self):
+        expected = {
+            "VOL_RVOL_TOD": ("RVOL_CUM_15_25", "RVOL_CUM_ge25"),
+            "VOL_PRE_BREAK": ("BU_5_TOD_10",),
+            "VOL_BREAK_BAR": ("BRK_TOD_BRK_08_12", "BRK_TOD_BRK_12_3", "BRK_TOD_BRK_ge3"),
+        }
+        book = overlay_book(load_weights(), "volume_trend_balanced")
+        self.assertEqual(PRIMARY_WEIGHTS["BU_5_DAY_ge1"], 0)
+        for alias, rows in expected.items():
+            self.assertEqual(alias_rows(VOL_ALIASES[alias]), rows)
+            self.assertEqual(PRIMARY_WEIGHTS[alias], 0)
+            for primary in rows:
+                self.assertGreater(PRIMARY_WEIGHTS[primary], 0)
+                live = {primary: 1}
+                _points, score, _positive = score_path(live, "CALL", book)
+                aliased = {primary: 1, alias: 1}
+                _again, with_alias, _pos = score_path(aliased, "CALL", book)
+                self.assertEqual(with_alias, score)
+                self.assertEqual(_again.get(alias, 0), 0)
 
 
 class StackTests(unittest.TestCase):

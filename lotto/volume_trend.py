@@ -177,7 +177,9 @@ PRIMARY_WEIGHTS = {
     "RVOL_CHAIN_1_15": -9,
     "rvol_06_08": -9,
     "BRK_VS_10_ge1.5": 15,
-    "BU_5_DAY_ge1": 10,
+    # Added in this profile, not on the v4c book. Weight 0 so it does not
+    # double-count BU_5_TOD_10. The flag is still computed.
+    "BU_5_DAY_ge1": 0,
     "TB_ENTRY": 0,
     "TB_HOLD": 0,
     "TB_CONT": 0,
@@ -318,15 +320,23 @@ VOLUME_ALTERNATES = {
 }
 
 # VOL_* names kept so an older note still points at Ace's key.
+# A name may point at several live rows. The alias weight stays 0.
 VOL_ALIASES = {
-    "VOL_DAYREL": "BRK_VS_DAY",
-    "VOL_RVOL_TOD": "RVOL_CUM",
-    "VOL_CUM": "RVOL_CUM_TIMESCALE",
-    "VOL_SUSTAINED": "SUST_VOL_TOD_1M",
-    "VOL_PRE_BREAK": "BU_5_DAY",
-    "VOL_BREAK_BAR": "BRK_BAND",
-    "VOL_HOLD": "HOLD_ON_VOL",
+    "VOL_DAYREL": ("BRK_VS_DAY",),
+    "VOL_RVOL_TOD": ("RVOL_CUM_15_25", "RVOL_CUM_ge25"),
+    "VOL_CUM": ("RVOL_CUM_TIMESCALE",),
+    "VOL_SUSTAINED": ("SUST_VOL_TOD_1M",),
+    "VOL_PRE_BREAK": ("BU_5_TOD_10",),
+    "VOL_BREAK_BAR": ("BRK_TOD_BRK_08_12", "BRK_TOD_BRK_12_3", "BRK_TOD_BRK_ge3"),
+    "VOL_HOLD": ("HOLD_ON_VOL",),
 }
+
+
+def alias_rows(spec) -> tuple:
+    """Rows an alias names. A string is one row."""
+    if isinstance(spec, str):
+        return (spec,)
+    return tuple(spec)
 
 UNIVERSE_CUT = frozenset({
     "DIA", "USO", "SLV", "ETHA", "TQQQ",
@@ -1587,9 +1597,14 @@ def enrich_features(features: dict, snap, settings, prior=None, spy_bars=None) -
     features.update(measured["flags"])
     features["_vt_raw"] = measured["raw"]
     features["_vt_sources"] = measured["sources"]
-    for alias, primary in VOL_ALIASES.items():
-        if primary in features:
-            features[alias] = features[primary]
+    for alias, spec in VOL_ALIASES.items():
+        present = []
+        for primary in alias_rows(spec):
+            value = features.get(primary)
+            if isinstance(value, (int, float)) and isfinite(float(value)):
+                present.append(float(value))
+        if present:
+            features[alias] = max(present)
     sector_on = any(
         isinstance(features.get(key), (int, float)) and float(features[key]) >= 1
         for key in features
