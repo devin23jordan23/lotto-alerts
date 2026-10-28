@@ -16,7 +16,8 @@ from lotto.confluence import (DRC_EMA21_2M, DRP_510, SETUP_FLAGS, SHADOW_EMA_FEA
                               detect_ema9_2m_before_10, detect_ema_pullback, detect_fashionably_late, detect_flag,
                               detect_flushpop, detect_m, detect_open_reclaim, detect_pmx_reclaim, detect_spike_rev,
                               detect_spy10, detect_vwap_slap, detect_w, nia_dip_reclaim, pattern_match,
-                              primary_strength_marker, setup_count, spread_band, spread_fraction, tiered_points)
+                              primary_strength_marker, setup_count, spread_band, spread_fraction, tiered_points,
+                              loose_pattern_scores)
 from lotto.weights import active_profile, load_weights, score_path
 from lotto.features import Candidate
 from lotto.discord import alert_payload
@@ -215,7 +216,8 @@ class ModelVTests(unittest.TestCase):
 
         snap = list(demo_frames())[8][0]
         first_bars, later_bars = pack(False), pack(True)
-        first = replace(snap, at=first_bars[-1].end, bars=first_bars, spot=103.5, prior_atr=2,
+        first_bars = first_bars[:40]
+        first = replace(snap, at=first_bars[-1].end, bars=first_bars, spot=100.6, prior_atr=2,
                         premarket_high=None, prior_high=None)
         later = replace(first, at=later_bars[-1].end, bars=later_bars, spot=100.7)
         first_detail = level_retest(first, 1)
@@ -226,6 +228,8 @@ class ModelVTests(unittest.TestCase):
         later_score = apply_v2(Candidate(later, later.options[0], 40, {}, {}, [], False), model_v_settings(), [])
         self.assertGreater(first_score.metrics["level_retest"], later_score.metrics["level_retest"])
         self.assertGreater(first_score.metrics["level_retest"], 0)
+        stale = replace(first, at=pack(False)[-1].end, bars=pack(False), spot=103.5)
+        self.assertEqual(level_retest(stale, 1)["retest_break"], 0)
 
     def test_no_path_suppresses_a_card_at_or_above_the_bar(self):
         store = Store(":memory:")
@@ -963,7 +967,7 @@ class FallbackRuleTests(unittest.TestCase):
         self.assertTrue(fires[1]["dedupe_flag"])
         self.assertEqual(fires[1]["k"], 2)
         self.assertIn("PMH", posted[0]["payload"]["embeds"][0]["description"])
-        self.assertIn("stock bypass", posted[0]["payload"]["embeds"][0]["description"])
+        self.assertIn("Stock bypass score", posted[0]["payload"]["embeds"][0]["description"])
         with tempfile.TemporaryDirectory() as directory:
             posted, _rows = play("on", [first, later], directory)
         self.assertEqual(len(posted), 2)
@@ -1198,6 +1202,7 @@ class ConfluenceGateTests(unittest.TestCase):
 
         late = detect_fashionably_late(flag_calls, 5, 1, atr, settings)
         self.assertGreater(late, 0)
+        self.assertEqual(loose_pattern_scores(flag_calls, 1, atr, settings)["fashionably_late"], 0)
         grind = _expand_frame(_grind_ohlc(), 5, 1)
         self.assertLess(pattern_match({
             "ema9_pullback": detect_ema_pullback(grind, None, 1, atr, settings),
@@ -1220,7 +1225,7 @@ class ConfluenceGateTests(unittest.TestCase):
             posted = engine.process([strong_snap])
         self.assertEqual(len(posted), 1)
         description = posted[0]["payload"]["embeds"][0]["description"]
-        self.assertIn("stock bypass", description)
+        self.assertIn("Stock bypass score", description)
         row = store.db.execute("SELECT contract, setup_name, quality_tier FROM alerts").fetchone()
         self.assertEqual(row["setup_name"], "STOCK_BYPASS")
         self.assertEqual(row["quality_tier"], "MAIN")
@@ -2011,6 +2016,8 @@ class ReviewFixTests(unittest.TestCase):
                 "positive_features": positives,
                 "base": {"direction": 1, "volume": 1},
                 "level_value": 100.0,
+                "trigger_value": 100.0,
+                "invalidation_value": 99.0,
                 "bypass_score": score,
                 "card_reason": "stock bypass: test",
             }

@@ -2,7 +2,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -75,6 +75,20 @@ class AlertPhaseTests(unittest.TestCase):
         self.assertEqual([row["delivery"] for row in self.store.summary()], ["internal", "sent"])
         self.assertEqual(alerts[1]["parent_id"], alerts[0]["id"])
 
+    def test_stale_send_quote_withholds_active_alert(self):
+        self.phased_alerts(dry_run=False)
+        snap = self.frames[6]
+        now = datetime.now(timezone.utc)
+        with self.store.db:
+            self.store.db.execute("UPDATE alerts SET at=? WHERE phase='ACTIVE'", (now.isoformat(),))
+        quote = {"realtime": True, "quote_time": now - timedelta(seconds=51),
+                 "bid": 0.07, "ask": 0.09, "spot": snap.spot}
+        with patch("lotto.discord.urlopen") as send:
+            deliver_pending(self.store, "https://discord.com/api/webhooks/test/test",
+                            quoter=lambda *_: quote)
+        send.assert_not_called()
+        self.assertEqual(self.store.summary()[-1]["delivery"], "stale_quote")
+
     def test_active_embed_is_compact_and_score_titles_have_clear_tiers(self):
         snap = self.frames[6]
         candidate = self.candidate(snap, building=False)
@@ -91,7 +105,7 @@ class AlertPhaseTests(unittest.TestCase):
             description = embed["description"]
             self.assertEqual(len(description.splitlines()), 4)
             for included in ("Ask", "Bid", "Stock", "Trigger", "Invalidation",
-                             "Setup score", "Outperforming QQQ", "Peers: XLK, SMH"):
+                             "Scanner score", "Outperforming QQQ", "Peers: XLK, SMH"):
                 self.assertIn(included, description)
             for excluded in ("From open", "From prior close", "Stock pace",
                              "local RVOL", "Options activity", "neighboring strikes",

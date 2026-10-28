@@ -765,7 +765,10 @@ def loose_pattern_scores(bars, direction: int, atr: float | None, settings: Sett
         "flag": flag,
         "w_pattern": detect_w(bars, None, direction, atr, settings),
         "m_pattern": detect_m(bars, None, direction, atr, settings),
-        "fashionably_late": detect_fashionably_late(bars, None, direction, atr, settings, ema, flag),
+        # The old extension*EMA/flag proxy is not the EMA/VWAP reversal setup.
+        # Keep its detector available for research, but never label a live card
+        # Fashionably Late until the actual phase and cross are implemented.
+        "fashionably_late": 0.0,
     }
 
 
