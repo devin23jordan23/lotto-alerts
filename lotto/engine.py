@@ -740,8 +740,13 @@ class Engine:
         base = record.get("base") or {}
         if not base.get("direction") or not base.get("volume"):
             return
-        level = record["level_value"] if isinstance(record["level_value"], (int, float)) else snap.spot
-        setup = Setup("STOCK_BYPASS", float(level), float(level))
+        trigger = record.get("trigger_value")
+        invalidation = record.get("invalidation_value")
+        if not isinstance(trigger, (int, float)) or not isinstance(invalidation, (int, float)):
+            return
+        if (1 if option.side == "CALL" else -1) * (trigger - invalidation) <= 0:
+            return
+        setup = Setup("STOCK_BYPASS", float(trigger), float(invalidation))
         candidate = thin_candidate(snap, option, self.settings, setup)
         history = self.history.get((snap.day, snap.symbol), [])
         apply_v2(candidate, self.settings, history, self.index_bars, handoff=False, thin=True,
@@ -756,6 +761,10 @@ class Engine:
         candidate.metrics["path"] = "bypass"
         candidate.metrics["card_score"] = record.get("bypass_score", candidate.metrics.get("card_score"))
         candidate.score = record.get("bypass_score", candidate.score)
+        candidate.metrics["confluence_points"] = record.get("confluence_points") or {}
+        candidate.metrics["confluence_count"] = record.get("positive_features") or 0
+        candidate.metrics["confluence_total"] = len(candidate.metrics["confluence_points"])
+        candidate.metrics["bypass_threshold"] = self.settings.bypass_threshold
         positive = record.get("positive_features") or 0
         bypass_score = record.get("bypass_score")
         if (positive >= self.settings.strong_feature_min
@@ -818,6 +827,8 @@ class Engine:
         metrics = candidate.metrics
         embed = payload["embeds"][0]
         path = metrics.get("path") or "combined"
+        if path == "bypass":
+            return
         embed["description"] += (
             f"\n{path} · {metrics.get('score_mode')} v2 **{metrics.get('score_v2')}** · bar {metrics.get('post_bar')}"
             f" · option {metrics.get('option_v2')} + stock {metrics.get('stock_v2')}"

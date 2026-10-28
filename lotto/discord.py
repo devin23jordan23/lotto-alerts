@@ -42,12 +42,15 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
         title = f"{marker} {title}"
     levels = (f"{'Watch' if phase == 'POTENTIAL' else 'Trigger'} ${setup.trigger:.2f}"
               f" · Invalidation ${setup.invalidation:.2f}") if setup else ""
+    bypass = candidate.metrics.get("path") == "bypass"
+    score_label = (f"Stock bypass score **{displayed_score}** (minimum {candidate.metrics.get('bypass_threshold', 40):g})"
+                   if bypass else f"Scanner score **{displayed_score}**")
     payload = {"username": "Lotto Scanner", "allowed_mentions": {"parse": []}, "embeds": [{
         "title": title,
         "description": f"**{contract_root} {option.strike:g}{side} · {option.expiry.isoformat()} · {dte}DTE**\n"
                        f"Ask **${option.ask:.2f}** · Bid ${option.bid:.2f} · {underlying_label} ${snap.spot:.2f}\n"
                        f"{levels}\n"
-                       f"Setup score **{displayed_score}/100**"
+                       + score_label
                        + (f" · {score_context}" if score_context else ""),
         "color": 0x2ECC71 if option.side == "CALL" else 0xE74C3C,
         "timestamp": snap.at.isoformat(),
@@ -60,7 +63,7 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
             payload["embeds"][0]["description"] += " · stock move not yet confirmed"
         if candidate.metrics.get("repeat_number"):
             payload["embeds"][0]["description"] += f" · repeat #{candidate.metrics['repeat_number']}"
-    if candidate.metrics.get("send_requote"):
+    if candidate.metrics.get("send_requote") and not bypass:
         payload["embeds"][0]["description"] += (f"\nChain quote <t:{int(option.quote_time.timestamp())}:T> "
                                                    f"(<t:{int(option.quote_time.timestamp())}:R>)")
     if quality is not None:
@@ -80,9 +83,9 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
     notes = []
     count = candidate.metrics.get("confluence_count")
     total = candidate.metrics.get("confluence_total")
-    if count is not None and total:
+    if not bypass and count is not None and total:
         notes.append(f"{count}/{total} confluence")
-    if candidate.metrics.get("stale_quote"):
+    if candidate.metrics.get("stale_quote") and not bypass:
         notes.append("stale quote")
     if candidate.metrics.get("spread_flag"):
         notes.append(candidate.metrics["spread_flag"])
@@ -110,7 +113,7 @@ def render_send_card(payload: dict, row, quote: dict | None, now: datetime) -> d
     if quote and quote.get("realtime") is True:
         qt = quote.get("quote_time")
         age = (now-qt).total_seconds() if isinstance(qt, datetime) else -1
-        if (0 <= age <= 90 and quote.get("bid", 0) > 0
+        if (0 <= age <= 30 and quote.get("bid", 0) > 0
                 and quote.get("ask", 0) >= quote["bid"] and quote.get("spot", 0) > 0):
             underlying = "Index" if row["symbol"] == "SPX" else "Stock"
             new_line = (f"Ask **${quote['ask']:.2f}** · Bid ${quote['bid']:.2f} · "
@@ -118,9 +121,10 @@ def render_send_card(payload: dict, row, quote: dict | None, now: datetime) -> d
             embed["description"] = re.sub(
                 r"Ask \*\*\$[\d.]+\*\* · Bid \$[\d.]+ · (?:Stock|Index) \$[\d.]+",
                 new_line, embed["description"], count=1)
-            label = "⚠ STALE QUOTE" if age > 30 else "aging quote" if age >= 15 else "live quote"
-            embed["description"] += (f"\n{label} · Quote {round(age)}s old at send · "
-                                     f"Schwab /quotes · <t:{int(qt.timestamp())}:R>")
+            label = "aging quote" if age >= 15 else "live quote"
+            if row["setup_name"] != "STOCK_BYPASS":
+                embed["description"] += (f"\n{label} · Quote {round(age)}s old at send · "
+                                         f"Schwab /quotes · <t:{int(qt.timestamp())}:R>")
             if row["entry_ask"] and abs(quote["ask"]/row["entry_ask"]-1) >= .10:
                 embed["description"] += f"\nSignal ask ${row['entry_ask']:.2f} when queued"
             return payload
@@ -143,7 +147,7 @@ def deliver_pending(store, webhook: str, secondary_webhook: str | None = None, q
     # Older queued watches must also stay internal after a deployment/restart.
     with store.db:
         store.db.execute("UPDATE alerts SET delivery='internal' WHERE phase='POTENTIAL' AND delivery='pending'")
-    for row in store.db.execute("""SELECT id, at, payload, quality_tier, contract, symbol,
+    for row in store.db.execute("""SELECT id, at, payload, quality_tier, contract, symbol, setup_name,
                                    entry_ask, snapshot FROM alerts WHERE phase='ACTIVE'
                                    AND delivery='pending' ORDER BY at""").fetchall():
         target = secondary_webhook if row['quality_tier']=='SECONDARY' else webhook
@@ -163,7 +167,20 @@ def deliver_pending(store, webhook: str, secondary_webhook: str | None = None, q
                 quote = quoter(row["contract"], row["symbol"])
             except Exception as exc:
                 LOG.warning("Send re-quote %s unavailable (%s)", row["id"], type(exc).__name__)
-            outgoing = render_send_card(outgoing,row,quote,datetime.now(timezone.utc))
+            send_now = datetime.now(timezone.utc)
+            qt = quote.get("quote_time") if isinstance(quote, dict) else None
+            try:
+                quote_age = (send_now - qt).total_seconds() if isinstance(qt, datetime) else -1
+            except TypeError:
+                quote_age = -1
+            if not (isinstance(quote, dict) and quote.get("realtime") is True
+                    and 0 <= quote_age <= 30 and quote.get("bid", 0) > 0
+                    and quote.get("ask", 0) >= quote["bid"] and quote.get("spot", 0) > 0):
+                with store.db:
+                    store.db.execute("UPDATE alerts SET delivery='stale_quote' WHERE id=?", (row["id"],))
+                LOG.warning("Alert %s withheld: no fresh send-time quote", row["id"])
+                continue
+            outgoing = render_send_card(outgoing,row,quote,send_now)
         encoded = json.dumps(outgoing)
         # Mark before sending: a crash after Discord accepts must not automatically resend.
         with store.db:
