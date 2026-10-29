@@ -18,6 +18,19 @@ from .store import read_snapshot
 LOG = logging.getLogger(__name__)
 
 
+def write_report(result, path: Path) -> None:
+    temporary = path.with_suffix(".tmp")
+    try:
+        # Keep the full report while avoiding a large indentation overhead.
+        with temporary.open("w") as output:
+            json.dump(result, output, separators=(",", ":"))
+        temporary.replace(path)
+    except Exception:
+        # A full volume must not retain a partial report across retries.
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def instrument_group(contract):
     return "SPXW" if contract and contract.split()[0] == "SPXW" else "OTHER"
 
@@ -414,9 +427,7 @@ def run_nightly(store, day, directory, symbols=(), client=None):
     from .quality_report import scorecard
     result['model_quality_scorecard'] = scorecard(store,day)
     path = root/"report.json"
-    temporary = root/"report.tmp"
-    temporary.write_text(json.dumps(result,indent=2))
-    temporary.replace(path)
+    write_report(result, path)
     # An offline report must not suppress the live full-universe nightly scan.
     if client is not None:
         with store.db:
