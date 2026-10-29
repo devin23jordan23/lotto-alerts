@@ -56,6 +56,8 @@ class Settings:
     # Model V posts only option cards with completed-bar directional evidence.
     # Set LOTTO_STOCK_THESIS_ENABLED=0 to roll back this gate and event route.
     stock_thesis_enabled: int = 0
+    # Strategy-specific AND gate. Shadow evidence is logged with the gate off.
+    setup_confirmation_enabled: int = 0
     post_combined_0dte: float = 40
     post_combined_1dte: float = 61
     stock_max_share: float = 0.40
@@ -466,6 +468,8 @@ class Settings:
             raise ValueError("active_quality_gate must be 0 or 1")
         if self.stock_thesis_enabled not in (0, 1):
             raise ValueError("stock_thesis_enabled must be 0 or 1")
+        if self.setup_confirmation_enabled not in (0, 1):
+            raise ValueError("setup_confirmation_enabled must be 0 or 1")
         if not 0 < self.min_ask <= self.max_ask or not 0 < self.min_delta <= self.max_delta <= 1:
             raise ValueError("Invalid contract limits")
         if not 0 <= self.max_dte <= 1:

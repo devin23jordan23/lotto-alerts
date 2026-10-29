@@ -137,6 +137,8 @@ class Engine:
         self.qualified_since = {}
         self.last_evaluation = {}
         self.last_bar = {}
+        self.last_stock_quote = {}
+        self.seen_stock_event_ids = set()
         self.cool_since = {}
         self.last_cooling = {}
         self.rearmed = set()
@@ -357,6 +359,7 @@ class Engine:
         from .model_v import apply_v2, missing_v2, pick_one_otm, pick_stock_event_contract, thin_candidate
         from .patterns import Setup
         from .stock_thesis import stock_motion_gate, stock_thesis
+        from .setup_confirmation import confirm_setup, confirmation_metrics
 
         cfg = self.settings
         ready = []
@@ -378,14 +381,18 @@ class Engine:
                     history.append(snap)
                 self._log_missing(snap, "snapshot not scoreable: " + "; ".join(problems))
                 continue
-            if self.last_bar.get(key) == snap.bars[-1].end:
-                continue
-            self.last_bar[key] = snap.bars[-1].end
-            evaluated = candidates(snap, history, replace(cfg, model="V", hybrid=1, soft_blocks=1,
-                                                            min_score=min(cfg.min_score, 60)))
             events = [idea for idea in self.stock_events
                       if idea.symbol == snap.symbol and idea.day == snap.day
                       and timedelta(0) <= snap.at - idea.at <= timedelta(minutes=15)]
+            new_stock_event = any(idea.id not in self.seen_stock_event_ids for idea in events)
+            newer_stock_quote = (cfg.setup_confirmation_enabled
+                                 and snap.spot_time > self.last_stock_quote.get(key, snap.spot_time))
+            if self.last_bar.get(key) == snap.bars[-1].end and not (new_stock_event or newer_stock_quote):
+                continue
+            self.last_bar[key] = snap.bars[-1].end
+            self.last_stock_quote[key] = snap.spot_time
+            evaluated = candidates(snap, history, replace(cfg, model="V", hybrid=1, soft_blocks=1,
+                                                            min_score=min(cfg.min_score, 60)))
             seen = {c.option.symbol for c in evaluated}
             for idea in events:
                 option = (pick_stock_event_contract(snap, idea.side)
@@ -393,6 +400,7 @@ class Engine:
                 if option is None:
                     self._log_missing(snap, "stock event has no fresh nearest-expiry ATM quote")
                     continue
+                self.seen_stock_event_ids.add(idea.id)
                 if option.symbol in seen:
                     for candidate in evaluated:
                         if candidate.option.symbol == option.symbol:
@@ -426,15 +434,20 @@ class Engine:
                     thesis, why = stock_thesis(snap, candidate.option.side)
                     if thesis:
                         candidate.setup = Setup(thesis["setup"], thesis["trigger"], thesis["invalidation"])
+                    confirmation = confirm_setup(snap, candidate.option.side, candidate.setup)
+                    setup_required = bool(cfg.setup_confirmation_enabled)
                     candidate.metrics.update({
                         "stock_thesis": thesis or None, "stock_thesis_reason": why or None,
                         "path": "stock_event", "score_mode": "stock_event", "score_v2": 0,
                         "card_score": 0, "gate_post": int(bool(thesis)),
+                        **confirmation_metrics(confirmation, setup_required),
                     })
                     candidate.score = 0
                     candidate.parts = {"stock_event": 1}
                     candidate.metrics.pop("strength_marker", None)
-                    candidate.qualifying = bool(thesis)
+                    candidate.qualifying = bool(thesis) and (confirmation.ready or not setup_required)
+                    if setup_required and not confirmation.ready:
+                        candidate.metrics["stock_thesis_reason"] = "setup unconfirmed: " + confirmation.reason
                 else:
                     apply_v2(candidate, cfg, history, self.index_bars, handoff=handoff,
                              thin=not candidate.metrics.get("cluster_size"),
