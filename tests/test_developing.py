@@ -14,7 +14,7 @@ from lotto.engine import Engine
 from lotto.features import candidates, observation_window, persistent_activity
 from lotto.main import DEFAULT_UNIVERSE, apply_exclusions, universe_symbols
 from lotto.models import Bar, ET
-from lotto.nightly import run_nightly
+from lotto.nightly import run_nightly, write_report
 from lotto.patterns import detect_setup, path_features
 from lotto.schwab import benchmark_for
 from lotto.store import Store
@@ -25,6 +25,18 @@ from lotto.nightly import maybe_nightly
 class DevelopingTests(unittest.TestCase):
     def setUp(self):
         self.frames = [f[0] for f in demo_frames()]
+
+    def test_nightly_report_is_compact_and_cleans_failed_temp_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            from pathlib import Path
+            path = Path(directory) / "report.json"
+            write_report({"rows": [1, 2]}, path)
+            self.assertEqual(path.read_text(), '{"rows":[1,2]}')
+            with patch("lotto.nightly.json.dump", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    write_report({"rows": [3]}, path)
+            self.assertEqual(path.read_text(), '{"rows":[1,2]}')
+            self.assertFalse(path.with_suffix(".tmp").exists())
 
     def path(self, prices, prior=100):
         opening = datetime(2026,9,21,9,30,tzinfo=ET)
