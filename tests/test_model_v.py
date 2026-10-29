@@ -1728,7 +1728,7 @@ class ReviewFixTests(unittest.TestCase):
         passed = apply_v2(Candidate(day, fat, 30, {}, {}, [], False), model_v_settings(), [])
         self.assertNotIn("option_volume", passed.metrics["gate_blocked_by"])
         self.assertIsNone(choose_fallback_contract(snap, "CALL")["option"])
-        self.assertEqual(choose_fallback_contract(day, "CALL")["strike"], 100)
+        self.assertIsNone(choose_fallback_contract(day, "CALL")["option"])
         self.assertIsNone(choose_fallback_contract(
             day, "CALL", model_v_settings(spread_legacy=1))["option"])
 
@@ -2212,6 +2212,35 @@ class SpreadBandTests(unittest.TestCase):
             bid=bid, option_volume_5m=volume, parts=parts,
         )
 
+    def test_fallback_never_selects_atm_or_itm_on_either_side(self):
+        at = datetime(2026, 10, 26, 10, 30, tzinfo=ET)
+        settings = self._settings(profile="volume_trend_conservative")
+        call_itm = _contract(at, 100, "CALL")
+        call_first = _contract(at, 101, "CALL")
+        call_next = _contract(at, 102, "CALL")
+        calls = Snapshot("DEMO", at, 100.2, at, 100, (),
+                         (call_itm, call_first, call_next), source="replay")
+        self.assertEqual(choose_fallback_contract(calls, "CALL", settings)["strike"], 101)
+        dark_calls = replace(calls, options=(call_itm, replace(call_first, bid=0), call_next))
+        self.assertEqual(choose_fallback_contract(dark_calls, "CALL", settings)["strike"], 102)
+        self.assertIsNone(choose_fallback_contract(
+            replace(calls, options=(call_itm,)), "CALL", settings)["option"])
+
+        put_itm = _contract(at, 101, "PUT")
+        put_first = _contract(at, 100, "PUT")
+        put_next = _contract(at, 99, "PUT")
+        puts = Snapshot("DEMO", at, 100.2, at, 100, (),
+                        (put_itm, put_first, put_next), source="replay")
+        self.assertEqual(choose_fallback_contract(puts, "PUT", settings)["strike"], 100)
+        dark_puts = replace(puts, options=(put_itm, replace(put_first, bid=0), put_next))
+        self.assertEqual(choose_fallback_contract(dark_puts, "PUT", settings)["strike"], 99)
+        self.assertIsNone(choose_fallback_contract(
+            replace(puts, options=(put_itm,)), "PUT", settings)["option"])
+
+        next_day = replace(call_first, expiry=at.date() + timedelta(days=1))
+        later = replace(calls, options=(call_itm, next_day))
+        self.assertEqual(pick_one_otm(later, "CALL", settings).strike, 101)
+
     def test_band_edges_and_a_normal_quarter_spread(self):
         settings = self._settings()
         self.assertEqual(tuple(settings.spread_bands), (0.25, 0.35, 0.40))
@@ -2391,13 +2420,13 @@ class SpreadBandTests(unittest.TestCase):
         self.assertEqual(choose_fallback_contract(calls, "CALL", self._settings(), history)["strike"], 101)
         self.assertEqual(choose_fallback_contract(puts, "PUT", self._settings(), put_history)["strike"], 99)
         nearest = self._settings(fallback_strike_offset=0)
-        self.assertEqual(choose_fallback_contract(calls, "CALL", nearest, history)["strike"], 100)
+        self.assertEqual(choose_fallback_contract(calls, "CALL", nearest, history)["strike"], 101)
 
         dark = replace(call_101, bid=0.0, ask=1.05)
         quoted_atm = Snapshot("DEMO", at, 100.0, at, 100, (), (call_100, dark), source="replay")
         stepped = choose_fallback_contract(
             quoted_atm, "CALL", self._settings(), _volume_history(quoted_atm, prior_volume=0))
-        self.assertEqual(stepped["strike"], 100)
+        self.assertIsNone(stepped["option"])
         further = replace(_contract(at, 102, "CALL", bid=1.0, ask=1.05), volume=200, quote_time=at)
         both_dark = Snapshot(
             "DEMO", at, 100.0, at, 100, (),
@@ -2420,7 +2449,7 @@ class SpreadBandTests(unittest.TestCase):
         self.assertFalse(card_gate(
             "CALL", 100, 0.05, legacy, bid=1.0, option_volume_5m=49, option_volume_day=500,
         )["post_ok"])
-        self.assertEqual(choose_fallback_contract(calls, "CALL", legacy, history)["strike"], 100)
+        self.assertEqual(choose_fallback_contract(calls, "CALL", legacy, history)["strike"], 101)
 
         def old_block(spread):
             return (spread is None or not isinstance(spread, (int, float))
