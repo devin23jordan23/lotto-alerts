@@ -520,10 +520,13 @@ class Schwab:
         return tuple(result)
 
     def option_chain(self, symbol, now, max_dte, strike_count=80):
+        day = now.astimezone(ET).date()
+        friday = day + timedelta(days=(4 - day.weekday()) % 7)
+        requested_end = day + timedelta(days=max_dte)
         params = {"symbol": api_symbol(symbol), "contractType": "ALL", "strategy": "SINGLE",
                   "includeUnderlyingQuote": "true", "strikeCount": int(strike_count),
-                  "fromDate": now.astimezone(ET).date().isoformat(),
-                  "toDate": (now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()}
+                  "fromDate": day.isoformat(),
+                  "toDate": max(friday, requested_end).isoformat()}
         data = self.get('/chains', params)
         options = self.parse_chain(data, allow_spx=symbol == 'SPX')
         def usable(o):

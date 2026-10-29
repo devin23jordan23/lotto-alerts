@@ -112,15 +112,20 @@ class StockFirst:
         # because the polling loop ran again.
         if history and quote_time <= history[-1]["at"]:
             return None
-        age_minutes = (local.hour*60 + local.minute) - 570
-        lookback = 5 if age_minutes < 15 else 15
-        earlier = [h for h in history if (lookback-2)*60 <= (at-h["observed_at"]).total_seconds() <= (lookback+3)*60]
-        prior = min(earlier, key=lambda h: abs((at-h["observed_at"]).total_seconds()-lookback*60)) if earlier else None
+        # Use 2, 5, and 15 minute references. A fresh volume breakout must not
+        # wait fifteen minutes for the first stock event.
+        priors = []
+        for lookback in (2, 5, 15):
+            earlier = [h for h in history if max(1, lookback-1)*60 <=
+                       (at-h["observed_at"]).total_seconds() <= (lookback+1)*60]
+            if earlier:
+                priors.append(min(earlier, key=lambda h:
+                                  abs((at-h["observed_at"]).total_seconds()-lookback*60)))
         recent = [h for h in history if at-h["observed_at"] <= timedelta(minutes=10)]
         history.append(row)
         self.history[key] = [h for h in history if at-h["observed_at"] <= timedelta(minutes=35)]
         self.store.track_stock_ideas(row)
-        if prior is None or len(recent) < 3:
+        if not priors or len(recent) < 2:
             return None
         opening_window = local.time() < time(9, 45)
         etf = symbol in INDEX_ETFS
@@ -144,9 +149,9 @@ class StockFirst:
             (-1, "PUT", old_low, local_low, max(h["high"] for h in recent[-5:]), price <= low*1.002),
         ):
             move_open = direction*(price/opening-1)
-            fast = direction*(price/prior["price"]-1)
+            fast = max(direction*(price/prior["price"]-1) for prior in priors)
             move_open_dollars = direction*(price-opening)
-            recent_dollars = direction*(price-prior["price"])
+            recent_dollars = max(direction*(price-prior["price"]) for prior in priors)
             day_break = direction*(price-day_trigger)/price >= .0001 and near_extreme
             local_break = (direction*(price-local_trigger)/price >= .0001
                            and move_open >= max(min_open, .0055 if not etf else .003)

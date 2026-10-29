@@ -357,6 +357,16 @@ class AdapterTests(unittest.TestCase):
             self.assertIs(self.client.option_chain('AMZN',now,1),data)
             self.client.get.assert_called_once()
 
+    def test_wednesday_chain_reaches_friday_without_extra_request(self):
+        now = datetime(2026, 10, 28, 10, 0, tzinfo=ET)
+        self.client.get = Mock(return_value={"callExpDateMap": {}})
+        self.client.option_chain("ORCL", now, 1, strike_count=40)
+        self.client.get.assert_called_once()
+        params = self.client.get.call_args.args[1]
+        self.assertEqual(params["fromDate"], "2026-10-28")
+        self.assertEqual(params["toDate"], "2026-10-30")
+        self.assertEqual(params["strikeCount"], 40)
+
     def test_greek_retry_failure_preserves_original_quotes(self):
         now=datetime.now(timezone.utc)
         data={'callExpDateMap':{str(now.date())+':0':{'100':[dict(

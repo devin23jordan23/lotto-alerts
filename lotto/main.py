@@ -241,6 +241,9 @@ def env_settings() -> Settings:
         updates["shadow_profile"] = str(updates["shadow_profile"]).strip()
     updates["model"] = model
     if model == "V":
+        # Live Model V requires a directional stock thesis by default.
+        # Explicit LOTTO_STOCK_THESIS_ENABLED=0 is the rollback.
+        updates.setdefault("stock_thesis_enabled", 1)
         updates["preset"] = preset
         if updates.get("min_score", base.min_score) > 60:
             updates["min_score"] = 60

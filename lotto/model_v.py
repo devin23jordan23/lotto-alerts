@@ -106,6 +106,30 @@ def pick_one_otm(snap: Snapshot, side: str, settings: Settings) -> Option | None
     return min(choices, key=lambda o: (o.ask - o.bid) / o.ask)
 
 
+def pick_stock_event_contract(snap: Snapshot, side: str, max_days: int = 7) -> Option | None:
+    """Fresh ATM quote at the nearest listed expiry for a stock-led event.
+
+    No option-volume, delta, or spread veto. Those values remain visible on
+    the card, while send-time /quotes validation protects the displayed ask.
+    """
+    today = snap.at.astimezone(ET).date()
+    pool = []
+    for option in snap.options:
+        days = (option.expiry - today).days
+        age = (snap.at - option.quote_time).total_seconds()
+        if (option.side == side and 0 <= days <= max_days and option.valid()
+                and abs(option.strike - snap.spot) / snap.spot <= .02
+                and option.bid > 0 and option.ask > option.bid and 0 <= age <= 75):
+            pool.append(option)
+    if not pool:
+        return None
+    nearest = min(option.expiry for option in pool)
+    pool = [option for option in pool if option.expiry == nearest]
+    return min(pool, key=lambda option: (abs(option.strike - snap.spot),
+                                         (option.ask - option.bid) / option.ask,
+                                         option.symbol))
+
+
 def _clamp(value: float, limit: float = 1) -> float:
     return max(0.0, min(limit, value))
 
@@ -230,7 +254,8 @@ def level_retest(snap: Snapshot, direction: int) -> dict:
         empty["vwap_tap_only"] = int(bool(tapped))
         empty["retest_index"] = last["index"]
         return empty
-    return best
+    # A historic retest must not be shown or scored as a current setup.
+    return best if best["retest_index"] == fives[-1]["index"] else empty
 
 
 def retest_points(parts: dict, settings: Settings, sync: bool) -> float:
@@ -998,7 +1023,13 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     # is a level break on this bar, or a pattern match that first clears the
     # line inside the entry window. A print from before that window is not spent.
     in_window = settings.fb_min_minutes <= minute <= FALLBACK_LAST_BAR
-    matched = pattern_match(flags)
+    # A pullback near an EMA is only an entry event after the current stock
+    # bar actually turns in the card's direction. Level breaks are independent.
+    prior_bar = indexed.get(minute - 1)
+    directional_close = (1 if side == "CALL" else -1) * (bar.close - prior_bar.close) if prior_bar else 0
+    directional_body = (1 if side == "CALL" else -1) * (bar.close - bar.open)
+    pattern_confirmed = directional_close > 0 and directional_body > 0
+    matched = pattern_match(flags) if pattern_confirmed else 0.0
     prior_match = float(state.get("pattern_score") or 0)
     if in_window:
         pattern_new = matched >= settings.pattern_trigger_min and prior_match < settings.pattern_trigger_min
@@ -1028,7 +1059,7 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
         level_value = breaks[0]["level_value"]
     else:
         lvl = "+".join(name for name in PATTERN_FEATURES
-                       if match_value(flags.get(name)) >= settings.pattern_trigger_min) or "setup"
+                       if pattern_confirmed and match_value(flags.get(name)) >= settings.pattern_trigger_min) or "setup"
         level_value = bar.close
     k = state.get("k", 0) + 1
     bars_since = None if state.get("last_m") is None else minute - state["last_m"]
@@ -1036,10 +1067,13 @@ def evaluate_fallback(snap: Snapshot, side: str, settings: Settings, state: dict
     rvol_text = 0 if rvol is None else rvol
     push_text = 0 if push is None else push
     label = "+".join(part.upper() for part in lvl.split("+"))
-    reason = f"stock bypass: {label}, confluence {bypass_score:.0f}"
+    reason = f"Stock setup: {label}"
+    recent = through[-3:]
+    invalidation_value = min(item.low for item in recent) if side == "CALL" else max(item.high for item in recent)
     record = {
         "date": snap.day, "ts_fire": snap.at.astimezone(ET).isoformat(), "tk": snap.symbol, "side": side,
         "k": k, "why": why, "lvl": lvl, "level_value": level_value,
+        "trigger_value": bar.close, "invalidation_value": invalidation_value,
         "levels": {item["lvl"]: item["level_value"] for item in breaks},
         "px": bar.close, "open": earliest.open, "atr21": atr21, "rvol": rvol, "push30": push,
         "room_atr": room, "confluence_score": bypass_score, "bypass_score": bypass_score,
