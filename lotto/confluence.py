@@ -1273,8 +1273,12 @@ def detect_spy10(spy_bars, direction: int, atr: float | None, trigger_end=None) 
     return 1.0 if paused or turned else 0.0
 
 
-def _level_break(snap, bars, direction: int) -> float:
-    """1 when price has traded through PM or prior-day level, including a gap."""
+def _level_break(snap, bars, direction: int, fresh_only: bool = False) -> float:
+    """Directional PM/PD cross; optionally require the last three bars.
+
+    The legacy feature is sticky for the entire session.  The confirmation
+    lane replaces that with an event whose crossing is recent.
+    """
     if not bars or direction not in (1, -1):
         return 0.0
     if direction == 1:
@@ -1284,9 +1288,14 @@ def _level_break(snap, bars, direction: int) -> float:
     for level in levels:
         if level is None or not isinstance(level, (int, float)) or not isfinite(level):
             continue
-        if direction * (bars[0].open - level) > 0:
+        if not fresh_only and direction * (bars[0].open - level) > 0:
             return 1.0
-        if any(direction * (bar.close - level) > 0 for bar in bars):
+        if not fresh_only:
+            if any(direction * (bar.close - level) > 0 for bar in bars):
+                return 1.0
+        elif any(direction * (bars[i - 1].close - level) <= 0
+                 < direction * (bars[i].close - level)
+                 for i in range(max(1, len(bars) - 3), len(bars))):
             return 1.0
     return 0.0
 
@@ -1386,7 +1395,8 @@ def additive_features(snap, option, settings: Settings, metrics=None, history=No
         "w_bottom_ace": w_score if direction == 1 else 0.0,
         "dte1": _on(dte == 1),
         "rvol15": _on(rvol is not None and rvol >= 1.5),
-        "level_break": _level_break(snap, bars, direction),
+        "level_break": _level_break(snap, bars, direction,
+                                     fresh_only=bool(settings.setup_confirmation_enabled)),
         DRC_EMA21_2M: detect_drc_ema21_2m(bars, direction, atr) if bars else 0.0,
         DRP_510: detect_drp_510(bars, direction, atr) if bars else 0.0,
         E1_EMA9_2M_PRE10: detect_ema9_2m_before_10(bars, direction, atr, settings) if bars else 0.0,
@@ -1543,7 +1553,11 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     marked = score - penalty
     card_score = round(marked, 2)
     enough = positive >= settings.min_positive_features
-    post_ok = gate["post_ok"] and marked >= settings.post_threshold and enough
+    from .setup_confirmation import confirm_setup, confirmation_metrics
+    confirmation = confirm_setup(snap, option.side, candidate.setup)
+    setup_required = bool(settings.setup_confirmation_enabled)
+    post_ok = (gate["post_ok"] and marked >= settings.post_threshold and enough
+               and (confirmation.ready or not setup_required))
     metrics = candidate.metrics
     metrics.update(ages)
     metrics["confluence_flags"] = features
@@ -1557,8 +1571,10 @@ def apply_card_layers(candidate, settings: Settings, s12_ok: bool, model_score: 
     metrics["base"] = gate["base"]
     metrics["blockers"] = gate["blockers"]
     metrics["overrides"] = gate["overrides"]
-    metrics["gate_blocked_by"] = gate["blocked_by"]
+    metrics["gate_blocked_by"] = (gate["blocked_by"] + (["setup_unconfirmed"]
+                                    if setup_required and not confirmation.ready else []))
     metrics["gate_post"] = int(gate["post_ok"])
+    metrics.update(confirmation_metrics(confirmation, setup_required))
     metrics["spread_band"] = gate.get("spread_band")
     metrics["stock_bar_met"] = int(gate.get("stock_bar_met") or 0)
     metrics["wide_spread_bar_unmet"] = int(unmet)

@@ -69,6 +69,7 @@ class StockThesisTests(unittest.TestCase):
         store = Store(":memory:")
         self.addCleanup(store.db.close)
         engine = Engine(store, model_v_settings(stock_thesis_enabled=1,
+                                                setup_confirmation_enabled=1,
                                                 fallback_rule="off"), dry_run=True)
         idea = StockIdea("ORCL", snap.day, snap.at - timedelta(seconds=10), "CALL",
                          snap.spot, 132.8, 131.5, "INTRADAY_BREAK", "A", {})
@@ -80,6 +81,24 @@ class StockThesisTests(unittest.TestCase):
         self.assertIn("2DTE", description)
         self.assertIn("Stock thesis", description)
         self.assertIn("133C", description)
+
+    def test_new_stock_event_is_not_lost_inside_same_completed_bar(self):
+        snap = self.snapshot([131.32] * 7 + [131.6, 132.0, 133.0],
+                             [10000] * 9 + [100000])
+        store = Store(":memory:")
+        self.addCleanup(store.db.close)
+        engine = Engine(store, model_v_settings(stock_thesis_enabled=1,
+                                                fallback_rule="off"), dry_run=True)
+        with patch("lotto.engine.candidates", return_value=[]):
+            self.assertEqual(engine.process([snap]), [])
+            later = replace(snap, at=snap.at + timedelta(seconds=30),
+                            spot_time=snap.spot_time + timedelta(seconds=30),
+                            options=(replace(snap.options[0],
+                                             quote_time=snap.options[0].quote_time + timedelta(seconds=30)),))
+            idea = StockIdea("ORCL", later.day, later.at - timedelta(seconds=5), "CALL",
+                             later.spot, 132.8, 131.5, "INTRADAY_BREAK", "A", {})
+            engine.remember_stock_events([idea])
+            self.assertEqual(len(engine.process([later])), 1)
 
     def test_high_option_score_does_not_rescue_flat_or_unanchored_stock(self):
         def pretend_high_score(candidate, *_args, **_kwargs):
