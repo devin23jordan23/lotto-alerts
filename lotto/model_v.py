@@ -106,6 +106,30 @@ def pick_one_otm(snap: Snapshot, side: str, settings: Settings) -> Option | None
     return min(choices, key=lambda o: (o.ask - o.bid) / o.ask)
 
 
+def pick_stock_event_contract(snap: Snapshot, side: str, max_days: int = 7) -> Option | None:
+    """Fresh ATM quote at the nearest listed expiry for a stock-led event.
+
+    No option-volume, delta, or spread veto. Those values remain visible on
+    the card, while send-time /quotes validation protects the displayed ask.
+    """
+    today = snap.at.astimezone(ET).date()
+    pool = []
+    for option in snap.options:
+        days = (option.expiry - today).days
+        age = (snap.at - option.quote_time).total_seconds()
+        if (option.side == side and 0 <= days <= max_days and option.valid()
+                and abs(option.strike - snap.spot) / snap.spot <= .02
+                and option.bid > 0 and option.ask > option.bid and 0 <= age <= 75):
+            pool.append(option)
+    if not pool:
+        return None
+    nearest = min(option.expiry for option in pool)
+    pool = [option for option in pool if option.expiry == nearest]
+    return min(pool, key=lambda option: (abs(option.strike - snap.spot),
+                                         (option.ask - option.bid) / option.ask,
+                                         option.symbol))
+
+
 def _clamp(value: float, limit: float = 1) -> float:
     return max(0.0, min(limit, value))
 

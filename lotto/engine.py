@@ -354,8 +354,9 @@ class Engine:
         suppression is an exact duplicate: same contract and trigger inside
         the dedupe window.
         """
-        from .model_v import apply_v2, missing_v2, pick_one_otm, thin_candidate
+        from .model_v import apply_v2, missing_v2, pick_one_otm, pick_stock_event_contract, thin_candidate
         from .patterns import Setup
+        from .stock_thesis import stock_motion_gate, stock_thesis
 
         cfg = self.settings
         ready = []
@@ -387,18 +388,23 @@ class Engine:
                       and timedelta(0) <= snap.at - idea.at <= timedelta(minutes=15)]
             seen = {c.option.symbol for c in evaluated}
             for idea in events:
-                option = pick_one_otm(snap, idea.side, cfg)
+                option = (pick_stock_event_contract(snap, idea.side)
+                          if cfg.stock_thesis_enabled else pick_one_otm(snap, idea.side, cfg))
                 if option is None:
-                    self._log_missing(snap, "handoff has no priced 1-OTM contract")
+                    self._log_missing(snap, "stock event has no fresh nearest-expiry ATM quote")
                     continue
                 if option.symbol in seen:
                     for candidate in evaluated:
                         if candidate.option.symbol == option.symbol:
                             candidate.metrics["handoff_trigger"] = idea.trigger
+                            candidate.metrics["stock_event"] = int(cfg.stock_thesis_enabled)
+                            if cfg.stock_thesis_enabled:
+                                candidate.setup = Setup(idea.setup, idea.trigger, idea.invalidation)
                     continue
                 setup = Setup(idea.setup, idea.trigger, idea.invalidation)
                 added = thin_candidate(snap, option, cfg, setup)
                 added.metrics["handoff_trigger"] = idea.trigger
+                added.metrics["stock_event"] = int(cfg.stock_thesis_enabled)
                 evaluated.append(added)
                 seen.add(option.symbol)
             if not evaluated:
@@ -416,14 +422,55 @@ class Engine:
                 if handoff and candidate.setup is None and events:
                     match = next(idea for idea in events if idea.side == candidate.option.side)
                     candidate.setup = Setup(match.setup, match.trigger, match.invalidation)
-                apply_v2(candidate, cfg, history, self.index_bars, handoff=handoff,
-                         thin=not candidate.metrics.get("cluster_size"),
-                         a_bar=snap.symbol in self.runner_names)
+                if cfg.stock_thesis_enabled and candidate.metrics.get("stock_event"):
+                    thesis, why = stock_thesis(snap, candidate.option.side)
+                    if thesis:
+                        candidate.setup = Setup(thesis["setup"], thesis["trigger"], thesis["invalidation"])
+                    candidate.metrics.update({
+                        "stock_thesis": thesis or None, "stock_thesis_reason": why or None,
+                        "path": "stock_event", "score_mode": "stock_event", "score_v2": 0,
+                        "card_score": 0, "gate_post": int(bool(thesis)),
+                    })
+                    candidate.score = 0
+                    candidate.parts = {"stock_event": 1}
+                    candidate.metrics.pop("strength_marker", None)
+                    candidate.qualifying = bool(thesis)
+                else:
+                    apply_v2(candidate, cfg, history, self.index_bars, handoff=handoff,
+                             thin=not candidate.metrics.get("cluster_size"),
+                             a_bar=snap.symbol in self.runner_names)
+                    if cfg.stock_thesis_enabled:
+                        motion_ok, motion = stock_motion_gate(snap, candidate.option.side)
+                        candidate.metrics["stock_motion"] = motion
+                        setup_name = candidate.setup.name if candidate.setup else None
+                        if setup_name in {"REVERSAL", "INTRADAY_REVERSAL"}:
+                            candidate.metrics["stock_thesis_reason"] = "stock thesis: reversal excluded"
+                            candidate.qualifying = False
+                        elif not setup_name or setup_name == "STOCK_OVERRIDE":
+                            candidate.metrics["stock_thesis_reason"] = "stock thesis: no setup anchor"
+                            candidate.qualifying = False
+                        elif not motion_ok:
+                            candidate.metrics["stock_thesis_reason"] = "stock thesis: nearly stationary"
+                            candidate.qualifying = False
                 if candidate.metrics.get("score_v2") is None:
                     candidate.metrics.update(missing_v2("score did not compute"))
                 scored.append(candidate)
             if cfg.score_mode == "combined":
                 self._apply_stock_override(snap, scored, cfg, history)
+                if cfg.stock_thesis_enabled:
+                    for candidate in scored:
+                        motion_ok, motion = stock_motion_gate(snap, candidate.option.side)
+                        candidate.metrics["stock_motion"] = motion
+                        setup_name = candidate.setup.name if candidate.setup else None
+                        if setup_name in {"REVERSAL", "INTRADAY_REVERSAL"}:
+                            candidate.metrics["stock_thesis_reason"] = "stock thesis: reversal excluded"
+                            candidate.qualifying = False
+                        elif not setup_name or setup_name == "STOCK_OVERRIDE":
+                            candidate.metrics["stock_thesis_reason"] = "stock thesis: no setup anchor"
+                            candidate.qualifying = False
+                        elif not motion_ok:
+                            candidate.metrics["stock_thesis_reason"] = "stock thesis: nearly stationary"
+                            candidate.qualifying = False
             self.store.record_candidates(snap, scored, cfg)
             history.append(snap)
             self.history[key] = [s for s in history if snap.at - s.at <= timedelta(minutes=25)]
@@ -438,6 +485,9 @@ class Engine:
                     candidate.state = "IGNITION"
                     ready.append(candidate)
                 else:
+                    if candidate.metrics.get("stock_thesis_reason"):
+                        self.store.decision(snap, "RESEARCH", candidate.metrics["stock_thesis_reason"], candidate)
+                        continue
                     blocked = candidate.metrics.get("gate_blocked_by") or []
                     if candidate.metrics.get("s12_qualifying") and blocked:
                         self.store.decision(snap, "RESEARCH", "card gate: " + ", ".join(blocked), candidate)
@@ -753,6 +803,14 @@ class Engine:
                  a_bar=snap.symbol in self.runner_names)
         if candidate.metrics.get("card_layers_failed") or not candidate.metrics.get("gate_post"):
             return
+        if self.settings.stock_thesis_enabled:
+            from .stock_thesis import stock_thesis
+            thesis, why = stock_thesis(snap, option.side)
+            candidate.metrics["stock_thesis"] = thesis or None
+            candidate.metrics["stock_thesis_reason"] = why or None
+            if not thesis:
+                self.store.decision(snap, "RESEARCH", why, candidate)
+                return
         if candidate.metrics.get("score_v2") is None:
             candidate.metrics["score_v2"] = candidate.score
         candidate.setup = setup
@@ -827,7 +885,7 @@ class Engine:
         metrics = candidate.metrics
         embed = payload["embeds"][0]
         path = metrics.get("path") or "combined"
-        if path == "bypass":
+        if path in {"bypass", "stock_event"}:
             return
         embed["description"] += (
             f"\n{path} · {metrics.get('score_mode')} v2 **{metrics.get('score_v2')}** · bar {metrics.get('post_bar')}"

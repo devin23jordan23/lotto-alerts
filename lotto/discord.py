@@ -26,7 +26,9 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
     peers = next((reason for reason in candidate.reasons if reason.startswith("Peers: ")), None)
     score_context = " · ".join(part for part in (context, peers) if part)
     displayed_score = round(candidate.score)
-    title = ("👀 POTENTIAL TRADE WATCH" if phase == "POTENTIAL"
+    stock_event = candidate.metrics.get("path") == "stock_event"
+    title = ("🚀 STOCK THESIS · ACTIVE OPTION IDEA" if stock_event
+             else "👀 POTENTIAL TRADE WATCH" if phase == "POTENTIAL"
              else "GREEKS UNAVAILABLE · ACTIVE TRADE IDEA" if option.direct_quote_verified
              else "RISKY OPENING DRIVE · ACTIVE TRADE IDEA" if candidate.metrics.get("opening_fast_lane")
                   and candidate.setup and candidate.setup.name == "OPENING_DRIVE"
@@ -43,7 +45,12 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
     levels = (f"{'Watch' if phase == 'POTENTIAL' else 'Trigger'} ${setup.trigger:.2f}"
               f" · Invalidation ${setup.invalidation:.2f}") if setup else ""
     bypass = candidate.metrics.get("path") == "bypass"
-    score_label = (f"Stock bypass score **{displayed_score}** (minimum {candidate.metrics.get('bypass_threshold', 40):g})"
+    thesis = candidate.metrics.get("stock_thesis") or {}
+    score_label = (f"Stock thesis **{thesis.get('setup', 'confirmed')}** · "
+                   f"from open {thesis.get('move_from_open_atr', 0):.2f} ATR · "
+                   f"recent {thesis.get('recent_move_atr', 0):.2f} ATR"
+                   if stock_event else
+                   f"Stock bypass score **{displayed_score}** (minimum {candidate.metrics.get('bypass_threshold', 40):g})"
                    if bypass else f"Scanner score **{displayed_score}**")
     payload = {"username": "Lotto Scanner", "allowed_mentions": {"parse": []}, "embeds": [{
         "title": title,
@@ -89,6 +96,12 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
         notes.append("stale quote")
     if candidate.metrics.get("spread_flag"):
         notes.append(candidate.metrics["spread_flag"])
+    if stock_event:
+        spread = (option.ask - option.bid) / option.ask * 100
+        notes.append(f"Spread {spread:.1f}% · nearest listed expiry · ATM strike")
+        ratio = thesis.get("stock_volume_ratio")
+        if ratio is not None:
+            notes.append(f"Break bar volume {ratio:.2f}x prior bars")
     if candidate.metrics.get("bypass_reason"):
         notes.append(candidate.metrics["bypass_reason"])
     overrides = candidate.metrics.get("overrides") or []
