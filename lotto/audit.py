@@ -1,5 +1,6 @@
 """Compact read-only audit of saved sessions for deployment diagnostics."""
 import json
+import gzip
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -146,6 +147,12 @@ def audit_coil_burst_hypothesis(store, day, directory):
     labels = {}
     if report_path.exists():
         report = json.loads(report_path.read_text())
+    elif report_path.with_suffix(".json.gz").exists():
+        with gzip.open(report_path.with_suffix(".json.gz"), "rt") as saved:
+            report = json.load(saved)
+    else:
+        report = None
+    if report is not None:
         labels = {(r["symbol"], r["at"]): r["future_labels"]
                   for r in report.get("candidate_evaluations", [])}
     samples = []
