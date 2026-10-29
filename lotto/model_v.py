@@ -81,29 +81,16 @@ def dte_of(option: Option, snap: Snapshot) -> int:
 
 
 def pick_one_otm(snap: Snapshot, side: str, settings: Settings) -> Option | None:
-    """Nearest expiry (0DTE if any priced contract exists, else 1DTE), one strike OTM.
-
-    When the nearest strike is already out of the money, that strike is the contract.
-    """
+    """First priced OTM strike in the nearest available 0DTE or 1DTE expiry."""
     today = snap.at.astimezone(ET).date()
     pool = [o for o in snap.options if o.side == side and priced(o, snap, settings)]
-    if not pool:
-        return None
-    use = 0 if any((o.expiry - today).days == 0 for o in pool) else 1
-    pool = [o for o in pool if (o.expiry - today).days == use]
-    if not pool:
-        return None
-    direction = 1 if side == "CALL" else -1
-    strikes = sorted({o.strike for o in pool})
-    atm = min(strikes, key=lambda strike: (abs(strike - snap.spot), strike))
-    if direction == 1:
-        further = [strike for strike in strikes if strike > atm]
-        target = further[0] if further and atm <= snap.spot else atm
-    else:
-        further = [strike for strike in strikes if strike < atm]
-        target = further[-1] if further and atm >= snap.spot else atm
-    choices = [o for o in pool if o.strike == target]
-    return min(choices, key=lambda o: (o.ask - o.bid) / o.ask)
+    for days in (0, 1):
+        listed = [o for o in pool if (o.expiry - today).days == days
+                  and ((o.strike > snap.spot) if side == "CALL" else (o.strike < snap.spot))]
+        if listed:
+            return min(listed, key=lambda o: (abs(o.strike - snap.spot),
+                                              (o.ask - o.bid) / o.ask, o.symbol))
+    return None
 
 
 def _clamp(value: float, limit: float = 1) -> float:
@@ -676,32 +663,13 @@ def _quoted_fallback(option: Option) -> bool:
 
 
 def _otm_strike_order(strikes, spot: float, side: str, offset: int) -> list:
-    """1-OTM, then ATM if that quote is missing, then the next OTM strikes.
-
-    Calls walk up from the ATM strike. Puts walk down. offset 0 is not used
-    here; that path keeps the nearest-ATM sort.
-    """
+    """Walk strictly OTM; offset 0 and 1 both start at the first OTM strike."""
     strikes = sorted(set(strikes))
-    if not strikes:
-        return []
-    atm = min(strikes, key=lambda strike: (abs(strike - spot), strike))
     if side == "CALL":
-        otm = [strike for strike in strikes if strike > atm]
+        otm = [strike for strike in strikes if strike > spot]
     else:
-        otm = [strike for strike in reversed(strikes) if strike < atm]
-    start = max(0, int(offset) - 1)
-    preferred = otm[start:]
-    if not preferred:
-        ordered = [atm]
-    else:
-        ordered = [preferred[0], atm, *preferred[1:]]
-    seen = set()
-    unique = []
-    for strike in ordered:
-        if strike not in seen:
-            seen.add(strike)
-            unique.append(strike)
-    return unique
+        otm = [strike for strike in reversed(strikes) if strike < spot]
+    return otm[max(0, int(offset) - 1):]
 
 
 def _quote_passes(option: Option, snap: Snapshot, settings: Settings, history=None,
@@ -733,13 +701,10 @@ def _quote_passes(option: Option, snap: Snapshot, settings: Settings, history=No
 
 def choose_fallback_contract(snap: Snapshot, side: str, settings: Settings | None = None,
                              history=None, parts=None) -> dict:
-    """0DTE, then 1DTE, inside 5% of spot.
+    """0DTE, then 1DTE, choosing only OTM strikes inside 5% of spot.
 
-    The default walk starts one strike out of the money. A missing quote
-    there steps to the ATM strike, then to the next OTM strike. Offset 0,
-    including the legacy spread revert, is nearest ATM and then outward.
-    The spread band still applies. There is no hard spread block unless
-    spread_legacy is on.
+    A bad first OTM quote steps to the next OTM strike or expiry, never ITM.
+    The spread band still applies unless spread_legacy restores its hard cap.
     """
     settings = settings or Settings()
     offset = 0 if settings.spread_legacy else int(settings.fallback_strike_offset)
@@ -760,32 +725,23 @@ def choose_fallback_contract(snap: Snapshot, side: str, settings: Settings | Non
     chosen = None
     for days in order:
         pool = [option for option in grouped[days] if _inside_strike_window(option, snap, settings)]
-        if offset <= 0:
-            pool.sort(key=lambda option: (abs(option.strike - snap.spot), option.strike))
-            for option in pool:
+        by_strike = {}
+        for option in pool:
+            by_strike.setdefault(option.strike, []).append(option)
+        from .volume_trend import fallback_strike_order, is_volume_trend
+        if is_volume_trend(settings.profile) and offset <= 1:
+            strike_order = fallback_strike_order(by_strike, snap.spot, side)
+        else:
+            strike_order = _otm_strike_order(by_strike, snap.spot, side, offset)
+        for strike in strike_order:
+            quoted = [option for option in by_strike[strike] if _quoted_fallback(option)]
+            quoted.sort(key=lambda option: option.symbol)
+            for option in quoted:
                 if _quote_passes(option, snap, settings, history, parts):
                     chosen = option
                     break
-        else:
-            by_strike = {}
-            for option in pool:
-                by_strike.setdefault(option.strike, []).append(option)
-            from .volume_trend import fallback_strike_order, is_volume_trend
-            if is_volume_trend(settings.profile):
-                strike_order = fallback_strike_order(by_strike, snap.spot, side)
-            else:
-                strike_order = _otm_strike_order(by_strike, snap.spot, side, offset)
-            for strike in strike_order:
-                quoted = [option for option in by_strike[strike] if _quoted_fallback(option)]
-                quoted.sort(key=lambda option: option.symbol)
-                if not quoted:
-                    continue
-                for option in quoted:
-                    if _quote_passes(option, snap, settings, history, parts):
-                        chosen = option
-                        break
-                if chosen is not None:
-                    break
+            if chosen is not None:
+                break
         if chosen is not None:
             break
     if chosen is None:

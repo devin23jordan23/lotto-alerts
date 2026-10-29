@@ -2270,32 +2270,12 @@ def strike_window(strikes, spot: float, side: str, itm_count: int | None = None,
 
 
 def fallback_strike_order(strikes, spot: float, side: str) -> list:
-    """1 OTM, then ATM, then one ITM strike, then further OTM. Never the second ITM."""
+    """First OTM strike, then further OTM strikes. Never select ATM or ITM."""
     ordered = sorted({float(strike) for strike in strikes})
-    if not ordered:
-        return []
     spot = float(spot)
-    atm = min(ordered, key=lambda strike: (abs(strike - spot), strike))
     if side == "CALL":
-        otm = [strike for strike in ordered if strike > atm]
-        itm = [strike for strike in reversed(ordered) if strike < atm]
-    else:
-        otm = [strike for strike in reversed(ordered) if strike < atm]
-        itm = [strike for strike in ordered if strike > atm]
-    sequence = []
-    if otm:
-        sequence.append(otm[0])
-    sequence.append(atm)
-    if itm:
-        sequence.append(itm[0])
-    sequence.extend(otm[1:])
-    seen = set()
-    unique = []
-    for strike in sequence:
-        if strike not in seen:
-            seen.add(strike)
-            unique.append(strike)
-    return unique
+        return [strike for strike in ordered if strike > spot]
+    return [strike for strike in reversed(ordered) if strike < spot]
 
 
 def filter_chain_options(options, spot: float) -> list:

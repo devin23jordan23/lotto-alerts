@@ -147,7 +147,7 @@ class Settings:
     # spread_legacy forces this off.
     optb: int = 1
     stock_bar_tolerance: float = 0.05
-    # 1 is the first strike OTM. 0 is nearest ATM, which spread_legacy forces.
+    # 1 is the first strike OTM. 0 also starts OTM when spread_legacy forces it.
     fallback_strike_offset: int = 1
     # Reserved per-feature knobs. The scorer does not read them. The live
     # weight is the tier weight on CONFLUENCE_TABLE, times the 0-1 match.
