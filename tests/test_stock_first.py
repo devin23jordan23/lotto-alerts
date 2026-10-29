@@ -99,6 +99,16 @@ class StockFirstTests(unittest.TestCase):
         self.assertEqual(len(ideas), 1)
         self.assertEqual(ideas[0].setup, "OPENING_DRIVE")
 
+    def test_two_minute_breakout_does_not_wait_for_five_minute_reference(self):
+        scanner = StockFirst(self.store, enabled=True, mode="shadow")
+        ideas = []
+        for minute, price in enumerate([370, 370, 370.2, 373]):
+            row = self.row(minute, price)
+            row["prior_atr"] = 10.0
+            ideas.extend(scanner.process([row], dry_run=False))
+        self.assertEqual(len(ideas), 1)
+        self.assertEqual(ideas[0].at, self.start + timedelta(minutes=3))
+
     def test_missing_stock_volume_does_not_hide_price_observation(self):
         now = self.start + timedelta(minutes=6)
         discovery = Discovery(4)
