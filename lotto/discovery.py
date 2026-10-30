@@ -56,7 +56,9 @@ class Discovery:
             self.history[symbol] = [v for v in history if now-v["at"] <= timedelta(minutes=12)]
             if symbol in universe:
                 self.observations.append(record)
-                if symbol not in unavailable or symbol in tracked:
+                # A missing near-expiry chain must not evict a user-pinned name.
+                # Keep collecting its stock history and retry the live chain.
+                if symbol not in unavailable or symbol in tracked or symbol in self.always_deep:
                     ranks[symbol] = score
         # Keep windows intact long enough for 20-minute option persistence research.
         # Reserve a quarter of chain slots for names the price ranking has not

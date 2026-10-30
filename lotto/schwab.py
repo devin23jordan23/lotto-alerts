@@ -344,6 +344,115 @@ class Schwab:
                                              number(raw.get("vega"))))
         return tuple(result)
 
+    def option_chain(self, symbol, now, max_dte):
+        params = {"symbol": api_symbol(symbol), "contractType": "ALL", "strategy": "SINGLE",
+                  "includeUnderlyingQuote": "true", "strikeCount": 80,
+                  "fromDate": now.astimezone(ET).date().isoformat(),
+                  "toDate": (now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()}
+        data = self.get('/chains', params)
+        options = self.parse_chain(data, allow_spx=symbol == 'SPX')
+        def usable(o):
+            return (o.delta is not None and 0 < abs(o.delta) <= 1
+                    and (o.delta > 0) == (o.side == 'CALL')
+                    and o.gamma is not None and o.gamma > 0)
+        # Provider sentinel values (-999) are not Greeks. Retry once with a
+        # smaller request, retaining the broad chain and only merging real,
+        # newer provider quotes with usable Greeks. Never synthesize Greeks.
+        if not options or any(usable(o) for o in options):
+            return data
+        LOG.warning('Chain Greeks unavailable for %s (%d contracts); retrying near-money chain', symbol, len(options))
+        try:
+            retry = self.get('/chains', {**params, 'strikeCount': 20})
+            recovered = {o.symbol:o for o in self.parse_chain(retry, allow_spx=symbol == 'SPX') if usable(o)}
+        except Exception as exc:
+            LOG.warning('Chain Greek recovery %s failed (%s)', symbol, type(exc).__name__)
+            return data
+        merged = dict(data)
+        count = 0
+        for map_name in ('callExpDateMap', 'putExpDateMap'):
+            replacements = {raw.get('symbol'):raw for strikes in retry.get(map_name, {}).values()
+                            for contracts in strikes.values() for raw in contracts
+                            if raw.get('symbol') in recovered}
+            merged[map_name] = {}
+            for expiry, strikes in data.get(map_name, {}).items():
+                merged[map_name][expiry] = {}
+                for strike, contracts in strikes.items():
+                    rows = []
+                    for raw in contracts:
+                        newer = replacements.get(raw.get('symbol'))
+                        if newer and (number(newer.get('quoteTimeInLong')) or 0) >= (number(raw.get('quoteTimeInLong')) or 0):
+                            rows.append(newer); count += 1
+                        else:
+                            rows.append(raw)
+                    merged[map_name][expiry][strike] = rows
+        LOG.info('Chain Greek recovery %s: %d/%d contracts restored from provider', symbol, count, len(options))
+        return merged
+
+    def verify_greekless_opening_quotes(self, chains, spots, max_dte):
+        """Check a separate quote endpoint when the entire opening chain is frozen.
+
+        A refreshed timestamp in /chains did not imply a refreshed bid/ask on
+        2026-10-19. Keep the chain price unless /quotes independently disagrees
+        with it and supplies a current, crossed-free market. This does not
+        estimate Greeks or turn a stock move into an option trade.
+        """
+        local = datetime.now(timezone.utc).astimezone(ET)
+        if not ((local.hour == 9 and local.minute >= 35)
+                or (local.hour == 10 and local.minute < 30)):
+            return
+        requested = {}
+        for symbol, options in chains.items():
+            spot = spots.get(symbol)
+            if not spot or not options or any(
+                0 <= (o.expiry-local.date()).days <= max_dte
+                and -.01 <= (1 if o.side == 'CALL' else -1)*(o.strike/spot-1) <= .03
+                and o.delta is not None and 0 < abs(o.delta) <= 1
+                and (o.delta > 0) == (o.side == 'CALL')
+                and o.gamma is not None and o.gamma > 0 for o in options):
+                continue
+            groups = defaultdict(list)
+            for option in options:
+                dte = (option.expiry-local.date()).days
+                direction = 1 if option.side == 'CALL' else -1
+                moneyness = direction*(option.strike/spot-1)
+                # The chain premium itself may be frozen or nonsensical; do
+                # not use it to decide which strikes receive a direct quote.
+                if (0 <= dte <= max_dte and -.01 <= moneyness <= .03
+                        and option.volume >= 100):
+                    groups[(option.expiry,option.side)].append(option)
+            for rows in groups.values():
+                for option in sorted(rows, key=lambda o:(abs(o.strike-spot),-o.volume))[:8]:
+                    requested[option.symbol] = (symbol,option)
+        if not requested:
+            return
+        refreshed = {}
+        ids = list(requested)
+        for index in range(0,len(ids),60):
+            batch = ids[index:index+60]
+            try:
+                direct = self.get('/quotes', {'symbols':','.join(batch)})
+            except Exception as exc:
+                LOG.warning('Direct opening option quote check failed (%s)', type(exc).__name__)
+                continue
+            observed_at = datetime.now(timezone.utc)
+            for ident in batch:
+                original = requested[ident][1]
+                item = direct.get(ident,{})
+                q = item.get('quote',{})
+                qt, bid, ask = epoch(q.get('quoteTime')), number(q.get('bidPrice')), number(q.get('askPrice'))
+                if (item.get('realtime') is False or qt is None or bid is None or ask is None
+                        or not 0 <= (observed_at-qt).total_seconds() <= 90
+                        or not 0 < bid < ask or ask-bid > .15
+                        or (abs(bid-original.bid) < .01 and abs(ask-original.ask) < .01)):
+                    continue
+                volume = int(number(q.get('totalVolume')) or original.volume)
+                refreshed[ident] = replace(original,bid=bid,ask=ask,quote_time=qt,
+                                           volume=max(volume,original.volume),direct_quote_verified=True)
+        for symbol, options in chains.items():
+            chains[symbol] = [refreshed.get(option.symbol,option) for option in options]
+        LOG.info('Opening Greekless chains: independently refreshed %d/%d near-money contracts',
+                 len(refreshed),len(requested))
+
     def poll(self, symbols: list[str], tracked: dict, max_dte: int) -> list[Snapshot]:
         now = datetime.now(timezone.utc)
         if not hasattr(self, "coverage"):
@@ -379,10 +488,7 @@ class Schwab:
         sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "26")))
         sweep_targets = self.coverage.due(symbols, now, selected, sweep_limit)
         def chain(symbol):
-            return self.get("/chains", {"symbol":api_symbol(symbol), "contractType":"ALL", "strategy":"SINGLE",
-                                         "includeUnderlyingQuote":"true", "strikeCount":80,
-                                         "fromDate":now.astimezone(ET).date().isoformat(),
-                                         "toDate":(now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()})
+            return self.option_chain(symbol, now, max_dte)
         def deep(symbol):
             bars = self.bars(symbol, datetime.now(timezone.utc))
             return bars, chain(symbol)
@@ -423,12 +529,16 @@ class Schwab:
                     completed[symbol] = job.result()
                 except Exception as exc:
                     LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)
+        chain_options = {symbol:list(self.parse_chain(data, allow_spx=symbol == 'SPX'))
+                         for symbol,(_,data) in completed.items()}
+        self.verify_greekless_opening_quotes(chain_options,
+            {symbol:item.get('price') for symbol,item in parsed.items()},max_dte)
         for symbol in selected:
             if symbol not in completed:
                 continue
             try:
                 bars, data = completed[symbol]
-                options = list(self.parse_chain(data, allow_spx=symbol == "SPX"))
+                options = chain_options[symbol]
                 if data.get("isDelayed") is not True:
                     self.coverage.observe(symbol, datetime.now(timezone.utc), options,
                                           parsed.get(symbol, {}).get("price"), promoted=True)
@@ -446,7 +556,8 @@ class Schwab:
                         qt, bid, ask = epoch(q.get("quoteTime")), number(q.get("bidPrice")), number(q.get("askPrice"))
                         if qt and bid is not None and ask is not None and item.get("realtime") is not False:
                             options.append(replace(option, quote_time=qt, bid=bid, ask=ask,
-                                                   volume=int(number(q.get("totalVolume")) or option.volume)))
+                                                   volume=int(number(q.get("totalVolume")) or option.volume),
+                                                   direct_quote_verified=False))
                 at = datetime.now(timezone.utc)
                 benchmark = benchmark_for(symbol)
                 context, context_time = self.discovery.return_5m(benchmark, at)
