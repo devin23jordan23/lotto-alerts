@@ -37,14 +37,6 @@ def quote_ok(option: Option, snap: Snapshot, settings: Settings) -> bool:
             and abs((option.quote_time - snap.spot_time).total_seconds()) <= settings.max_quote_age_seconds)
 
 
-def contract_selectable(option: Option, snap: Snapshot, settings: Settings) -> bool:
-    """Model V only requires a priced quote. Spread and premium become score terms."""
-    if settings.model != "V":
-        return contract_ok(option, snap, settings)
-    from .model_v import priced
-    return priced(option, snap, settings)
-
-
 def contract_ok(option: Option, snap: Snapshot, settings: Settings) -> bool:
     dte = (option.expiry - snap.at.astimezone(ET).date()).days
     spread = option.ask - option.bid
@@ -52,20 +44,14 @@ def contract_ok(option: Option, snap: Snapshot, settings: Settings) -> bool:
     moneyness = direction * (option.strike / snap.spot - 1)
     atr = snap.prior_atr if snap.prior_atr and isfinite(snap.prior_atr) and snap.prior_atr > 0 else None
     premium_cap = max(settings.max_ask, min(settings.max_scaled_ask, atr*settings.premium_atr_fraction)) if atr else settings.max_ask
-    greek_ok = (option.delta is not None and isfinite(option.delta)
-                and direction * option.delta > 0
-                and settings.min_delta <= abs(option.delta) <= settings.max_delta
-                and option.gamma is not None and isfinite(option.gamma) and option.gamma > 0)
-    local = snap.at.astimezone(ET)
-    quote_fallback = (option.direct_quote_verified and not greek_ok
-                      and ((local.hour == 9 and local.minute >= 35)
-                           or (local.hour == 10 and local.minute < 30))
-                      and option.ask > 0 and spread/option.ask <= .10 and moneyness <= .03)
     return (quote_ok(option, snap, settings) and 0 <= dte <= settings.max_dte
             and option.bid > 0 and settings.min_ask <= option.ask <= premium_cap
             and spread / option.ask <= settings.max_spread_fraction
             and spread <= settings.max_spread_dollars
-            and (greek_ok or quote_fallback)
+            and option.delta is not None and isfinite(option.delta)
+            and direction * option.delta > 0
+            and settings.min_delta <= abs(option.delta) <= settings.max_delta
+            and option.gamma is not None and isfinite(option.gamma) and option.gamma > 0
             and -0.01 <= moneyness <= 0.08 and option.volume >= 100
             and (atr is None or direction*(option.strike-snap.spot) <= settings.max_otm_atr*atr))
 
@@ -93,26 +79,8 @@ def response_proxy(option, snap):
     Holds IV/time fixed and caps the scoring contribution; live quotes, expiry,
     spread and strike reachability must pass before this can rank a contract.
     """
-    if (option.delta is None or not isfinite(option.delta) or abs(option.delta) > 1
-            or option.gamma is None or not isfinite(option.gamma) or option.gamma <= 0):
-        return 0.0  # Never invent an option response when the provider has no Greeks.
     move = min(snap.spot*.005, (snap.prior_atr or snap.spot*.02)*.20)
     return (abs(option.delta)*move + .5*option.gamma*move*move)/option.ask
-
-
-def index_price_flow_confirmation(snap, setup, metrics, score, response, strike_count, acceleration, persistent):
-    """Let a liquid index break qualify on actual price/option follow-through.
-
-    Cumulative RVOL is a poor hard veto for heavily traded index ETFs; it
-    remains part of the score. This alternative still needs a triggered setup,
-    directional price travel, efficient bars and responsive multi-strike flow.
-    """
-    return (snap.symbol in {"SPY", "QQQ", "IWM"}
-            and setup is not None and not setup.building and score >= 80
-            and metrics["return_5m_directional"] >= .001
-            and metrics["efficiency"] >= .5
-            and response >= .7 and strike_count >= 3
-            and (acceleration >= 1.3 or persistent))
 
 
 def persistent_activity(snap, history, contract_ids, settings):
@@ -240,8 +208,6 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
               if 0 <= (o.expiry - snap.at.astimezone(ET).date()).days <= settings.max_dte}
     results = []
     for expiry, side in sorted(groups):
-        dte_days = (expiry-snap.at.astimezone(ET).date()).days
-        rules = "B" if (settings.model == "V" or settings.hybrid) and dte_days == 0 else "F"
         direction = 1 if side == "CALL" else -1
         listed = sorted([o for o in snap.options if (o.expiry, o.side) == (expiry, side)], key=lambda o: o.strike)
         duration_now = (snap.at - five.at).total_seconds()
@@ -260,7 +226,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         if cluster:
             clusters.append(cluster)
         clusters = [c for c in clusters if len(c) >= settings.min_cluster]
-        eligible = [(o,c) for c in clusters for o in c if contract_selectable(o, snap, settings)]
+        eligible = [(o,c) for c in clusters for o in c if contract_ok(o, snap, settings)]
         if not eligible:
             continue
         common = [o for o in listed if o.symbol in usable]
@@ -279,7 +245,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
             2*(1-(item[0].ask-item[0].bid)/item[0].ask/settings.max_spread_fraction)
             + clamp(now_vol[item[0].symbol]*300/duration_now/1000)
             + 2*clamp(response_proxy(item[0],snap))
-            + (1-abs(abs(item[0].delta)-.30) if abs(item[0].delta or 0) <= 1 else .5), item[0].symbol))
+            + (1-abs(abs(item[0].delta)-.30)), item[0].symbol))
         persistent = persistent_activity(snap, history, {o.symbol for o in best}, settings)
         context_valid = (snap.context_return_5m is not None and isfinite(snap.context_return_5m)
                          and snap.context_time is not None
@@ -316,14 +282,12 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
             "contract_response": 5*clamp(response),
         })
         metrics.update({"option_acceleration": acceleration, "cluster_size": len(best),
-                        "rules": rules,
                         "migration": migration, "option_volume_5m": now_total,
                         "context_directional_return": context, "relative_sector_5m": relative,
                         "peer_directional_return": peer, "options_persistent_20m": int(persistent),
                         "options_window_minutes": window_minutes, "trigger_gap_atr": gap,
                         "response_proxy": response, "contract_volume_rate_5m": now_vol[option.symbol]*300/duration_now,
-                        "selected_spread_fraction": (option.ask-option.bid)/option.ask,
-                        "greeks_unavailable_direct_quote": int(option.direct_quote_verified)})
+                        "selected_spread_fraction": (option.ask-option.bid)/option.ask})
         score = round(sum(parts.values()), 2)
         early_flow = early_broad_flow(snap, setup, metrics, score, option, settings)
         metrics["early_broad_flow"] = int(early_flow)
@@ -342,12 +306,6 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
                      and metrics["efficiency"] >= .4 and len(best) >= 3 and acceleration >= 1.5)
         sustained_coil = coil and persistent and metrics["local_rvol_5m"] >= .8
         metrics["locally_improving_volume"] = int(improving)
-        index_flow = index_price_flow_confirmation(
-            snap, setup, metrics, score, response, len(best), acceleration, persistent)
-        # 1DTE keeps the 6d8cf1f foundation rules: no later index-flow pace bypass.
-        if settings.model == "V" and rules == "F":
-            index_flow = False
-        metrics["index_price_flow_confirmation"] = int(index_flow)
         stock_risk = direction*(snap.spot-setup.invalidation) if setup else 0
         target_room = direction*(setup.target-snap.spot) if setup and setup.target is not None else None
         target_risk = target_room/stock_risk if target_room is not None and stock_risk>0 else None
@@ -357,7 +315,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         short = window_minutes <= 2
         checks = {
             "score below threshold": score >= settings.min_score+(5 if short else 0)+(3 if late else 0),
-            "stock volume pace/burst below threshold": metrics["pace_rvol"] >= settings.min_pace_rvol or local_burst or improving or sustained_coil or early_flow or opening_break or index_flow,
+            "stock volume pace/burst below threshold": metrics["pace_rvol"] >= settings.min_pace_rvol or local_burst or improving or sustained_coil or early_flow or opening_break,
             "stock volume pace fading": metrics["pace_persistence"] >= .80,
             "no developing price setup": setup is not None,
             "opposing volume dominates": metrics["opposing_volume_share"] <= (.60 if coil else .50),
@@ -374,22 +332,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
                 and (gap is None or 0 <= gap <= .10)),
         }
         blockers = tuple(k for k,v in checks.items() if not v)
-        if settings.model == "V" or (settings.hybrid and settings.soft_blocks):
-            # Keep the evidence from every failed setup check, but let score
-            # and the A/B delivery tier decide whether it reaches the channel.
-            # Invalid or stale option quotes were rejected before this point.
-            for name, passed in checks.items():
-                if name == "score below threshold":
-                    continue
-                slug = name.replace(" ", "_").replace("/", "_")
-                metrics[f"chk_{slug}"] = int(bool(passed))
-                if not passed:
-                    parts[f"pen_{slug}"] = -10
-            score = round(sum(parts.values()), 2)
-            # Model V posts on the v2 bar later. A failed check is only a penalty.
-            qualifying = True if settings.model == "V" else score >= settings.min_score+(5 if short else 0)+(3 if late else 0)
-        else:
-            qualifying = not blockers
+        qualifying = not blockers
         context_reason = (f"{snap.context_label} supportive" if context > 0
                           else f"Outperforming {snap.context_label}" if context_confirms
                           else f"{snap.context_label or 'Benchmark'} unconfirmed")
@@ -401,13 +344,9 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
             reasons.append("Broad early options flow with rising local stock volume")
         if short:
             reasons.append("Early signal · shorter options history")
-        if option.direct_quote_verified:
-            reasons.append("Opening contract quote independently refreshed · Greeks unavailable")
         if persistent:
             reasons.append("Options activity sustained 20m")
         if peer_valid and peer > 0:
             reasons.append("Peers: " + ", ".join(snap.peer_leaders))
-        if (settings.model == "V" or settings.hybrid) and blockers:
-            reasons.extend(f"Soft check: {name}" for name in blockers if name != "score below threshold")
         results.append(Candidate(snap, option, score, parts, metrics, reasons, qualifying, setup=setup, blockers=blockers))
     return results

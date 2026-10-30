@@ -1,5 +1,4 @@
 import json
-import os
 import tempfile
 import unittest
 from dataclasses import replace
@@ -12,7 +11,7 @@ from lotto.discovery import Discovery
 from lotto.coverage import ChainCoverage
 from lotto.engine import Engine
 from lotto.features import candidates, observation_window, persistent_activity
-from lotto.main import DEFAULT_UNIVERSE, apply_exclusions, universe_symbols
+from lotto.main import DEFAULT_UNIVERSE, universe_symbols
 from lotto.models import Bar, ET
 from lotto.nightly import run_nightly
 from lotto.patterns import detect_setup, path_features
@@ -85,22 +84,6 @@ class DevelopingTests(unittest.TestCase):
 
     def test_new_symbols_survive_existing_universe_override(self):
         self.assertEqual(universe_symbols("SPY,AMD"), ["AMD", "CSCO", "HPE", "SPCX", "SPX", "SPY"])
-
-    def test_ibit_in_lotto_universe_is_dropped_when_excluded(self):
-        with patch.dict(os.environ, {
-            "LOTTO_UNIVERSE": "SPY,IBIT,QQQ",
-            "LOTTO_EXCLUDE_SYMBOLS": "IBIT",
-        }, clear=False):
-            raw = universe_symbols(os.environ["LOTTO_UNIVERSE"])
-            self.assertIn("IBIT", raw)
-            symbols, standby, continuous, blocked = apply_exclusions(
-                raw, ["IBIT", "DKNG"], {"IBIT", "SPY"})
-        self.assertEqual(blocked, {"IBIT"})
-        self.assertNotIn("IBIT", symbols)
-        self.assertIn("SPY", symbols)
-        self.assertIn("QQQ", symbols)
-        self.assertEqual(standby, ["DKNG"])
-        self.assertEqual(continuous, {"SPY"})
 
     def test_all_106_names_get_discovery_even_with_twelve_chains(self):
         symbols=DEFAULT_UNIVERSE.split(','); self.assertEqual(len(symbols),106)

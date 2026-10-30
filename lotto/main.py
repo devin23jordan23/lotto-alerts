@@ -9,14 +9,13 @@ from dataclasses import asdict, fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .config import Settings, STRATEGY_VERSION, model_v_settings
+from .config import Settings, STRATEGY_VERSION
 from .demo import demo_frames
-from .discord import deliver_pending, deliver_stock_pending
+from .discord import deliver_pending
 from .engine import Engine
 from .models import ET, Snapshot
 from .schwab import Schwab
 from .store import Store
-from .stock_first import StockFirst
 from .nightly import maybe_nightly, run_nightly
 from .health import check
 from .audit import audit_store, diagnose_symbols, audit_coil_burst_hypothesis
@@ -34,12 +33,6 @@ DEFAULT_UNIVERSE = (
 )
 
 REQUIRED_UNIVERSE = {"CSCO", "HPE", "SPX", "SPCX"}
-# Runner names outside the default universe. Quoted always, chain-scanned only
-# while in play. Nia's year list plus the Oct 26 names that had no chain.
-DEFAULT_STANDBY = (
-    "IREN", "CRWV", "LITE", "TTMI", "HUT", "CORZ", "DKNG", "RIVN", "LUNR", "HIMS",
-    "MARA", "SOXL", "GME", "EWZ", "TLT", "RIOT", "XLI", "TEM", "STX", "IBIT", "U",
-)
 
 
 def universe_symbols(raw: str) -> list[str]:
@@ -47,251 +40,14 @@ def universe_symbols(raw: str) -> list[str]:
     return sorted(symbols | REQUIRED_UNIVERSE) if symbols else []
 
 
-def excluded_symbols() -> set[str]:
-    """LOTTO_EXCLUDE_SYMBOLS. Comma-separated, case-insensitive, default empty."""
-    raw = os.getenv("LOTTO_EXCLUDE_SYMBOLS", "")
-    return {part.strip().upper() for part in raw.split(",") if part.strip()}
-
-
-def apply_exclusions(symbols, standby=None, continuous=None):
-    """Drop excluded names after every universe source has been combined.
-
-    Covers the core list, standby (including UOA names), EXTRA_UNIVERSE names
-    already merged into the core, and the continuous / coverage-plan list.
-    """
-    blocked = excluded_symbols()
-
-    def keep(name) -> bool:
-        return str(name).strip().upper() not in blocked
-
-    symbols = [name for name in symbols if keep(name)]
-    if standby is not None:
-        standby = [name for name in standby if keep(name)]
-    if continuous is not None:
-        continuous = {name for name in continuous if keep(name)}
-    return symbols, standby, continuous, blocked
-
-
-def _env_on(name: str, default: str = "off") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "on", "true", "yes"}
-
-
-def standby_symbols() -> list[str]:
-    """Runner names. Empty unless LOTTO_STANDBY_NAMES is on.
-
-    When the switch is on, the named list is quoted and chain-scanned only
-    while in play. Those symbols are scored on the handoff A bar.
-    """
-    if not _env_on("LOTTO_STANDBY_NAMES", "off"):
-        return []
-    raw = os.getenv("LOTTO_STANDBY_UNIVERSE")
-    if raw is None:
-        named = list(DEFAULT_STANDBY)
-    else:
-        named = [s.strip().upper() for s in raw.split(",") if s.strip()]
-    include_uoa = os.getenv("LOTTO_STANDBY_INCLUDE_UOA", "1").strip().lower() not in {"0", "false", "no"}
-    extra = []
-    if include_uoa:
-        for key in ("UOA_CORE_UNIVERSE", "UOA_IN_PLAY", "UOA_PREMARKET_WATCHLIST"):
-            extra.extend(s.strip().upper() for s in os.getenv(key, "").split(",") if s.strip())
-    return sorted(set(named) | set(extra))
-
-
-# Floors belong to the preset. A copied .env must not put the old rounded
-# values back on top of S11 or S12.
-PWIN_FIELDS = (
-    "pwin_normal_0dte", "pwin_normal_1dte",
-    "pwin_quintile_0dte", "pwin_quintile_1dte",
-    "pwin_decile", "pwin_decile_1dte",
-)
-
-
-def atr_window_status(settings) -> int:
-    """One startup line naming the ATR window Model V scores and posts on."""
-    days = settings.atr_days
-    if days == 14:
-        LOG.warning("ATR window: 14 days. prior_atr is the 14-day true-range average.")
-    else:
-        LOG.warning(
-            "ATR window: 21 days. prior_atr is the mean of the prior daily true ranges, today excluded. "
-            "Fewer than 15 true ranges leaves prior_atr empty; the 14-day average is not substituted. "
-            "LOTTO_ATR_DAYS=14 restores that average."
-        )
-    return days
-
-
-def _setting_text(value) -> str:
-    number = float(value)
-    if number.is_integer():
-        return str(int(number))
-    return f"{number:.4f}".rstrip("0").rstrip(".")
-
-
-def profile_status(settings) -> str:
-    """The active profile and the lines it actually posts on. No cap is applied."""
-    LOG.warning(
-        "Profile: %s post>=%s bypass>=%s min_positive_features>=%s bolt_features>=%s",
-        settings.profile, _setting_text(settings.post_threshold),
-        _setting_text(settings.bypass_threshold), settings.min_positive_features,
-        settings.strong_feature_min,
-    )
-    return settings.profile
-
-
-def fallback_rule_status(settings) -> str:
-    """One startup line. RVOL, push, and room are points, not gates."""
-    mode = settings.fallback_rule
-    LOG.warning(
-        "Fallback rule: %s post>=%s bypass>=%s atr=21 contract=roll spread<=%s%% bid>%s opt_vol>=%s",
-        mode, _setting_text(settings.post_threshold), _setting_text(settings.bypass_threshold),
-        _setting_text(settings.fb_max_spread_pct), _setting_text(settings.blocker_bid),
-        _setting_text(settings.blocker_option_volume_5m),
-    )
-    return mode
-
-
-def strong_score_status(settings) -> int:
-    """⚡ needs the profile post line and the positive-feature count."""
-    LOG.warning(
-        "Strong score: ⚡ on cards with score>=%s and >= %s positive features",
-        _setting_text(settings.post_threshold), settings.strong_feature_min,
-    )
-    return settings.strong_feature_min
-
-
-def weights_file_status(settings) -> bool:
-    """Loud when the shipped weights book is not on disk. Cards will not post."""
-    path = Path(settings.weights_path)
-    if path.is_file():
-        LOG.warning("Weights file: %s", path.name)
-        return True
-    LOG.error(
-        "WEIGHTS FILE MISSING: %s. No card will post until this file is present.",
-        path,
-    )
-    return False
-
-
-def freshness_status(settings) -> None:
-    """Ages are logged. A stale quote is a flag and a point penalty, not a gate."""
-    LOG.warning(
-        "Freshness: quote_age_s bar_age_s min_since_trigger logged; stale quote >%ss is a flag and -%s, not a gate",
-        _setting_text(settings.stale_quote_seconds), _setting_text(settings.stale_quote_penalty),
-    )
-
-
-def handoff_fallback_status(enabled: bool, requested_mode: str | None) -> str:
-    """Whether stock-led option cards are built.
-
-    LOTTO_STOCK_FIRST_MODE is not read by the handoff lane. Shadow does not
-    hold those option cards. Turning stock-first off does. Stock-only cards
-    never post in either state.
-    """
-    mode = (requested_mode or "shadow").strip().lower() or "shadow"
-    if enabled:
-        LOG.warning(
-            "Handoff fallback state: posting. LOTTO_STOCK_FIRST_ENABLED=true builds stock-led option cards. "
-            "LOTTO_STOCK_FIRST_MODE=%s is not read by that lane. Stock-only cards never post.",
-            mode,
-        )
-        return "posting"
-    LOG.warning(
-        "Handoff fallback state: shadow. LOTTO_STOCK_FIRST_ENABLED=false disables the handoff lane, "
-        "so stock-led option cards will not post. Set LOTTO_STOCK_FIRST_ENABLED=true. "
-        "Stock-only cards never post in any mode.",
-    )
-    return "shadow"
-
-
 def env_settings() -> Settings:
-    model = os.getenv("LOTTO_MODEL", "V").strip().upper()
-    if model not in {"V", "S"}:
-        raise SystemExit("LOTTO_MODEL must be V or S")
-    preset = os.getenv("LOTTO_PRESET", "S12").strip().upper()
-    base = (model_v_settings(preset=preset) if model == "V"
-            else Settings(model="S", min_score=70, send_requote=0, hybrid=0, soft_blocks=0))
+    defaults = Settings()
     updates = {}
-    for field in fields(base):
+    for field in fields(defaults):
         raw = os.getenv("LOTTO_" + field.name.upper())
-        if raw is not None and field.name not in {"model", "preset", *PWIN_FIELDS}:
-            if field.name in {"standby_names", "spread_legacy", "day_volume_swap", "optb"}:
-                updates[field.name] = 1 if raw.strip().lower() in {"1", "on", "true", "yes"} else 0
-            elif field.name == "spread_bands":
-                updates[field.name] = tuple(
-                    float(piece) for piece in raw.replace(" ", "").split(",") if piece)
-            elif field.name == "spread_stock_bars":
-                parsed = []
-                for piece in raw.split(","):
-                    piece = piece.strip()
-                    if not piece:
-                        continue
-                    rvol, push, setups = piece.split("/")
-                    parsed.append((float(rvol), float(push), int(float(setups))))
-                updates[field.name] = tuple(parsed)
-            else:
-                updates[field.name] = type(getattr(base, field.name))(raw)
-    if "score_mode" in updates:
-        updates["score_mode"] = str(updates["score_mode"]).lower()
-    if "fallback_rule" in updates:
-        updates["fallback_rule"] = str(updates["fallback_rule"]).strip().lower()
-    # SHADOW_PROFILE is the operator switch. LOTTO_SHADOW_PROFILE is the same field.
-    if os.getenv("SHADOW_PROFILE") is not None:
-        updates["shadow_profile"] = os.getenv("SHADOW_PROFILE", "").strip()
-    elif "shadow_profile" in updates:
-        updates["shadow_profile"] = str(updates["shadow_profile"]).strip()
-    updates["model"] = model
-    if model == "V":
-        updates["preset"] = preset
-        if updates.get("min_score", base.min_score) > 60:
-            updates["min_score"] = 60
-        if updates.get("score_mode", base.score_mode) == "combined" and "preset_note" not in updates:
-            updates["preset_note"] = (
-                "Rollback: one combined score, bars 40/61, stock share cap 0.40, "
-                "plus the exceptional stock_override path."
-            )
-        for name in PWIN_FIELDS:
-            raw = os.getenv("LOTTO_" + name.upper())
-            if raw is None:
-                continue
-            preset_value = getattr(base, name)
-            try:
-                supplied = float(raw)
-            except ValueError:
-                supplied = None
-            if supplied != preset_value:
-                LOG.warning(
-                    "Ignoring LOTTO_%s=%s; LOTTO_PRESET=%s uses %s",
-                    name.upper(), raw, base.preset, preset_value,
-                )
-    if model == "V":
-        from .weights import active_profile, load_weights
-        requested = str(updates.get("profile") or base.profile or "conservative")
-        overridden = [
-            name for name in ("LOTTO_POST_THRESHOLD", "LOTTO_BYPASS_THRESHOLD", "LOTTO_MIN_POSITIVE_FEATURES")
-            if os.getenv(name) is not None
-        ]
-        try:
-            chosen = active_profile(load_weights(updates.get("weights_path")), requested)
-            updates.update(chosen)
-            if overridden:
-                LOG.warning(
-                    "LOTTO_PROFILE=%s overrides %s. Set LOTTO_PROFILE to change the line.",
-                    chosen["profile"], ", ".join(overridden),
-                )
-        except (OSError, ValueError) as exc:
-            LOG.error(
-                "Weights book failed to load (%s); conservative defaults are in use "
-                "(post>=92 bypass>=40 min_positive_features>=0 bolt>=10)",
-                type(exc).__name__,
-            )
-            updates.update({
-                "profile": "conservative",
-                "post_threshold": 92,
-                "bypass_threshold": 40,
-                "min_positive_features": 0,
-                "strong_feature_min": 10,
-            })
-    return replace(base, **updates)
+        if raw is not None:
+            updates[field.name] = type(getattr(defaults, field.name))(raw)
+    return replace(defaults, **updates)
 
 
 def replay_frames(path):
@@ -317,7 +73,7 @@ def main():
     data_dir = Path(os.getenv("DATA_DIR", "data"))
     data_dir.mkdir(parents=True, exist_ok=True)
     if args.mode == "check":
-        symbols, _, _, _ = apply_exclusions(universe_symbols(os.getenv("LOTTO_UNIVERSE") or DEFAULT_UNIVERSE))
+        symbols=universe_symbols(os.getenv("LOTTO_UNIVERSE") or DEFAULT_UNIVERSE)
         result=check(Schwab(str(data_dir)),symbols,data_dir)
         print(json.dumps(result,indent=2))
         raise SystemExit(0 if result['ready'] else 1)
@@ -350,12 +106,6 @@ def main():
     if live_delivery and not webhook:
         raise SystemExit("DISCORD_LOTTO_WEBHOOK is required when LOTTO_SEND_ALERTS=true")
     engine = Engine(store, env_settings(), dry_run=not live_delivery)
-    engine.fallback_log = data_dir / "fallback-rule.jsonl"
-    # Stock cards stay internal even if LOTTO_STOCK_FIRST_MODE=send.
-    stock_first = StockFirst(store,
-        enabled=os.getenv("LOTTO_STOCK_FIRST_ENABLED", "true").lower() == "true",
-        mode="shadow",
-        max_quote_age=engine.settings.max_quote_age_seconds)
     health_monitor = HealthMonitor(store, webhook)
     if args.mode in {"demo", "replay"}:
         if args.mode == "replay" and not args.input:
@@ -372,21 +122,6 @@ def main():
         # unusual-options scanner's universe variables.
         configured_universe = ",".join(filter(None, (os.getenv("UOA_CORE_UNIVERSE", ""), os.getenv("UOA_IN_PLAY", "")))) or DEFAULT_UNIVERSE
     symbols = universe_symbols(configured_universe)
-    standby = [s for s in standby_symbols() if s not in symbols]
-    from .volume_trend import (
-        ensure_etf_typicals, install_extra_universe, is_volume_trend, pin_deep_names, volume_trend_symbols,
-    )
-    if is_volume_trend(engine.settings.profile):
-        symbols = volume_trend_symbols(symbols)
-        standby = [s for s in standby if s not in symbols]
-        pin_deep_names(client.discovery)
-        symbols, _loaded, _budget = install_extra_universe(symbols, client, engine.settings)
-        ensure_etf_typicals(client, datetime.now(timezone.utc))
-    symbols, standby, continuous, blocked = apply_exclusions(
-        symbols, standby, client.discovery.always_deep)
-    client.discovery.always_deep = continuous
-    engine.runner_names = frozenset(standby)
-    LOG.info("Excluded symbols: %s core=%d", ",".join(sorted(blocked)), len(symbols))
     if not symbols:
         raise SystemExit("LOTTO_UNIVERSE must contain at least one symbol")
     poll_seconds = max(30, int(os.getenv("LOTTO_POLL_SECONDS", "60")))
@@ -396,31 +131,10 @@ def main():
         stop = True
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
-    LOG.info("Lotto worker started: %d symbols, delivery=%s, alert count limits=%s, post cooldown=%s",
-             len(symbols), live_delivery,
+    LOG.info("Lotto worker started: %d symbols, delivery=%s, alert count limits=%s", len(symbols), live_delivery,
              "disabled" if not any((engine.settings.max_alerts_per_day, engine.settings.max_alerts_per_ticker,
-                                     engine.settings.max_alerts_per_cycle)) else "configured",
-             "off" if engine.settings.cooldown_minutes <= 0 else f"{engine.settings.cooldown_minutes}m per ticker side")
+                                     engine.settings.max_alerts_per_cycle)) else "configured")
     LOG.info("Strategy %s settings: %s",STRATEGY_VERSION,json.dumps(asdict(engine.settings),sort_keys=True))
-    LOG.info('Quality policy: mode=%s policy=%s secondary_delivery=%s disabled=%s',
-             engine.quality.mode,engine.quality.policy,
-             'configured' if os.getenv('DISCORD_LOTTO_SECONDARY_WEBHOOK') else 'internal',
-             ','.join(sorted(engine.quality.disabled_rules)) or 'none')
-    handoff_fallback_status(stock_first.enabled, os.getenv("LOTTO_STOCK_FIRST_MODE"))
-    profile_status(engine.settings)
-    fallback_rule_status(engine.settings)
-    strong_score_status(engine.settings)
-    freshness_status(engine.settings)
-    weights_file_status(engine.settings)
-    atr_window_status(engine.settings)
-    from .model_v import scan_budget
-    LOG.info("Model %s score_mode=%s preset=%s standby_names=%s standby=%s",
-             engine.settings.model, engine.settings.score_mode, engine.settings.preset,
-             "on" if engine.settings.standby_names else "off", ",".join(standby) or "none")
-    LOG.info("Scan budget: %s", json.dumps(scan_budget(
-        len(symbols), len(standby), engine.settings.standby_scan_minutes,
-        engine.settings.quote_batch, client.min_request_interval,
-        scans_per_cycle=engine.settings.standby_scans_per_cycle)))
     LOG.info("Coverage plan: %d deep slots; continuous=%s; full-universe sweep target=%d minutes",
              client.discovery.capacity,",".join(sorted(client.discovery.always_deep)),client.coverage.interval.seconds//60)
     local_start = datetime.now(ET)
@@ -483,17 +197,7 @@ def main():
         try:
             today = datetime.now(ET).date().isoformat()
             tracked = store.active_options(today)
-            def on_discovery(rows):
-                ideas = stock_first.process(rows, dry_run=not live_delivery)
-                for idea in ideas:
-                    LOG.info("Stock-first %s %s %s at %.2f (logged, not posted)", idea.symbol, idea.side, idea.setup, idea.price)
-                if engine.settings.model == "V":
-                    engine.remember_stock_events(ideas)
-                    return engine.handoff_symbols()
-                return []
-            frame = client.poll(sorted(set(symbols) | set(standby) | set(tracked)), tracked,
-                                engine.settings.max_dte, on_discovery=on_discovery, standby=standby,
-                                in_play_settings=engine.settings)
+            frame = client.poll(sorted(set(symbols) | set(tracked)), tracked, engine.settings.max_dte)
             store.record_discovery(client.discovery.observations)
             store.record_chain_coverage(client.coverage.rows)
             # Poll latency cannot turn an old candidate into a current alert.
@@ -503,9 +207,7 @@ def main():
             for alert in alerts:
                 LOG.info("%s setup %s: %s", alert["phase"], alert["id"], alert["payload"]["embeds"][0]["description"])
             if live_delivery:
-                deliver_pending(store, webhook,
-                                quoter=client.send_quote if engine.settings.send_requote else None)
-                deliver_stock_pending(store, webhook)
+                deliver_pending(store, webhook)
             with store.db:
                 # Expire intraday trackers after the session even if no further quotes arrive.
                 store.db.execute("UPDATE alerts SET closed=1 WHERE day < ?", (today,))
@@ -530,14 +232,7 @@ def main():
                                      ((now-timedelta(minutes=5)).isoformat(),)).fetchall()
             if counts:
                 LOG.info("Recent decision reasons: %s", "; ".join(f"{r['n']}× {r['reason']}" for r in counts))
-            for symbol in diagnose:
-                row = store.db.execute(
-                    "SELECT at,state,reason,score FROM decisions WHERE symbol=? AND at>=? ORDER BY at DESC LIMIT 1",
-                    (symbol, (now-timedelta(seconds=90)).isoformat())).fetchone()
-                if row:
-                    LOG.info('Live decision %s: %s', symbol, json.dumps(dict(row)))
             maybe_nightly(store,client,symbols,data_dir,now)
-            if is_volume_trend(engine.settings.profile): ensure_etf_typicals(client, now)
             client.warm_universe(symbols, now)
         except Exception as exc:
             detail = str(exc) if type(exc) is RuntimeError else type(exc).__name__

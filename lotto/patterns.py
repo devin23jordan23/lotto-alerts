@@ -44,11 +44,6 @@ def path_features(snap: Snapshot, direction: int) -> dict:
     baseline = bars[-1].expected_cumulative_volume
     old_baseline = old[-1].expected_cumulative_volume
     pace = volume / baseline if baseline and baseline > 0 else 0
-    # One RVOL baseline: cumulative volume over the prior 10 full-day curve.
-    full_days = getattr(snap, "prior_full_days", None)
-    rvol_base = getattr(snap, "rvol_base", None)
-    if full_days is not None and full_days >= 10 and rvol_base and rvol_base > 0:
-        pace = volume / rvol_base
     old_pace = old_volume / old_baseline if old_baseline and old_baseline > 0 else 0
     last5 = sum(b.volume for b in bars[-lookback:])
     prev5 = sum(b.volume for b in bars[-2*lookback:-lookback])

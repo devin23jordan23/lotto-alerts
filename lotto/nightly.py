@@ -411,8 +411,6 @@ def run_nightly(store, day, directory, symbols=(), client=None):
                             "mean_stock_30m_directional":sum(v)/len(v)} for k,v in grouped.items()},
         "universe_price_setups":research,"captured_option_returns":store.end_of_day_options(day),
     }
-    from .quality_report import scorecard
-    result['model_quality_scorecard'] = scorecard(store,day)
     path = root/"report.json"
     temporary = root/"report.tmp"
     temporary.write_text(json.dumps(result,indent=2))
