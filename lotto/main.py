@@ -135,6 +135,10 @@ def main():
              "disabled" if not any((engine.settings.max_alerts_per_day, engine.settings.max_alerts_per_ticker,
                                      engine.settings.max_alerts_per_cycle)) else "configured")
     LOG.info("Strategy %s settings: %s",STRATEGY_VERSION,json.dumps(asdict(engine.settings),sort_keys=True))
+    LOG.info('Quality policy: mode=%s policy=%s secondary_delivery=%s disabled=%s',
+             engine.quality.mode,engine.quality.policy,
+             'configured' if os.getenv('DISCORD_LOTTO_SECONDARY_WEBHOOK') else 'internal',
+             ','.join(sorted(engine.quality.disabled_rules)) or 'none')
     LOG.info("Coverage plan: %d deep slots; continuous=%s; full-universe sweep target=%d minutes",
              client.discovery.capacity,",".join(sorted(client.discovery.always_deep)),client.coverage.interval.seconds//60)
     local_start = datetime.now(ET)
@@ -232,6 +236,12 @@ def main():
                                      ((now-timedelta(minutes=5)).isoformat(),)).fetchall()
             if counts:
                 LOG.info("Recent decision reasons: %s", "; ".join(f"{r['n']}× {r['reason']}" for r in counts))
+            for symbol in diagnose:
+                row = store.db.execute(
+                    "SELECT at,state,reason,score FROM decisions WHERE symbol=? AND at>=? ORDER BY at DESC LIMIT 1",
+                    (symbol, (now-timedelta(seconds=90)).isoformat())).fetchone()
+                if row:
+                    LOG.info('Live decision %s: %s', symbol, json.dumps(dict(row)))
             maybe_nightly(store,client,symbols,data_dir,now)
             client.warm_universe(symbols, now)
         except Exception as exc:

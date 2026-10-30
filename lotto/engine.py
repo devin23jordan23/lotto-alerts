@@ -1,11 +1,15 @@
 from collections import defaultdict
 from datetime import datetime, timedelta
+import json
+import logging
+import os
 
 from .config import Settings
 from .discord import alert_payload
 from .features import candidates
 from .models import ET, Snapshot
 from .store import Store
+from .quality import QualityConfig, evaluate
 
 
 def active_quality_reason(candidate) -> str | None:
@@ -24,10 +28,11 @@ def active_quality_reason(candidate) -> str | None:
 
 
 class Engine:
-    def __init__(self, store: Store, settings: Settings | None = None, dry_run: bool = True):
+    def __init__(self, store: Store, settings: Settings | None = None, dry_run: bool = True, quality: QualityConfig | None = None):
         self.store = store
         self.settings = settings or Settings()
         self.dry_run = dry_run
+        self.quality = quality or QualityConfig.from_env()
         self.history = {}
         self.scores = defaultdict(list)
         self.qualified_since = {}
@@ -39,6 +44,7 @@ class Engine:
 
     def process(self, snapshots: list[Snapshot]) -> list[dict]:
         ready = []
+        quality_decisions = {}
         cfg = self.settings
         for snap in snapshots:
             key = (snap.day, snap.symbol)
@@ -83,11 +89,25 @@ class Engine:
                         self.rearmed.add(key)
                 else:
                     self.cool_since.pop(key, None)
-                self.store.decision(snap, "COOLING" if self.store.last_alert(*key) else "DISCOVERY",
-                                    "; ".join(best.blockers) if best else "options history, liquidity, or neighboring-strike activity unavailable", best)
+                if best is None:
+                    from .audit import chain_reasons
+                    detail = chain_reasons(snap, history, cfg)
+                    reason = 'option stage: ' + json.dumps(detail, sort_keys=True)
+                    if snap.symbol in os.getenv('LOTTO_DIAGNOSE_SYMBOLS', '').upper().split(','):
+                        logging.getLogger(__name__).info('Option stage %s: %s', snap.symbol, json.dumps(detail))
+                else:
+                    reason = '; '.join(best.blockers)
+                self.store.decision(snap, "COOLING" if self.store.last_alert(*key) else "DISCOVERY", reason, best)
                 continue
             self.cool_since.pop(key, None)
             best = max(valid, key=lambda c: c.score)
+            if self.quality.mode != 'off':
+                phase = 'POTENTIAL' if best.setup.building else 'ACTIVE'
+                policy = evaluate(best, disabled=self.quality.disabled_rules)
+                quality_decisions[(snap.symbol,snap.at,best.option.symbol)] = policy
+                self.store.quality_shadow(best,policy,phase)
+                if self.quality.shadow_extra:
+                    self.store.quality_shadow(best,evaluate(best,'stack8',self.quality.disabled_rules),phase)
             # A reclaim becoming a continuation is still the same directional
             # thesis. Require distinct completed bars, not a perfect poll timer.
             score_key = (*key, best.option.side, best.option.expiry.isoformat())
@@ -138,7 +158,14 @@ class Engine:
                         continue
             else:
                 best.state = "IGNITION"
-            if phase == "ACTIVE" and cfg.active_quality_gate:
+            if phase == 'ACTIVE' and self.quality.mode == 'enforce':
+                policy = quality_decisions[(snap.symbol,snap.at,best.option.symbol)]
+                if policy.tier == 'RESEARCH':
+                    reason = 'Model S research only: ' + ', '.join(policy.reasons)
+                    self.store.research_candidate(best,reason)
+                    self.store.decision(snap,'RESEARCH',reason,best)
+                    continue
+            elif phase == "ACTIVE" and cfg.active_quality_gate:
                 reason = active_quality_reason(best)
                 if reason:
                     self.store.research_candidate(best, reason)
@@ -159,8 +186,10 @@ class Engine:
             phase = "POTENTIAL" if candidate.setup.building else "ACTIVE"
             last = self.store.last_alert(snap.day, snap.symbol)
             parent_id = (last["id"] if candidate.state == "ACTIVATION" and last else None)
-            payload = alert_payload(candidate, phase, parent_id)
-            ident = self.store.queue(candidate, payload, self.dry_run, phase, parent_id)
+            policy = (quality_decisions.get((snap.symbol,snap.at,candidate.option.symbol))
+                      if self.quality.mode == 'enforce' and phase == 'ACTIVE' else None)
+            payload = alert_payload(candidate, phase, parent_id, quality=policy)
+            ident = self.store.queue(candidate, payload, self.dry_run, phase, parent_id, quality=policy)
             self.rearmed.discard((snap.day, snap.symbol))
             self.store.decision(snap, candidate.state, f"{phase.lower()} alert {ident}", candidate)
             alerts.append({"id": ident, "phase": phase, "parent_id": parent_id, "payload": payload})

@@ -49,6 +49,7 @@ class Option:
     implied_volatility: float | None = None  # Provider-reported chain volatility.
     theta: float | None = None
     vega: float | None = None
+    direct_quote_verified: bool = False  # Independent contract quote disagreed with a Greekless chain.
 
     def valid(self) -> bool:
         return (self.side in {"CALL", "PUT"} and positive(self.strike, self.ask)

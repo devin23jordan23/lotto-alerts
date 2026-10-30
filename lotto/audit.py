@@ -12,9 +12,14 @@ from .models import ET
 
 def chain_reasons(snap, history, settings):
     """Explain why the option stage had no evaluable candidate."""
+    current_health = {"options":len(snap.options),
+                      "eligible_now":sum(contract_ok(o,snap,settings) for o in snap.options),
+                      "valid_greeks":sum(o.delta is not None and 0 < abs(o.delta) <= 1
+                                         and (o.delta > 0) == (o.side == 'CALL')
+                                         and o.gamma is not None and o.gamma > 0 for o in snap.options)}
     observed = observation_window(snap,history)
     if observed is None:
-        return {"reason":"missing contiguous 2/4 or 5/10-minute option history","options":len(snap.options)}
+        return {"reason":"missing contiguous 2/4 or 5/10-minute option history",**current_health}
     five, ten, window, width = observed
     old = {o.symbol:o for o in five.options}
     oldest = {o.symbol:o for o in ten.options}
@@ -35,7 +40,7 @@ def chain_reasons(snap, history, settings):
             groups[(o.expiry.isoformat(),o.side)] += 1
             if contract_ok(o,snap,settings):
                 liquid += 1
-    return {"options":len(snap.options),"window_minutes":width,"common_contracts":len(ids),"fresh_continuous":fresh,
+    return {**current_health,"window_minutes":width,"common_contracts":len(ids),"fresh_continuous":fresh,
             "active_5m_contracts":active,"liquid_active_contracts":liquid,
             "max_expiry_side_active":max(groups.values(),default=0)}
 

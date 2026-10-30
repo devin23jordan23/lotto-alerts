@@ -8,8 +8,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
-from lotto.models import ET, Snapshot
-from lotto.features import Candidate
+from lotto.models import ET, Option, Snapshot
+from lotto.features import Candidate, contract_ok, response_proxy
+from lotto.config import Settings
 from lotto.discord import alert_payload
 from lotto.schwab import Schwab, api_symbol, benchmark_for
 from lotto.discovery import Discovery
@@ -237,11 +238,93 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(len(frames), 60)
         self.assertEqual(len(client.discovery.observations), 106)
 
-    def test_known_empty_near_expiry_chain_leaves_deep_slot_open(self):
+    def test_empty_near_expiry_cannot_evict_continuous_name(self):
         now = datetime.now(timezone.utc)
         discovery = Discovery(4, always_deep={'A'})
         quotes = {s:{'price':100,'open':100,'previous':100,'volume':100,'at':now}
                   for s in 'ABCDE'}
-        selected = discovery.update(quotes, now, set(quotes), unavailable={'A'})
-        self.assertNotIn('A', selected)
+        selected = discovery.update(quotes, now, set(quotes), unavailable={'A','B'})
+        self.assertIn('A', selected)
+        self.assertNotIn('B', selected)
         self.assertEqual(len(discovery.observations), 5)
+
+    def test_greek_recovery_preserves_broad_chain_and_fresh_provider_quotes(self):
+        now=datetime.now(timezone.utc)
+        stamp=int(now.timestamp()*1000)
+        def raw(symbol, delta, gamma, stamp=stamp):
+            return dict(symbol=symbol,strikePrice=100,bid=.5,ask=.51,totalVolume=1000,
+                        quoteTimeInLong=stamp,delta=delta,gamma=gamma)
+        a=raw('A',-999,-999); b=raw('B',-999,-999)
+        recovered=raw('A',.3,.05,stamp+1)
+        broad={'callExpDateMap':{str(now.date())+':0':{'100':[a],'105':[b]}}}
+        narrow={'callExpDateMap':{str(now.date())+':0':{'100':[recovered]}}}
+        self.client.get=Mock(side_effect=[broad,narrow])
+        result=self.client.option_chain('AMZN',now,1)
+        parsed={o.symbol:o for o in Schwab.parse_chain(result)}
+        self.assertEqual(set(parsed),{'A','B'})
+        self.assertEqual((parsed['A'].delta,parsed['A'].gamma),(.3,.05))
+        self.assertEqual(parsed['B'].delta,-999)
+        self.assertEqual(a['delta'],-999)  # Do not mutate the saved provider response.
+        self.assertEqual(self.client.get.call_args_list[1].args[1]['strikeCount'],20)
+        self.client.get=Mock(side_effect=[broad,{**narrow,'isDelayed':True}])
+        self.assertEqual(Schwab.parse_chain(self.client.option_chain('AMZN',now,1))[0].delta,-999)
+        stale={'callExpDateMap':{str(now.date())+':0':{'100':[raw('A',.3,.05,stamp-1)]}}}
+        self.client.get=Mock(side_effect=[broad,stale])
+        self.assertEqual(Schwab.parse_chain(self.client.option_chain('AMZN',now,1))[0].delta,-999)
+
+    def test_healthy_or_empty_chain_needs_no_greek_retry(self):
+        now=datetime.now(timezone.utc)
+        for data in ({'callExpDateMap':{}}, {'callExpDateMap':{str(now.date())+':0':{'100':[dict(
+                symbol='A',strikePrice=100,bid=.5,ask=.51,totalVolume=1000,
+                quoteTimeInLong=int(now.timestamp()*1000),delta=.3,gamma=.05)]}}}):
+            self.client.get=Mock(return_value=data)
+            self.assertIs(self.client.option_chain('AMZN',now,1),data)
+            self.client.get.assert_called_once()
+
+    def test_greek_retry_failure_preserves_original_quotes(self):
+        now=datetime.now(timezone.utc)
+        data={'callExpDateMap':{str(now.date())+':0':{'100':[dict(
+            symbol='A',strikePrice=100,bid=.5,ask=.51,totalVolume=1000,
+            quoteTimeInLong=int(now.timestamp()*1000),delta=-999,gamma=-999)]}}}
+        self.client.get=Mock(side_effect=[data,RuntimeError('provider unavailable')])
+        self.assertIs(self.client.option_chain('AMZN',now,1),data)
+        self.assertEqual(self.client.get.call_count,2)
+
+    def test_direct_quote_only_unlocks_changed_greekless_opening_market(self):
+        at = datetime(2026,10,19,13,39,tzinfo=timezone.utc)
+        class OpeningDateTime(datetime):
+            @classmethod
+            def now(cls,tz=None):
+                return at
+        option = Option('MSFT  261019C00535000',at.date(),'CALL',535,1.20,1.46,
+                        2000,1000,-999,-999,at)
+        unchanged = Option('MSFT  261019C00537500',at.date(),'CALL',537.5,.75,.88,
+                           1500,1000,-999,-999,at)
+        cheap = Option('MSFT  261019C00540000',at.date(),'CALL',540,.01,.04,
+                       1200,1000,-999,-999,at)
+        chains={'MSFT':[option,unchanged,cheap]}
+        stamp=int(at.timestamp()*1000)
+        self.client.get=Mock(return_value={
+            option.symbol:{'realtime':True,'quote':{'bidPrice':1.00,'askPrice':1.06,
+                           'quoteTime':stamp,'totalVolume':2100}},
+            unchanged.symbol:{'realtime':True,'quote':{'bidPrice':.75,'askPrice':.88,
+                           'quoteTime':stamp,'totalVolume':1500}},
+            cheap.symbol:{'realtime':True,'quote':{'bidPrice':.42,'askPrice':.45,
+                           'quoteTime':stamp,'totalVolume':1250}},
+        })
+        with patch('lotto.schwab.datetime',OpeningDateTime):
+            self.client.verify_greekless_opening_quotes(chains,{'MSFT':533},1)
+        fresh,still_frozen,recovered_cheap=chains['MSFT']
+        self.assertTrue(fresh.direct_quote_verified)
+        self.assertEqual((fresh.bid,fresh.ask,fresh.volume),(1.00,1.06,2100))
+        self.assertFalse(still_frozen.direct_quote_verified)
+        self.assertTrue(recovered_cheap.direct_quote_verified)
+        self.assertEqual(recovered_cheap.ask,.45)
+        snap=Snapshot('MSFT',at,533,at,530,(),tuple(chains['MSFT']),prior_atr=11)
+        self.assertTrue(contract_ok(fresh,snap,Settings()))
+        self.assertFalse(contract_ok(still_frozen,snap,Settings()))
+        self.assertTrue(contract_ok(recovered_cheap,snap,Settings()))
+        self.assertEqual(response_proxy(fresh,snap),0.0)
+        late=Snapshot('MSFT',at+timedelta(minutes=52),533,at+timedelta(minutes=52),
+                      530,(),(fresh,),prior_atr=11)
+        self.assertFalse(contract_ok(fresh,late,Settings()))
