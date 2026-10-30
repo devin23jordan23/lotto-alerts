@@ -22,15 +22,6 @@ class CoverageTests(unittest.TestCase):
             fresh.append(coverage.count_fresh(symbols, now + timedelta(seconds=54)))
         self.assertEqual(fresh[2:], [105] * 7)
 
-    def test_no_near_expiry_is_reset_each_session(self):
-        coverage = ChainCoverage()
-        day = datetime(2026, 10, 13, 13, 30, tzinfo=timezone.utc)
-        coverage.reset(day)
-        coverage.observe("TEST", day, ())
-        self.assertIs(coverage.has_near_expiry["TEST"], False)
-        coverage.reset(day + timedelta(days=1))
-        self.assertNotIn("TEST", coverage.has_near_expiry)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,9 +4,7 @@ import json
 import logging
 import os
 import time
-import threading
-from concurrent.futures import ThreadPoolExecutor, wait
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import replace
 from datetime import date, datetime, time as wall_time, timedelta, timezone
 from math import isfinite
@@ -68,19 +66,11 @@ class Schwab:
         if not self.broker_url and (not self.client_id or not self.secret or not (self.seed or self.token_path.exists())):
             raise ValueError("Schwab client ID, secret, and refresh token are required")
         self.last_request = 0
-        self.request_lock = threading.Lock()
-        self.base_request_interval = float(os.getenv("LOTTO_API_MIN_INTERVAL_SECONDS", "0.25"))
-        self.min_request_interval = self.base_request_interval
-        if not 0.2 <= self.min_request_interval <= 2:
-            raise ValueError("LOTTO_API_MIN_INTERVAL_SECONDS must be between 0.2 and 2")
-        self.request_starts = deque()
-        self.rate_limit_hits = 0
-        self.success_streak = 0
         self.baselines = {}
         self.calendar_cache = {}
         self.atrs = {}
         self.levels = {}
-        self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "60")),
+        self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "30")),
             always_deep={s.strip().upper() for s in os.getenv(
                 "LOTTO_CONTINUOUS_SYMBOLS",
                 "SPY,QQQ,IWM,META,NVDA,AMD,TSLA,AAPL,MSFT,AMZN,GOOGL,AVGO,MU,MRNA,SMCI,COIN,PLTR,NFLX"
@@ -135,61 +125,19 @@ class Schwab:
         return token
 
     def get(self, path: str, params: dict) -> dict:
-        retry_auth = False
-        for attempt in range(3):
-            with self.request_lock:
-                access_token = self.token(force=retry_auth)
-                retry_auth = False
-                time.sleep(max(0, self.min_request_interval - (time.monotonic() - self.last_request)))
-                self.last_request = time.monotonic()
-                self.request_starts.append(self.last_request)
-                self._prune_request_starts(self.last_request)
-            request = Request(f"{BASE}{path}?{urlencode(params)}", headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"})
+        for attempt in range(2):
+            time.sleep(max(0, .55 - (time.monotonic() - self.last_request)))
+            self.last_request = time.monotonic()
+            request = Request(f"{BASE}{path}?{urlencode(params)}", headers={"Authorization": f"Bearer {self.token()}", "Accept": "application/json"})
             try:
                 with urlopen(request, timeout=15) as response:
-                    payload = json.load(response)
-                self._request_succeeded()
-                return payload
+                    return json.load(response)
             except HTTPError as exc:
-                if exc.code != 429:
-                    with self.request_lock:
-                        self.success_streak = 0
-                if exc.code in (401, 429) and attempt < 2:
-                    retry_auth = exc.code == 401
-                    if exc.code == 429:
-                        self._rate_limited(path)
-                        time.sleep(min(5, 1 + attempt * 2))
+                if exc.code == 401 and attempt == 0:
+                    self.token(force=True)
                     continue
                 raise RuntimeError(f"Schwab {path} failed (HTTP {exc.code})") from None
         raise RuntimeError("Schwab authorization retry failed")
-
-    def _prune_request_starts(self, now):
-        while self.request_starts and now-self.request_starts[0] >= 60:
-            self.request_starts.popleft()
-
-    def _request_succeeded(self):
-        with self.request_lock:
-            self.success_streak += 1
-            if self.success_streak >= 50 and self.min_request_interval > self.base_request_interval:
-                self.min_request_interval = max(self.base_request_interval,
-                                                round(self.min_request_interval * .8, 3))
-                self.success_streak = 0
-                LOG.info("Schwab request spacing recovered to %.3fs", self.min_request_interval)
-
-    def _rate_limited(self, path):
-        with self.request_lock:
-            self.rate_limit_hits += 1
-            self.success_streak = 0
-            self.min_request_interval = min(2.0, max(0.5, self.min_request_interval * 2))
-            spacing = self.min_request_interval
-        LOG.warning("Schwab rate limit on %s; request spacing increased to %.2fs", path, spacing)
-
-    def request_statistics(self):
-        if not hasattr(self, "request_lock"):
-            return 0, 0.0, 0
-        with self.request_lock:
-            self._prune_request_starts(time.monotonic())
-            return len(self.request_starts), self.min_request_interval, self.rate_limit_hits
 
     def session(self, now: datetime) -> tuple[datetime, datetime] | None:
         day = now.astimezone(ET).date().isoformat()
@@ -344,115 +292,6 @@ class Schwab:
                                              number(raw.get("vega"))))
         return tuple(result)
 
-    def option_chain(self, symbol, now, max_dte):
-        params = {"symbol": api_symbol(symbol), "contractType": "ALL", "strategy": "SINGLE",
-                  "includeUnderlyingQuote": "true", "strikeCount": 80,
-                  "fromDate": now.astimezone(ET).date().isoformat(),
-                  "toDate": (now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()}
-        data = self.get('/chains', params)
-        options = self.parse_chain(data, allow_spx=symbol == 'SPX')
-        def usable(o):
-            return (o.delta is not None and 0 < abs(o.delta) <= 1
-                    and (o.delta > 0) == (o.side == 'CALL')
-                    and o.gamma is not None and o.gamma > 0)
-        # Provider sentinel values (-999) are not Greeks. Retry once with a
-        # smaller request, retaining the broad chain and only merging real,
-        # newer provider quotes with usable Greeks. Never synthesize Greeks.
-        if not options or any(usable(o) for o in options):
-            return data
-        LOG.warning('Chain Greeks unavailable for %s (%d contracts); retrying near-money chain', symbol, len(options))
-        try:
-            retry = self.get('/chains', {**params, 'strikeCount': 20})
-            recovered = {o.symbol:o for o in self.parse_chain(retry, allow_spx=symbol == 'SPX') if usable(o)}
-        except Exception as exc:
-            LOG.warning('Chain Greek recovery %s failed (%s)', symbol, type(exc).__name__)
-            return data
-        merged = dict(data)
-        count = 0
-        for map_name in ('callExpDateMap', 'putExpDateMap'):
-            replacements = {raw.get('symbol'):raw for strikes in retry.get(map_name, {}).values()
-                            for contracts in strikes.values() for raw in contracts
-                            if raw.get('symbol') in recovered}
-            merged[map_name] = {}
-            for expiry, strikes in data.get(map_name, {}).items():
-                merged[map_name][expiry] = {}
-                for strike, contracts in strikes.items():
-                    rows = []
-                    for raw in contracts:
-                        newer = replacements.get(raw.get('symbol'))
-                        if newer and (number(newer.get('quoteTimeInLong')) or 0) >= (number(raw.get('quoteTimeInLong')) or 0):
-                            rows.append(newer); count += 1
-                        else:
-                            rows.append(raw)
-                    merged[map_name][expiry][strike] = rows
-        LOG.info('Chain Greek recovery %s: %d/%d contracts restored from provider', symbol, count, len(options))
-        return merged
-
-    def verify_greekless_opening_quotes(self, chains, spots, max_dte):
-        """Check a separate quote endpoint when the entire opening chain is frozen.
-
-        A refreshed timestamp in /chains did not imply a refreshed bid/ask on
-        2026-10-19. Keep the chain price unless /quotes independently disagrees
-        with it and supplies a current, crossed-free market. This does not
-        estimate Greeks or turn a stock move into an option trade.
-        """
-        local = datetime.now(timezone.utc).astimezone(ET)
-        if not ((local.hour == 9 and local.minute >= 35)
-                or (local.hour == 10 and local.minute < 30)):
-            return
-        requested = {}
-        for symbol, options in chains.items():
-            spot = spots.get(symbol)
-            if not spot or not options or any(
-                0 <= (o.expiry-local.date()).days <= max_dte
-                and -.01 <= (1 if o.side == 'CALL' else -1)*(o.strike/spot-1) <= .03
-                and o.delta is not None and 0 < abs(o.delta) <= 1
-                and (o.delta > 0) == (o.side == 'CALL')
-                and o.gamma is not None and o.gamma > 0 for o in options):
-                continue
-            groups = defaultdict(list)
-            for option in options:
-                dte = (option.expiry-local.date()).days
-                direction = 1 if option.side == 'CALL' else -1
-                moneyness = direction*(option.strike/spot-1)
-                # The chain premium itself may be frozen or nonsensical; do
-                # not use it to decide which strikes receive a direct quote.
-                if (0 <= dte <= max_dte and -.01 <= moneyness <= .03
-                        and option.volume >= 100):
-                    groups[(option.expiry,option.side)].append(option)
-            for rows in groups.values():
-                for option in sorted(rows, key=lambda o:(abs(o.strike-spot),-o.volume))[:8]:
-                    requested[option.symbol] = (symbol,option)
-        if not requested:
-            return
-        refreshed = {}
-        ids = list(requested)
-        for index in range(0,len(ids),60):
-            batch = ids[index:index+60]
-            try:
-                direct = self.get('/quotes', {'symbols':','.join(batch)})
-            except Exception as exc:
-                LOG.warning('Direct opening option quote check failed (%s)', type(exc).__name__)
-                continue
-            observed_at = datetime.now(timezone.utc)
-            for ident in batch:
-                original = requested[ident][1]
-                item = direct.get(ident,{})
-                q = item.get('quote',{})
-                qt, bid, ask = epoch(q.get('quoteTime')), number(q.get('bidPrice')), number(q.get('askPrice'))
-                if (item.get('realtime') is False or qt is None or bid is None or ask is None
-                        or not 0 <= (observed_at-qt).total_seconds() <= 90
-                        or not 0 < bid < ask or ask-bid > .15
-                        or (abs(bid-original.bid) < .01 and abs(ask-original.ask) < .01)):
-                    continue
-                volume = int(number(q.get('totalVolume')) or original.volume)
-                refreshed[ident] = replace(original,bid=bid,ask=ask,quote_time=qt,
-                                           volume=max(volume,original.volume),direct_quote_verified=True)
-        for symbol, options in chains.items():
-            chains[symbol] = [refreshed.get(option.symbol,option) for option in options]
-        LOG.info('Opening Greekless chains: independently refreshed %d/%d near-money contracts',
-                 len(refreshed),len(requested))
-
     def poll(self, symbols: list[str], tracked: dict, max_dte: int) -> list[Snapshot]:
         now = datetime.now(timezone.utc)
         if not hasattr(self, "coverage"):
@@ -480,65 +319,44 @@ class Schwab:
         if "SPX" in parsed:
             parsed["SPX"]["volume"] = parsed.get("SPY", {}).get("volume")
         selected = self.discovery.update(parsed, datetime.now(timezone.utc), set(symbols), tracked,
-                                         self.coverage.priorities(now),
-                                         {s for s, available in self.coverage.has_near_expiry.items() if not available})
+                                         self.coverage.priorities(now))
         result = []
         began = time.monotonic()
-        _, _, rate_limits_before = self.request_statistics()
         sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "26")))
         sweep_targets = self.coverage.due(symbols, now, selected, sweep_limit)
-        def chain(symbol):
-            return self.option_chain(symbol, now, max_dte)
-        def deep(symbol):
-            bars = self.bars(symbol, datetime.now(timezone.utc))
-            return bars, chain(symbol)
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            sweep_jobs = {pool.submit(chain, symbol): symbol for symbol in sweep_targets}
-            sweep_done, sweep_pending = wait(sweep_jobs, timeout=27)
-            for job in sweep_pending:
-                job.cancel()
-            if sweep_pending:
-                LOG.warning("Universe sweep budget reached: %d/%d chains completed", len(sweep_done), len(sweep_jobs))
-            for job in sweep_done:
-                symbol = sweep_jobs[job]
-                self.coverage.attempt(symbol, datetime.now(timezone.utc))
-                try:
-                    data = job.result()
-                    if data.get("isDelayed") is True:
-                        raise ValueError("delayed option chain")
-                    self.coverage.observe(symbol, datetime.now(timezone.utc), self.parse_chain(data, allow_spx=symbol == "SPX"),
-                                          parsed.get(symbol, {}).get("price"))
-                except Exception as exc:
-                    LOG.warning("Universe chain sweep %s unavailable (%s)", symbol, type(exc).__name__)
-            # Continue unfinished cold-start work first; a slow baseline must not starve later names.
-            selected.sort(key=lambda s: (s not in tracked, s not in self.discovery.always_deep,
-                                         getattr(self, "last_polled", {}).get(s, 0)))
+        for symbol in sweep_targets:
+            if time.monotonic()-began >= 27:
+                LOG.warning("Universe chain sweep time budget reached; remaining names resume next cycle")
+                break
+            self.coverage.attempt(symbol, datetime.now(timezone.utc))
+            try:
+                data = self.get("/chains", {"symbol":api_symbol(symbol), "contractType":"ALL", "strategy":"SINGLE",
+                                            "includeUnderlyingQuote":"true", "strikeCount":80,
+                                            "fromDate":now.astimezone(ET).date().isoformat(),
+                                            "toDate":(now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()})
+                if data.get("isDelayed") is True:
+                    raise ValueError("delayed option chain")
+                self.coverage.observe(symbol, datetime.now(timezone.utc), self.parse_chain(data, allow_spx=symbol == "SPX"),
+                                      parsed.get(symbol, {}).get("price"))
+            except Exception as exc:
+                LOG.warning("Universe chain sweep %s unavailable (%s)", symbol, type(exc).__name__)
+        # Continue unfinished cold-start work first; a slow baseline must not starve later names.
+        selected.sort(key=lambda s: (s not in tracked, s not in self.discovery.always_deep,
+                                     getattr(self, "last_polled", {}).get(s, 0)))
+        for symbol in selected:
+            if time.monotonic()-began >= 54:
+                LOG.warning("Deep chain time budget reached; remaining candidates resume next cycle")
+                break
             if not hasattr(self, "last_polled"):
                 self.last_polled = {}
-            deep_jobs = {pool.submit(deep, symbol): symbol for symbol in selected}
-            completed = {}
-            deep_done, deep_pending = wait(deep_jobs, timeout=max(0, 54-(time.monotonic()-began)))
-            for job in deep_pending:
-                job.cancel()
-            if deep_pending:
-                LOG.warning("Deep collection budget reached: %d/%d names completed", len(deep_done), len(deep_jobs))
-            for job in deep_done:
-                symbol = deep_jobs[job]
-                self.last_polled[symbol] = time.monotonic()
-                try:
-                    completed[symbol] = job.result()
-                except Exception as exc:
-                    LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)
-        chain_options = {symbol:list(self.parse_chain(data, allow_spx=symbol == 'SPX'))
-                         for symbol,(_,data) in completed.items()}
-        self.verify_greekless_opening_quotes(chain_options,
-            {symbol:item.get('price') for symbol,item in parsed.items()},max_dte)
-        for symbol in selected:
-            if symbol not in completed:
-                continue
+            self.last_polled[symbol] = time.monotonic()
             try:
-                bars, data = completed[symbol]
-                options = chain_options[symbol]
+                bars = self.bars(symbol, datetime.now(timezone.utc))
+                data = self.get("/chains", {"symbol": api_symbol(symbol), "contractType": "ALL", "strategy": "SINGLE",
+                                            "includeUnderlyingQuote": "true", "strikeCount": 80,
+                                            "fromDate": now.astimezone(ET).date().isoformat(),
+                                            "toDate": (now.astimezone(ET).date() + timedelta(days=max_dte)).isoformat()})
+                options = list(self.parse_chain(data, allow_spx=symbol == "SPX"))
                 if data.get("isDelayed") is not True:
                     self.coverage.observe(symbol, datetime.now(timezone.utc), options,
                                           parsed.get(symbol, {}).get("price"), promoted=True)
@@ -556,8 +374,7 @@ class Schwab:
                         qt, bid, ask = epoch(q.get("quoteTime")), number(q.get("bidPrice")), number(q.get("askPrice"))
                         if qt and bid is not None and ask is not None and item.get("realtime") is not False:
                             options.append(replace(option, quote_time=qt, bid=bid, ask=ask,
-                                                   volume=int(number(q.get("totalVolume")) or option.volume),
-                                                   direct_quote_verified=False))
+                                                   volume=int(number(q.get("totalVolume")) or option.volume)))
                 at = datetime.now(timezone.utc)
                 benchmark = benchmark_for(symbol)
                 context, context_time = self.discovery.return_5m(benchmark, at)
@@ -583,10 +400,8 @@ class Schwab:
                                        **getattr(self,"levels",{}).get((symbol,now.astimezone(ET).date()),{})))
             except Exception as exc:
                 LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)
-        recent_requests, spacing, rate_limits_total = self.request_statistics()
-        LOG.info("Discovery: %d/%d fresh quotes, %d promoted, %d deep chains; universe chains %d/%d fresh within %d min (%d this cycle); collection %.1fs; Schwab requests/60s=%d spacing=%.3fs 429s/cycle=%d total=%d",
+        LOG.info("Discovery: %d/%d fresh quotes, %d promoted, %d deep chains; universe chains %d/%d fresh within %d min (%d this cycle)",
                  len(self.discovery.observations), len(symbols), len(selected), len(result),
                  self.coverage.count_fresh(symbols, datetime.now(timezone.utc)), len(symbols),
-                 self.coverage.interval.seconds//60, len(self.coverage.rows), time.monotonic()-began,
-                 recent_requests, spacing, rate_limits_total-rate_limits_before, rate_limits_total)
+                 self.coverage.interval.seconds//60, len(self.coverage.rows))
         return result
