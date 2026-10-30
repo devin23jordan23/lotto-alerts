@@ -76,12 +76,9 @@ class ScannerTests(unittest.TestCase):
     def test_isolated_option_activity_cannot_alert(self):
         self.assertFalse(self.run_frames(lambda s: replace(s, options=s.options[:1])))
 
-    def test_future_bar_rejected_but_one_missing_open_bar_is_tolerated(self):
+    def test_future_bar_and_missing_open_rejected(self):
         snap = self.frames[30][0]
-        self.assertFalse(replace(snap, bars=snap.bars[1:]).problems())
-        self.assertFalse(replace(snap, bars=snap.bars[:5]+snap.bars[7:]).problems())
-        self.assertTrue(replace(snap, bars=snap.bars[:5]+snap.bars[8:]).problems())
-        self.assertTrue(replace(snap, bars=snap.bars[3:]).problems())
+        self.assertTrue(replace(snap, bars=snap.bars[1:]).problems())
         self.assertTrue(replace(snap, at=snap.at-timedelta(minutes=2)).problems())
 
     def test_counter_reset_and_poll_gap_invalidate_options_window(self):

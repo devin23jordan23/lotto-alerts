@@ -35,11 +35,9 @@ class Discovery:
             price, opening, previous, volume = (q.get(k) for k in ("price", "open", "previous", "volume"))
             at = q.get("at")
             if (at is None or not 0 <= (now-at).total_seconds() <= 90
-                    or any(v is None or not isfinite(v) or v <= 0 for v in (price, opening, previous))):
+                    or any(v is None or not isfinite(v) or v <= 0 for v in (price, opening, previous))
+                    or volume is None or not isfinite(volume) or volume < 0):
                 continue
-            volume_unknown = volume is None or not isfinite(volume) or volume < 0
-            if volume_unknown:
-                volume = 0
             history = self.history[symbol]
             old = [v for v in history if 300 <= (now-v["at"]).total_seconds() <= 390]
             ret5 = price/old[-1]["price"]-1 if old else None
@@ -51,17 +49,14 @@ class Discovery:
             intraday_range = (high-low)/opening if high and low else 0
             score = (100*(abs(ret5 or 0)*3 + excursion + intraday_range*.5)
                      + min(3, acceleration or 0) + (flow_priorities or {}).get(symbol, 0))
-            record = {**q, "symbol":symbol, "volume":volume, "volume_unknown":int(volume_unknown),
-                      "observed_at":now, "return_5m":ret5,
+            record = {**q, "symbol":symbol, "observed_at":now, "return_5m":ret5,
                       "volume_5m":delta, "volume_acceleration":acceleration, "priority":score}
             if not history or at > history[-1]["at"]:
                 history.append(record)
             self.history[symbol] = [v for v in history if now-v["at"] <= timedelta(minutes=12)]
             if symbol in universe:
                 self.observations.append(record)
-                # A missing near-expiry chain must not evict a user-pinned name.
-                # Keep collecting its stock history and retry the live chain.
-                if symbol not in unavailable or symbol in tracked or symbol in self.always_deep:
+                if symbol not in unavailable or symbol in tracked:
                     ranks[symbol] = score
         # Keep windows intact long enough for 20-minute option persistence research.
         # Reserve a quarter of chain slots for names the price ranking has not
@@ -80,11 +75,7 @@ class Discovery:
                             if s in ranks and now-at < timedelta(minutes=12)}
         held = {s:since for s,since in self.promoted.items() if s in ranks and now-since < timedelta(minutes=25)}
         protected = [s for s in held if s in self.flow_leases and s not in self.explore_leases]
-        priority = tuple(getattr(self, "deep_priority", ()) or ())
-        selected = sorted(
-            self.always_deep & ranks.keys(),
-            key=lambda symbol: (0, priority.index(symbol)) if symbol in priority else (1, symbol),
-        )
+        selected = sorted(self.always_deep & ranks.keys())
         # A whole-universe sweep can reveal strong option flow in a name that
         # has never held a deep slot. Reserve part of the core for those fresh
         # events before existing 25-minute leases fill every available slot.
@@ -101,15 +92,6 @@ class Discovery:
                 selected.append(symbol)
         for symbol in sorted((s for s in held if s not in self.explore_leases and s not in selected),
                              key=lambda s:-ranks[s]):
-            if len(selected) < core_capacity:
-                selected.append(symbol)
-        # Static runner rank fills slots the live flow and leases did not take.
-        # A live flow spike stays ahead of it.
-        runner = getattr(self, "runner_rank", {}) or {}
-        for symbol in sorted(
-            (s for s in ranks if s in runner and s not in selected),
-            key=lambda s: (-float(runner[s]), s),
-        ):
             if len(selected) < core_capacity:
                 selected.append(symbol)
         for symbol in sorted(ranks, key=lambda s:(-ranks[s], s)):

@@ -21,13 +21,12 @@ def price_replay(symbol, day, response):
     if not previous or not bars:
         return {"symbol":symbol, "day":day, "error":"prior/session bars unavailable"}
     prior_close = max(previous, key=lambda p:p[0])[1]["close"]
-    prior_atr = client.prior_atr_for(symbol, end.date())
     findings, last = [], {}
     for index in range(4, len(bars)-1):
         prefix = bars[:index+1]
         current = prefix[-1]
         snap = Snapshot(symbol, current.end, current.close, current.end, prior_close, prefix, (),
-                        prior_atr=prior_atr)
+                        prior_atr=client.atrs.get((symbol,end.date())))
         problems = snap.problems(min_bars=5)
         if problems:
             continue
@@ -59,7 +58,7 @@ def price_replay(symbol, day, response):
         prefix = bars[:elapsed]
         current = prefix[-1]
         snap = Snapshot(symbol, current.end, current.close, current.end, prior_close, prefix, (),
-                        prior_atr=prior_atr)
+                        prior_atr=client.atrs.get((symbol,end.date())))
         sides = {}
         for side, direction in (("CALL",1),("PUT",-1)):
             metrics = path_features(snap,direction)
@@ -73,7 +72,7 @@ def price_replay(symbol, day, response):
     return {"symbol":symbol, "day":day, "source":"Schwab one-minute regular-session bars",
             "open":bars[0].open, "close":bars[-1].close,
             "high":session_high, "low":session_low,
-            "prior_close":prior_close, "prior_atr":prior_atr,
+            "prior_close":prior_close, "prior_atr":client.atrs.get((symbol,end.date())),
             "complete_minutes":len(bars), "price_setups":findings,
             "close_location_in_range":close_location,
             "closed_near_high":close_location >= .9,

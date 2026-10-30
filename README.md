@@ -3,72 +3,6 @@
 Selective intraday potential watches and active options ideas using Schwab, Railway and Discord.
 No orders are placed. Scores are research rules, not probabilities or promised returns.
 
-## Model V profiles
-
-`LOTTO_PROFILE` selects the line. Unset matches `conservative`. The live book is v4c. `loose` is aggressive (70), `moderate` is conservative (92), and `balanced` is 84. The additive score is the only post decision. Hybrid bars at 40/61 and the handoff floors stay on the card as labels. There is no daily cap or top-N. One posted card per ticker and side is held for 8 minutes (`LOTTO_COOLDOWN_MINUTES`; `0` turns it off). Bypass cards clear `bypass_threshold` and the blockers only.
-
-| Profile | Post | Bypass | Min positive | Bolt features |
-|---|---|---|---|---|
-| aggressive (`loose`) | 70 | 40 | 0 | 10 |
-| middle | 76 | 40 | 0 | 10 |
-| balanced | 84 | 40 | 0 | 10 |
-| conservative (`moderate`, default) | 92 | 40 | 0 | 10 |
-
-### volume_trend
-
-`volume_trend_aggressive`, `volume_trend_balanced`, and `volume_trend_conservative` are code profiles. `volume_trend` is the balanced one. They are not in the JSON book, so the live `balanced` line stays 84 until `LOTTO_PROFILE` changes. **Do not merge this branch to main.** Merging deploys it.
-
-The three profiles share one weight block. Only the post line differs: 75, 102, and 120.
-
-Primary cards only for the new sector and SPY points:
-
-| Row | Points | When |
-|---|---|---|
-| `SPY_ALIGN_TURN_3M` | 15 | SPY return over `SPY_ALIGN_TURN_WINDOW_MIN` (3.5, interpolated) is 0.05%–0.12% in the card's direction |
-| `SPY_ALIGN_RALLY_DAY` | 18 / 18 / 0 | 60–75% / 75–90% / ≥90% of sector-map names green (red for puts) |
-| `SECTOR_ETF_PCT_TS` | 16 | Chosen sector ETF % from the open is 1.5–2.5× its 20-day same-minute typical move, then × `SECTOR_ETF_WEIGHT` |
-| `SPY_ALIGN_OPEN` | 1 | SPY on the card's side of the open and of VWAP |
-| `SECTOR_L2_PMH`, `SECTOR_ETF_PCT` | 0 | Alternates, still computed |
-| `SECTOR_PEER_COUNT` | 33 | Exactly 3 peers move with the card |
-| `BASKET_*` | 0 | Basket rows. The basket lists are in `SECTOR_BASKETS` |
-
-`SPY_ALIGN_TURN_WINDOW_MIN` is a float. 3.5 minutes is a 210-second lookback. The reference price is the linear interpolate between the two 1-minute closes that bracket that time. Set the key to 3 for a whole-minute window.
-
-The fitted volume rows are 3 to 11 points: `RVOL_CUM_15_25` is 7, `RVOL_CUM_ge25` is 11, `BU_5_TOD_10` is 4, and the break-bar rows are 4, 3, and 4. `vol_bin_flags` turns the measured ratios into those 0/1 flags. A missing ratio is 0.
-
-`SECTOR_ETF_PCT_TS` uses a same-minute typical built at startup from the existing candle history: the median absolute percent from the open over the last 20 sessions, fewer days when that is all the history, otherwise the ETF's ATR-scaled curve. The low group (`XLI`, `XLU`, `XLB`, `XLP`, `XLRE`) uses `SECTOR_ETF_WEIGHT_LOW` 0.5. A name with `SMH`, `SOXX`, or `XOP` keeps the ETF whose sector points are higher after that multiplier. `QQQ`, `SPY`, and `IWM` have no sector ETF, so their sector rows are 0 and the SPY rows still score.
-
-Ace's volume names are the scored keys (`BRK_VS_DAY`, `BRK_TOD_10/5/3`, `RVOL_CUM`, `SUST_VOL_TOD_1M`, `HOLD_ON_VOL`, and the rest in `lotto/volume_trend.py`). `VOL_*` names are aliases and stay at weight 0. `VOL_RVOL_TOD` names `RVOL_CUM_15_25` and `RVOL_CUM_ge25`. `VOL_PRE_BREAK` names `BU_5_TOD_10`. `VOL_BREAK_BAR` names `BRK_TOD_BRK_08_12`, `BRK_TOD_BRK_12_3`, and `BRK_TOD_BRK_ge3`. An alias adds no points. `RVOL_CHAIN_ge1.5` (+6) and the 1.0–1.5 dead zone (−9) score the same `RVOL_CUM` chain. `BRK_VS_10_ge1.5` (+15) stays the break bar versus the prior 10 bars of today. The backtested book has `BU_5_DAY_ge1` at 0. All three volume-trend profiles keep that 0 so the row does not double-count `BU_5_TOD_10`. The live JSON profiles, including balanced, are unchanged and do not carry the row.
-
-`STACKS` in that same file is the list to edit. Each entry has a name, conditions (`feature`, `op`, `threshold`), and points. Every entry whose conditions all hold adds its points. Missing features are false. `OPT_VOL_ADJ_STRIKES` stays coded. The A+ stack and the 3-of-4 partial are still in the list, and both default to 0 points (`STACK_BONUS` and `STACK_BONUS_3OF4`). Held-out data did not support a stack bonus: the 3-of-4 A+ stack was +2.3pp in the fit and −6.7pp on the test. Nothing in a stack blocks a card. The old-book volume rows are unchanged. The new `VOL_*` rows sit on top of them. Cutoffs are 75 / 102 / 120.
-
-Penalty rows are points only. They do not gate. Spread is `(ask−bid)/mid`, on the same edges as the wide-spread stock bars. A band's points are halved when that band's strong-stock bar is met. `PENALTY_OPT_VOL` uses the 5-minute contract print. It is 0 when the stock bar that waives a thin print is met.
-
-| Row | Points | When |
-|---|---|---|
-| `PENALTY_SPREAD` | 0 / −10 / −12 / −15 | ≤25% / 25–35% / 35–40% / >40% of mid. Halved when that band's stock bar is met |
-| `PENALTY_OPT_VOL` | −8 / 0 | 5-minute contract volume < 50, and 0 when the strong-stock bar is met |
-
-The posted volume-trend score keeps these two rows. Model V's `option_extras` spread penalty stays on the old `score_v2` label and is not added again. The weight book does not carry a second spread or option-volume penalty. `sp5` is still the tight-spread bonus.
-
-The chain is 10-day cumulative, then 5, then 3, then any same-time days, then the bar versus the day so far, then a linear time-scaled full-day volume, then 1.0. The source is logged. Early bars (index under 10) extend the day-so-far average back to 04:00. Holds score only after `HOLD_W` bars exist past the break. Puts mirror.
-
-`EXTRA_UNIVERSE` in `lotto/volume_trend.py` is the full ranked list. Startup loads only the first `EXTRA_UNIVERSE_MAX` names that are not already in the universe and that return a chain. The default is **20**: OXY, EOSE, RDDT, APP, APLD, DAL, CVS, GILD, TXN, WULF, AAL, ONDS, WFC, NVTS, USAR, MP, SOUN, CLF, CCJ, TWLO. Names already in the core (MARA, RIVN, RIOT, DKNG, HIMS, LUNR, STX, CRWV, U, GME, CORZ, LITE, HUT) are skipped and do not count. Edit the list or `EXTRA_UNIVERSE_MAX` to add or swap later. A set `EXTRA_UNIVERSE_MAX` env value overrides the constant. This does not add deep slots. `LOTTO_CHAIN_CAPACITY` stays 60 and no rate limit changes.
-
-Those 20 add **0 calls per minute**. They join the one `/quotes` batch (103 core + 20 = 123, under the 180 quote batch). A chain outside a deep slot comes only from the existing sweep, which stays at 26 per cycle, so one of these names takes a turn another name would have used. Deep jobs stay at 60. `RUNNER_RANK` only reorders who fills leftover core slots. Startup, once, is 2 calls per accepted name (1 chain probe + 1 history backfill), so 20 names are 40 calls at process start, not per minute.
-
-The steady poll on `main` (`1b730db`, `LOTTO_PROFILE=balanced`) already attempts the same 148, because the profile does not touch the poll:
-
-| Call | Count |
-|---|---|
-| `GET /quotes` | 1 |
-| Sweep `GET /chains` | 26 |
-| Deep `GET /pricehistory` | 60 |
-| Deep `GET /chains` | 60 |
-| SPX proxy `GET /pricehistory` for SPY | 1 |
-
-**1 + 26 + 60 + 60 + 1 = 148** per 60-second cycle when every job finishes. `strikeCount` 80 or 40 is the same call count. The 120 figure (`published_schwab_market_data_per_minute` in `scan_budget`, and `PAID_MARKET_DATA_PER_MINUTE`) is a constant used for the margin math. It does not stop a request. `Schwab.get` spaces starts at 0.25s (about 240/min) and doubles that spacing on a 429, up to 2s. Unfinished sweep jobs drop after 27s and unfinished deep jobs after the rest of 54s. The margin math still says usable calls are 96/min (20% under 120), which would fit 34 deep slots. Configured deep stays 60, so extra deep slots stay 0.
-
 ## Universe and collection
 
 The default universe includes the unusual-options scanner's core names (106 in the current deployed configuration).
@@ -129,8 +63,8 @@ but only **ACTIVE TRADE IDEA** posts to the main Discord webhook. When a watch
 later qualifies as a triggered setup, the active idea gets its own time and
 fresh option ask and can link to the watch ID. A setup already triggered when
 first found sends an active idea directly. The watch-to-active transition bypasses
-same-leg duplicate check; a fresh price leg or a recorded reset can alert again
-without a fixed ticker timer. Internal watches remain in nightly research and do not count as
+the usual ticker cooldown; later distinct legs still require the existing
+cooldown/reset. Internal watches remain in nightly research and do not count as
 Discord deliveries.
 
 The active Discord embed shows the contract, ask/bid, stock price, trigger,
@@ -146,9 +80,7 @@ Stock volume can qualify through either high cumulative same-time pace or a
 local five-minute volume burst accompanied by ATR expansion. A quieter-day
 recovery may instead qualify through improving local stock volume, directional
 progress and stronger multi-strike option acceleration. Baselines use prior
-sessions only. ATR uses LOTTO_ATR_DAYS prior true ranges (21 by default, at least
-15; set 14 to restore the previous average). A name with fewer than 15 ranges
-gets an empty prior_atr on the 21-day window, not the 14-day average. Thresholds remain uncalibrated
+sessions only. ATR uses 14 prior true ranges. Thresholds remain uncalibrated
 research defaults; the historical case study is not proof of an edge.
 
 During the first 45 completed bars, a triggered opening drive, opening break,
@@ -197,20 +129,10 @@ delta/gamma ranking proxy holds IV and time fixed; it is not a return forecast.
 
 There are no daily, per-cycle, or per-ticker alert-count ceilings by default;
 `LOTTO_MAX_ALERTS_PER_DAY`, `LOTTO_MAX_ALERTS_PER_CYCLE`, and
-`LOTTO_MAX_ALERTS_PER_TICKER` are `0` (unlimited). Posted cards do cool down:
-at most one Discord card per underlying and side (CALL or PUT) inside
-`LOTTO_COOLDOWN_MINUTES` (default 8; `0` disables it). The first card keeps
-the slot. A later card for that same ticker and side is still scored and
-saved, and the decision reason is `cooldown: TICKER SIDE posted Xs ago`, but
-it is not sent. The other side is not held. SPX and SPXW share one slot. The
-clock is the last posted card, kept for the session and reloaded from today's
-posted alerts when the worker starts.
-
-One minute of confirmation requires two distinct
-completed bars; poll jitter no longer adds another minute. Same-leg
-deduplication governs a new alert, including a new attempt in the
-same contract. A distinct price-level break or a recorded reset can alert again
-while the ticker is still running. The earliest possible opening signal is
+`LOTTO_MAX_ALERTS_PER_TICKER` are `0` (unlimited). One minute of confirmation requires two distinct
+completed bars; poll jitter no longer adds another minute. A 30-minute ticker
+cooldown and a fresh reset or direction change govern a new leg, including a
+new attempt in the same contract. The earliest possible opening signal is
 approximately 9:36 ET with complete, timely observations; collection delays can
 make it later. New ideas stop 15 minutes before the actual close. In the final
 30 minutes, only triggered setups with delta at least 0.20, spread at most 10%,

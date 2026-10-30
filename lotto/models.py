@@ -49,7 +49,6 @@ class Option:
     implied_volatility: float | None = None  # Provider-reported chain volatility.
     theta: float | None = None
     vega: float | None = None
-    direct_quote_verified: bool = False  # Independent contract quote disagreed with a Greekless chain.
 
     def valid(self) -> bool:
         return (self.side in {"CALL", "PUT"} and positive(self.strike, self.ask)
@@ -76,8 +75,6 @@ class Snapshot:
     market_return_5m: float | None = None
     market_time: datetime | None = None
     market_label: str = "SPY"
-    market_return_from_open: float | None = None  # Benchmark spot / 9:30 open - 1.
-    market_vwap_side: float | None = None  # +1 above session VWAP, -1 below, 0 on it.
     peer_return_5m: float | None = None
     peer_time: datetime | None = None
     peer_leaders: tuple[str, ...] = ()
@@ -86,8 +83,6 @@ class Snapshot:
     premarket_high: float | None = None
     premarket_low: float | None = None
     volume_source: str | None = None  # SPX uses SPY share volume; never index volume.
-    prior_full_days: int | None = None  # Prior RTH sessions with at least 380 minute bars.
-    rvol_base: float | None = None  # Mean cumulative volume at this minute across up to 10 of those days.
 
     @property
     def day(self) -> str:
@@ -139,13 +134,11 @@ class Snapshot:
             if (not bar.valid() or local_bar.date() != local.date()
                     or not time(9, 31) <= local_bar.time() <= time(16) or bar.end > self.at):
                 return ["invalid, future, or mixed-session bar"]
-            if i:
-                elapsed = (bar.end - self.bars[i - 1].end).total_seconds()
-                if elapsed <= 0 or elapsed > 180:
-                    return ["more than two consecutive stock bars missing"]
-        if self.bars[0].end.astimezone(ET).time() > time(9, 33):
-            return ["more than two opening stock bars missing"]
-        # A missing historical volume profile is an unknown feature, not proof
-        # that a fresh price/level breakout did not happen. path_features()
-        # already scores absent pace as zero while retaining local movement.
+            if i and (bar.end - self.bars[i - 1].end).total_seconds() != 60:
+                return ["incomplete one-minute bar history"]
+        if self.bars[0].end.astimezone(ET).time() != time(9, 31):
+            return ["session open bar missing"]
+        baseline = self.bars[-1].expected_cumulative_volume
+        if baseline is None or not positive(baseline):
+            return ["same-time historical volume baseline unavailable"]
         return []

@@ -1,5 +1,4 @@
 import json
-import logging
 import sqlite3
 import zlib
 from dataclasses import asdict
@@ -67,29 +66,6 @@ class Store:
             CREATE TABLE IF NOT EXISTS user_feedback (
                 alert_id TEXT PRIMARY KEY, outcome TEXT NOT NULL, notes TEXT NOT NULL,
                 recorded_at TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS quality_shadow (
-                candidate_id TEXT, policy_id TEXT, symbol TEXT, at TEXT, contract TEXT,
-                side TEXT, setup TEXT, phase TEXT, tier TEXT, reasons TEXT, labels TEXT,
-                trend_escape INTEGER, entry_ask REAL, strategy TEXT, live_outcome TEXT,
-                alert_id TEXT, PRIMARY KEY(candidate_id, policy_id));
-            CREATE INDEX IF NOT EXISTS quality_shadow_at ON quality_shadow(at);
-            CREATE INDEX IF NOT EXISTS quality_shadow_symbol_at ON quality_shadow(symbol,at);
-            CREATE TABLE IF NOT EXISTS quality_quotes (
-                candidate_id TEXT, at TEXT, quote_time TEXT, bid REAL, ask REAL,
-                PRIMARY KEY(candidate_id,quote_time));
-            CREATE TABLE IF NOT EXISTS stock_ideas (
-                id TEXT PRIMARY KEY, day TEXT, symbol TEXT, side TEXT, at TEXT,
-                stock_price REAL, trigger REAL, invalidation REAL, setup TEXT,
-                metrics TEXT, payload TEXT, delivery TEXT, delivered_at TEXT,
-                max_stock_return REAL DEFAULT 0, min_stock_return REAL DEFAULT 0,
-                latest_stock_return REAL DEFAULT 0, last_stock_quote TEXT);
-            CREATE INDEX IF NOT EXISTS stock_ideas_day ON stock_ideas(day,symbol,side,at);
-            CREATE TABLE IF NOT EXISTS stock_decisions (
-                symbol TEXT, at TEXT, side TEXT, reason TEXT, metrics TEXT);
-            CREATE TABLE IF NOT EXISTS shadow_cards (
-                id TEXT PRIMARY KEY, profile TEXT NOT NULL, day TEXT, symbol TEXT,
-                side TEXT, contract TEXT, score REAL, breakdown TEXT, at TEXT);
-            CREATE INDEX IF NOT EXISTS shadow_cards_at ON shadow_cards(at);
         """)
         # Railway volumes retain older databases. Do not recast historical alerts
         # as active trades when the phase distinction did not exist yet.
@@ -101,12 +77,6 @@ class Store:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN parent_id TEXT")
             if "thesis_id" not in columns:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN thesis_id TEXT")
-            for name, declaration in (("quality_tier", "TEXT NOT NULL DEFAULT 'MAIN'"),
-                                      ("quality_policy", "TEXT"), ("delivered_at", "TEXT"),
-                                      ("setup_name", "TEXT"), ("setup_trigger", "REAL"),
-                                      ("expiry", "TEXT")):
-                if name not in columns:
-                    self.db.execute(f"ALTER TABLE alerts ADD COLUMN {name} {declaration}")
 
     def record(self, snap: Snapshot) -> None:
         with self.db:
@@ -141,22 +111,6 @@ class Store:
                                          "side": candidate.option.side, "contract": candidate.option.symbol,
                                          "spot": snap.spot, "entry_ask": candidate.option.ask,
                                          "blockers": candidate.blockers} if candidate else {})))
-            if candidate is not None:
-                self.db.execute("UPDATE quality_shadow SET live_outcome=? WHERE symbol=? AND at=? AND contract=?",
-                                (f"{state}: {reason}",snap.symbol,snap.at.isoformat(),candidate.option.symbol))
-
-    def quality_shadow(self, candidate, decision, phase):
-        snap, option = candidate.snapshot, candidate.option
-        ident = sha256(f"{snap.day}:{snap.symbol}:{option.symbol}:{snap.at.isoformat()}".encode()).hexdigest()[:16]
-        with self.db:
-            self.db.execute("""INSERT OR IGNORE INTO quality_shadow
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (ident,decision.policy_id,snap.symbol,snap.at.isoformat(),option.symbol,option.side,
-                 candidate.setup.name if candidate.setup else None,phase,decision.tier,
-                 json.dumps(decision.reasons),json.dumps(decision.labels),int(decision.trend_escape),
-                 option.ask,STRATEGY_VERSION,'evaluating',None))
-            self.db.execute("INSERT OR IGNORE INTO quality_quotes VALUES(?,?,?,?,?)",
-                            (ident,snap.at.isoformat(),option.quote_time.isoformat(),option.bid,option.ask))
 
     def record_candidates(self, snap, candidates, settings):
         """Preserve both directions/expiries, including groups that lose ranking."""
@@ -250,72 +204,14 @@ class Store:
             args.append(symbol)
         return self.db.execute(query, args).fetchone()[0]
 
-    def last_alert(self, day: str, symbol: str, phase: str | None = None,
-                   side: str | None = None, expiry: str | None = None,
-                   exclude_tier_c: bool = False):
-        query = "SELECT * FROM alerts WHERE day=? AND symbol=?"
-        args = [day, symbol]
-        if phase is not None:
-            query += " AND phase=?"
-            args.append(phase)
-        if side is not None:
-            query += " AND side=?"
-            args.append(side)
-        if expiry is not None:
-            query += " AND expiry=?"
-            args.append(expiry)
-        if exclude_tier_c:
-            query += " AND quality_tier!='C'"
-        return self.db.execute(query + " ORDER BY at DESC LIMIT 1", args).fetchone()
-
-    def count_direction(self, day: str, symbol: str, side: str, expiry: str) -> int:
-        return self.db.execute("""SELECT COUNT(*) FROM alerts WHERE day=? AND symbol=? AND side=?
-                AND expiry=? AND phase='ACTIVE' AND quality_tier!='C'""",
-                (day,symbol,side,expiry)).fetchone()[0]
+    def last_alert(self, day: str, symbol: str):
+        return self.db.execute("SELECT * FROM alerts WHERE day=? AND symbol=? ORDER BY at DESC LIMIT 1", (day, symbol)).fetchone()
 
     def already_alerted(self, day: str, contract: str) -> bool:
         return self.db.execute("SELECT 1 FROM alerts WHERE day=? AND contract=?", (day, contract)).fetchone() is not None
 
-    def last_stock_idea(self, day: str, symbol: str, side: str):
-        return self.db.execute("""SELECT * FROM stock_ideas WHERE day=? AND symbol=? AND side=?
-                                ORDER BY at DESC LIMIT 1""", (day, symbol, side)).fetchone()
-
-    def stock_decision(self, idea, reason: str):
-        with self.db:
-            self.db.execute("INSERT INTO stock_decisions VALUES (?,?,?,?,?)",
-                            (idea.symbol, idea.at.isoformat(), idea.side, reason, json.dumps(idea.metrics)))
-
-    def queue_stock_idea(self, idea, payload: dict, dry_run: bool, mode: str):
-        # Stock-only ideas are stored for grading and never posted. `mode` is ignored
-        # so an environment flag cannot turn stock cards back on.
-        del mode
-        delivery = "dry_run" if dry_run else "internal"
-        with self.db:
-            self.db.execute("""INSERT OR IGNORE INTO stock_ideas
-                (id,day,symbol,side,at,stock_price,trigger,invalidation,setup,metrics,payload,delivery,last_stock_quote)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (idea.id, idea.day, idea.symbol, idea.side, idea.at.isoformat(), idea.price,
-                 idea.trigger, idea.invalidation, idea.setup, json.dumps(idea.metrics),
-                 json.dumps(payload), delivery, idea.at.isoformat()))
-
-    def track_stock_ideas(self, row: dict):
-        at = row["observed_at"]
-        day = at.astimezone(ET).date().isoformat()
-        with self.db:
-            for idea in self.db.execute("""SELECT id,side,stock_price,max_stock_return,min_stock_return,last_stock_quote
-                    FROM stock_ideas WHERE day=? AND symbol=?""", (day, row["symbol"])).fetchall():
-                if at.isoformat() <= idea["last_stock_quote"]:
-                    continue
-                direction = 1 if idea["side"] == "CALL" else -1
-                change = direction*(row["price"]/idea["stock_price"]-1)
-                self.db.execute("""UPDATE stock_ideas SET max_stock_return=?,min_stock_return=?,
-                        latest_stock_return=?,last_stock_quote=? WHERE id=?""",
-                        (max(idea["max_stock_return"],change),min(idea["min_stock_return"],change),
-                         change,at.isoformat(),idea["id"]))
-
     def queue(self, candidate: Candidate, payload: dict, dry_run: bool,
-              phase: str, parent_id: str | None = None, quality=None,
-              tier: str | None = None, sendable: bool = True) -> str:
+              phase: str, parent_id: str | None = None) -> str:
         if phase not in {"POTENTIAL", "ACTIVE"}:
             raise ValueError("Alert phase must be POTENTIAL or ACTIVE")
         snap, option = candidate.snapshot, candidate.option
@@ -323,52 +219,16 @@ class Store:
         thesis_id = parent_id or ident
         payload["embeds"][0]["footer"] = {"text": f"{phase.title()} idea • Research score, not probability • {ident}"}
         with self.db:
-            try:
-                self.db.execute("""INSERT INTO alerts
-                    (id, day, symbol, side, contract, at, entry_ask, payload, snapshot, delivery,
-                     max_return, min_return, latest_return, last_quote, phase, parent_id, thesis_id,
-                     setup_name, setup_trigger, expiry)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (ident, snap.day, snap.symbol, option.side, option.symbol, snap.at.isoformat(),
-                     option.ask, json.dumps(payload), json.dumps(snap.to_dict()),
-                     "dry_run" if dry_run else "internal" if phase == "POTENTIAL" or not sendable else "pending",
-                     option.bid / option.ask - 1, option.bid / option.ask - 1,
-                     option.bid / option.ask - 1, option.quote_time.isoformat(),
-                     phase, parent_id, thesis_id,
-                     candidate.setup.name if candidate.setup else None,
-                     candidate.setup.trigger if candidate.setup else None,option.expiry.isoformat()))
-            except sqlite3.IntegrityError:
-                logging.getLogger(__name__).warning(
-                    "alert already queued for %s %s at %s", snap.symbol, option.symbol, snap.at.isoformat())
-                return ident
-            if tier is not None:
-                self.db.execute("UPDATE alerts SET quality_tier=? WHERE id=?", (tier,ident))
-            if quality is not None:
-                self.db.execute("UPDATE alerts SET quality_tier=?,quality_policy=? WHERE id=?",
-                                (tier or quality.tier,quality.policy_id,ident))
-            self.db.execute("UPDATE quality_shadow SET alert_id=? WHERE candidate_id=?",(ident,ident))
-        return ident
-
-    def record_shadow_card(self, profile: str, candidate: Candidate, breakdown: dict, score: float) -> str:
-        """A card the shadow profile would have posted. Not an alert and not a Discord send."""
-        snap, option = candidate.snapshot, candidate.option
-        at = snap.at.isoformat()
-        ident = sha256(
-            f"shadow:{profile}:{snap.day}:{snap.symbol}:{option.symbol}:{at}".encode()
-        ).hexdigest()[:16]
-        with self.db:
-            self.db.execute(
-                """INSERT OR IGNORE INTO shadow_cards
-                   (id, profile, day, symbol, side, contract, score, breakdown, at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (ident, profile, snap.day, snap.symbol, option.side, option.symbol,
-                 float(score), json.dumps(breakdown, default=str), at),
-            )
-        logging.getLogger(__name__).info(
-            "shadow_card profile=%s ticker=%s side=%s contract=%s score=%s at=%s rows=%s",
-            profile, snap.symbol, option.side, option.symbol, score, at,
-            json.dumps(breakdown, default=str, sort_keys=True),
-        )
+            self.db.execute("""INSERT INTO alerts
+                (id, day, symbol, side, contract, at, entry_ask, payload, snapshot, delivery,
+                 max_return, min_return, latest_return, last_quote, phase, parent_id, thesis_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (ident, snap.day, snap.symbol, option.side, option.symbol, snap.at.isoformat(),
+                 option.ask, json.dumps(payload), json.dumps(snap.to_dict()),
+                 "dry_run" if dry_run else "internal" if phase == "POTENTIAL" else "pending",
+                 option.bid / option.ask - 1, option.bid / option.ask - 1,
+                 option.bid / option.ask - 1, option.quote_time.isoformat(),
+                 phase, parent_id, thesis_id))
         return ident
 
     def research_candidate(self, candidate: Candidate, reason: str) -> None:
@@ -390,15 +250,6 @@ class Store:
         milestones = []
         options = {o.symbol: o for o in snap.options}
         with self.db:
-            # Observe shadows only on already collected chains. Do not silently
-            # change discovery/coverage by pinning every suppressed candidate.
-            for row in self.db.execute("""SELECT DISTINCT candidate_id,contract FROM quality_shadow
-                    WHERE symbol=? AND at>=? AND at<=?""",
-                    (snap.symbol,(snap.at-timedelta(minutes=30)).isoformat(),snap.at.isoformat())).fetchall():
-                option=options.get(row['contract'])
-                if option and quote_ok(option,snap,settings):
-                    self.db.execute("INSERT OR IGNORE INTO quality_quotes VALUES(?,?,?,?,?)",
-                                    (row['candidate_id'],snap.at.isoformat(),option.quote_time.isoformat(),option.bid,option.ask))
             for row in self.db.execute("SELECT * FROM alerts WHERE symbol=? AND closed=0", (snap.symbol,)).fetchall():
                 if row["day"] != snap.day or (snap.session_end and snap.at >= snap.session_end):
                     self.db.execute("UPDATE alerts SET closed=1 WHERE id=?", (row["id"],))
