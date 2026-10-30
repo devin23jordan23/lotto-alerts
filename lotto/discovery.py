@@ -20,7 +20,7 @@ class Discovery:
         self.day = None
         self.observations = []
 
-    def update(self, quotes, now, universe, tracked=(), flow_priorities=None, unavailable=()):
+    def update(self, quotes, now, universe, tracked=(), flow_priorities=None):
         day = now.date()
         if self.day != day:
             self.history.clear()
@@ -55,11 +55,8 @@ class Discovery:
                 history.append(record)
             self.history[symbol] = [v for v in history if now-v["at"] <= timedelta(minutes=12)]
             if symbol in universe:
+                ranks[symbol] = score
                 self.observations.append(record)
-                # A missing near-expiry chain must not evict a user-pinned name.
-                # Keep collecting its stock history and retry the live chain.
-                if symbol not in unavailable or symbol in tracked or symbol in self.always_deep:
-                    ranks[symbol] = score
         # Keep windows intact long enough for 20-minute option persistence research.
         # Reserve a quarter of chain slots for names the price ranking has not
         # reached today. They get the same 25-minute observation window.

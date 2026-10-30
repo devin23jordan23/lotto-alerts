@@ -364,9 +364,6 @@ def run_nightly(store, day, directory, symbols=(), client=None):
         candidate_rows.append(item)
     alert_rows = [dict(r) for r in store.db.execute(
         "SELECT id,contract,phase,parent_id,thesis_id,delivery FROM alerts WHERE day=?", (day,))]
-    research_ideas = [dict(r) for r in store.db.execute(
-        """SELECT id,symbol,contract,at,reason,entry_ask,max_return,min_return,latest_return,last_quote
-           FROM research_ideas WHERE day=? ORDER BY at""", (day,))]
     feedback_rows = alert_feedback(store, day)
     feedback_by_id = {row["id"]:row for row in feedback_rows}
     trade_high_rows, trade_high_errors = option_trade_high_feedback(store, day, root, client)
@@ -385,7 +382,6 @@ def run_nightly(store, day, directory, symbols=(), client=None):
         "alert_feedback":feedback_rows,
         "opening_confirmation_research":opening_confirmation_research(store,day),
         "alert_phase_counts":dict(Counter(r["phase"] for r in alert_rows)),
-        "quality_gate_research_ideas":research_ideas,
         "activated_watches":len(activated_ids),
         "unactivated_watches":sum(r["phase"] == "POTENTIAL" and r["id"] not in activated_ids for r in alert_rows),
         "direct_active_ideas":sum(r["phase"] == "ACTIVE" and r["parent_id"] is None for r in alert_rows),
@@ -411,8 +407,6 @@ def run_nightly(store, day, directory, symbols=(), client=None):
                             "mean_stock_30m_directional":sum(v)/len(v)} for k,v in grouped.items()},
         "universe_price_setups":research,"captured_option_returns":store.end_of_day_options(day),
     }
-    from .quality_report import scorecard
-    result['model_quality_scorecard'] = scorecard(store,day)
     path = root/"report.json"
     temporary = root/"report.tmp"
     temporary.write_text(json.dumps(result,indent=2))

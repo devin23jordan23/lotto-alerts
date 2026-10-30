@@ -37,12 +37,6 @@ class Store:
             CREATE TABLE IF NOT EXISTS milestones (
                 alert_id TEXT, percent INTEGER, at TEXT, PRIMARY KEY(alert_id, percent));
             CREATE INDEX IF NOT EXISTS alerts_day ON alerts(day, symbol);
-            CREATE TABLE IF NOT EXISTS research_ideas (
-                id TEXT PRIMARY KEY, day TEXT, symbol TEXT, contract TEXT,
-                at TEXT, expires_at TEXT, reason TEXT, entry_ask REAL,
-                snapshot TEXT, last_quote TEXT, max_return REAL, min_return REAL,
-                latest_return REAL, closed INTEGER DEFAULT 0);
-            CREATE INDEX IF NOT EXISTS research_ideas_day ON research_ideas(day, symbol);
             CREATE INDEX IF NOT EXISTS snapshots_at ON snapshots(at);
             CREATE TABLE IF NOT EXISTS discovery (
                 day TEXT, symbol TEXT, at TEXT, promoted INTEGER, payload TEXT,
@@ -66,16 +60,6 @@ class Store:
             CREATE TABLE IF NOT EXISTS user_feedback (
                 alert_id TEXT PRIMARY KEY, outcome TEXT NOT NULL, notes TEXT NOT NULL,
                 recorded_at TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS quality_shadow (
-                candidate_id TEXT, policy_id TEXT, symbol TEXT, at TEXT, contract TEXT,
-                side TEXT, setup TEXT, phase TEXT, tier TEXT, reasons TEXT, labels TEXT,
-                trend_escape INTEGER, entry_ask REAL, strategy TEXT, live_outcome TEXT,
-                alert_id TEXT, PRIMARY KEY(candidate_id, policy_id));
-            CREATE INDEX IF NOT EXISTS quality_shadow_at ON quality_shadow(at);
-            CREATE INDEX IF NOT EXISTS quality_shadow_symbol_at ON quality_shadow(symbol,at);
-            CREATE TABLE IF NOT EXISTS quality_quotes (
-                candidate_id TEXT, at TEXT, quote_time TEXT, bid REAL, ask REAL,
-                PRIMARY KEY(candidate_id,quote_time));
         """)
         # Railway volumes retain older databases. Do not recast historical alerts
         # as active trades when the phase distinction did not exist yet.
@@ -87,10 +71,6 @@ class Store:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN parent_id TEXT")
             if "thesis_id" not in columns:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN thesis_id TEXT")
-            for name, declaration in (("quality_tier", "TEXT NOT NULL DEFAULT 'MAIN'"),
-                                      ("quality_policy", "TEXT"), ("delivered_at", "TEXT")):
-                if name not in columns:
-                    self.db.execute(f"ALTER TABLE alerts ADD COLUMN {name} {declaration}")
 
     def record(self, snap: Snapshot) -> None:
         with self.db:
@@ -125,22 +105,6 @@ class Store:
                                          "side": candidate.option.side, "contract": candidate.option.symbol,
                                          "spot": snap.spot, "entry_ask": candidate.option.ask,
                                          "blockers": candidate.blockers} if candidate else {})))
-            if candidate is not None:
-                self.db.execute("UPDATE quality_shadow SET live_outcome=? WHERE symbol=? AND at=? AND contract=?",
-                                (f"{state}: {reason}",snap.symbol,snap.at.isoformat(),candidate.option.symbol))
-
-    def quality_shadow(self, candidate, decision, phase):
-        snap, option = candidate.snapshot, candidate.option
-        ident = sha256(f"{snap.day}:{snap.symbol}:{option.symbol}:{snap.at.isoformat()}".encode()).hexdigest()[:16]
-        with self.db:
-            self.db.execute("""INSERT OR IGNORE INTO quality_shadow
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (ident,decision.policy_id,snap.symbol,snap.at.isoformat(),option.symbol,option.side,
-                 candidate.setup.name if candidate.setup else None,phase,decision.tier,
-                 json.dumps(decision.reasons),json.dumps(decision.labels),int(decision.trend_escape),
-                 option.ask,STRATEGY_VERSION,'evaluating',None))
-            self.db.execute("INSERT OR IGNORE INTO quality_quotes VALUES(?,?,?,?,?)",
-                            (ident,snap.at.isoformat(),option.quote_time.isoformat(),option.bid,option.ask))
 
     def record_candidates(self, snap, candidates, settings):
         """Preserve both directions/expiries, including groups that lose ranking."""
@@ -241,7 +205,7 @@ class Store:
         return self.db.execute("SELECT 1 FROM alerts WHERE day=? AND contract=?", (day, contract)).fetchone() is not None
 
     def queue(self, candidate: Candidate, payload: dict, dry_run: bool,
-              phase: str, parent_id: str | None = None, quality=None) -> str:
+              phase: str, parent_id: str | None = None) -> str:
         if phase not in {"POTENTIAL", "ACTIVE"}:
             raise ValueError("Alert phase must be POTENTIAL or ACTIVE")
         snap, option = candidate.snapshot, candidate.option
@@ -259,40 +223,12 @@ class Store:
                  option.bid / option.ask - 1, option.bid / option.ask - 1,
                  option.bid / option.ask - 1, option.quote_time.isoformat(),
                  phase, parent_id, thesis_id))
-            if quality is not None:
-                self.db.execute("UPDATE alerts SET quality_tier=?,quality_policy=? WHERE id=?",
-                                (quality.tier,quality.policy_id,ident))
-            self.db.execute("UPDATE quality_shadow SET alert_id=? WHERE candidate_id=?",(ident,ident))
         return ident
-
-    def research_candidate(self, candidate: Candidate, reason: str) -> None:
-        """Pin one excluded thesis for a 30-minute quote-path comparison."""
-        snap, option = candidate.snapshot, candidate.option
-        ident = sha256(f"{snap.day}:{snap.symbol}:{option.symbol}:{reason}".encode()).hexdigest()[:16]
-        initial = option.bid / option.ask - 1
-        with self.db:
-            self.db.execute("""INSERT OR IGNORE INTO research_ideas
-                (id,day,symbol,contract,at,expires_at,reason,entry_ask,snapshot,last_quote,
-                 max_return,min_return,latest_return)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (ident,snap.day,snap.symbol,option.symbol,snap.at.isoformat(),
-                 (snap.at+timedelta(minutes=30)).isoformat(),reason,option.ask,
-                 json.dumps(snap.to_dict()),option.quote_time.isoformat(),
-                 initial,initial,initial))
 
     def track(self, snap: Snapshot, settings) -> list[dict]:
         milestones = []
         options = {o.symbol: o for o in snap.options}
         with self.db:
-            # Observe shadows only on already collected chains. Do not silently
-            # change discovery/coverage by pinning every suppressed candidate.
-            for row in self.db.execute("""SELECT DISTINCT candidate_id,contract FROM quality_shadow
-                    WHERE symbol=? AND at>=? AND at<=?""",
-                    (snap.symbol,(snap.at-timedelta(minutes=30)).isoformat(),snap.at.isoformat())).fetchall():
-                option=options.get(row['contract'])
-                if option and quote_ok(option,snap,settings):
-                    self.db.execute("INSERT OR IGNORE INTO quality_quotes VALUES(?,?,?,?,?)",
-                                    (row['candidate_id'],snap.at.isoformat(),option.quote_time.isoformat(),option.bid,option.ask))
             for row in self.db.execute("SELECT * FROM alerts WHERE symbol=? AND closed=0", (snap.symbol,)).fetchall():
                 if row["day"] != snap.day or (snap.session_end and snap.at >= snap.session_end):
                     self.db.execute("UPDATE alerts SET closed=1 WHERE id=?", (row["id"],))
@@ -314,17 +250,6 @@ class Store:
                             milestones.append({"alert_id": row["id"], "symbol": snap.symbol,
                                                "percent": percent, "bid": option.bid,
                                                "entry_ask": row["entry_ask"]})
-            for row in self.db.execute("SELECT * FROM research_ideas WHERE symbol=? AND closed=0", (snap.symbol,)).fetchall():
-                if row["day"] != snap.day or snap.at > datetime.fromisoformat(row["expires_at"]):
-                    self.db.execute("UPDATE research_ideas SET closed=1 WHERE id=?", (row["id"],))
-                    continue
-                option = options.get(row["contract"])
-                if not option or not quote_ok(option, snap, settings) or option.quote_time <= datetime.fromisoformat(row["last_quote"]):
-                    continue
-                change = option.bid / row["entry_ask"] - 1
-                self.db.execute("""UPDATE research_ideas SET max_return=?,min_return=?,latest_return=?,last_quote=?
-                                   WHERE id=?""",(max(row["max_return"],change),min(row["min_return"],change),
-                                                 change,option.quote_time.isoformat(),row["id"]))
         return milestones
 
     def active_options(self, day: str):
@@ -333,11 +258,6 @@ class Store:
             snap = Snapshot.from_dict(json.loads(row["snapshot"]))
             option = next(o for o in snap.options if o.symbol == row["contract"])
             result.setdefault(row["symbol"], []).append(option)
-        for row in self.db.execute("SELECT symbol,contract,snapshot FROM research_ideas WHERE day=? AND closed=0", (day,)):
-            snap = Snapshot.from_dict(json.loads(row["snapshot"]))
-            option = next(o for o in snap.options if o.symbol == row["contract"])
-            if option.symbol not in {o.symbol for o in result.get(row["symbol"], ())}:
-                result.setdefault(row["symbol"], []).append(option)
         return result
 
     def summary(self) -> list[dict]:
