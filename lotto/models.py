@@ -1,4 +1,4 @@
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, time
 from math import isfinite
 from zoneinfo import ZoneInfo
@@ -102,14 +102,22 @@ class Snapshot:
     @classmethod
     def from_dict(cls, data: dict) -> "Snapshot":
         data = dict(data)
+        # A restored model must read snapshots written by newer scanner versions.
+        bar_keys = {field.name for field in fields(Bar)}
+        option_keys = {field.name for field in fields(Option)}
+        snapshot_keys = {field.name for field in fields(cls)}
         for key in ("at", "spot_time", "context_time", "session_end", "market_time", "peer_time"):
             if data.get(key) is not None:
                 data[key] = timestamp(data[key])
-        data["bars"] = tuple(Bar(**{**b, "end": timestamp(b["end"])}) for b in data["bars"])
-        data["options"] = tuple(Option(**{**o, "expiry": date.fromisoformat(o["expiry"]),
-                                           "quote_time": timestamp(o["quote_time"])}) for o in data["options"])
+        data["bars"] = tuple(Bar(**{key: value for key, value in
+                                   {**bar, "end": timestamp(bar["end"])}.items()
+                                   if key in bar_keys}) for bar in data["bars"])
+        data["options"] = tuple(Option(**{key: value for key, value in
+                                         {**option, "expiry": date.fromisoformat(option["expiry"]),
+                                          "quote_time": timestamp(option["quote_time"])}.items()
+                                         if key in option_keys}) for option in data["options"])
         data["peer_leaders"] = tuple(data.get("peer_leaders", ()))
-        return cls(**data)
+        return cls(**{key: value for key, value in data.items() if key in snapshot_keys})
 
     def problems(self, max_age: int = 90, min_bars: int = 11) -> list[str]:
         if self.at.tzinfo is None or self.spot_time.tzinfo is None:
