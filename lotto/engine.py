@@ -1,3 +1,4 @@
+import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -6,6 +7,9 @@ from .discord import alert_payload
 from .features import candidates
 from .models import ET, Snapshot
 from .store import Store
+from .wave import run_shadow, shadow_enabled
+
+LOG = logging.getLogger(__name__)
 
 
 class Engine:
@@ -25,6 +29,11 @@ class Engine:
     def process(self, snapshots: list[Snapshot]) -> list[dict]:
         ready = []
         cfg = self.settings
+        # Shadow bookkeeping is allocated only when a flag is on, so the default
+        # path does not build extra lists or touch the wave_shadow table.
+        shadow = shadow_enabled(cfg)
+        fresh = [] if shadow else None
+        posted = [] if shadow else None
         for snap in snapshots:
             key = (snap.day, snap.symbol)
             if key not in self.history:
@@ -51,6 +60,8 @@ class Engine:
             if self.last_bar.get(key) == snap.bars[-1].end:
                 continue
             self.last_bar[key] = snap.bars[-1].end
+            if fresh is not None:
+                fresh.append(snap)
             evaluated = candidates(snap, history, cfg)
             self.store.record_candidates(snap, evaluated, cfg)
             history.append(snap)
@@ -140,10 +151,24 @@ class Engine:
             parent_id = (last["id"] if candidate.state == "ACTIVATION" and last else None)
             payload = alert_payload(candidate, phase, parent_id)
             ident = self.store.queue(candidate, payload, self.dry_run, phase, parent_id)
+            if posted is not None:
+                posted.append((candidate, ident))
             self.rearmed.discard((snap.day, snap.symbol))
             self.store.decision(snap, candidate.state, f"{phase.lower()} alert {ident}", candidate)
             alerts.append({"id": ident, "phase": phase, "parent_id": parent_id, "payload": payload})
+        if shadow:
+            try:
+                run_shadow(self.store, cfg, fresh or [], posted or [], snapshots, self._shadow_memory())
+            except Exception:
+                LOG.exception("wave shadow failed; posted cards were left unchanged")
         return alerts
+
+    def _shadow_memory(self):
+        memory = getattr(self, "_shadow_memory_state", None)
+        if memory is None:
+            memory = {"symbols": {}, "skips": set(), "purged": None, "cap_warned": False}
+            self._shadow_memory_state = memory
+        return memory
 
     def _clear_confirmation(self, key):
         for score_key in list(self.qualified_since):
