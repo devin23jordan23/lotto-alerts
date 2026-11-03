@@ -56,6 +56,20 @@ def contract_ok(option: Option, snap: Snapshot, settings: Settings) -> bool:
             and (atr is None or direction*(option.strike-snap.spot) <= settings.max_otm_atr*atr))
 
 
+def broke_20d_range(snap: Snapshot, direction: int) -> bool:
+    """True when today's RTH trade has already gone through the prior 20-session extreme.
+
+    Unknown history fails open (False): a missing level is not a veto.
+    """
+    if not snap.bars:
+        return False
+    if direction > 0:
+        level = snap.prior_high_20d
+        return level is not None and max(bar.high for bar in snap.bars) > level
+    level = snap.prior_low_20d
+    return level is not None and min(bar.low for bar in snap.bars) < level
+
+
 def stock_features(snap: Snapshot, direction: int) -> tuple[dict, dict]:
     metrics = path_features(snap, direction)
     setup = detect_setup(snap, direction, metrics)

@@ -37,6 +37,15 @@ class Settings:
     max_building_distance_atr: float = .06
     max_entry_extension_atr: float = .25
     min_opening_bars: int = 3
+    # Integer 0/1 only. env_settings() does type(default)(raw), and bool("false") is True.
+    wave_shadow: int = 0  # LOTTO_WAVE_SHADOW=1 logs every family below. Never posts.
+    wave_card_shadow: int = 0  # Posted-card tags and 30-minute entry path.
+    wave_f4_shadow: int = 0  # Energy 5m flag. Would-be rows only.
+    wave_f7_shadow: int = 0  # 5m/2m EMA backtest entry variants. Would-be rows only.
+    wave_f1_shadow: int = 0  # 5m-close VWAP loss/reclaim. Would-be rows only.
+    wave_f2_shadow: int = 0  # HOD/LOD failure. Would-be rows only.
+    wave_reject_shadow: int = 0  # Per-ticker reject stage after the stock-volume gate. Never posts.
+    wave_cooldown_minutes: int = 15  # Shadow dedupe only. Does not change live cooldowns.
 
     def __post_init__(self):
         if any(not isfinite(value) for value in vars(self).values()):

@@ -60,6 +60,16 @@ class Store:
             CREATE TABLE IF NOT EXISTS user_feedback (
                 alert_id TEXT PRIMARY KEY, outcome TEXT NOT NULL, notes TEXT NOT NULL,
                 recorded_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS wave_shadow (
+                day TEXT NOT NULL, symbol TEXT NOT NULL, at TEXT NOT NULL,
+                family TEXT NOT NULL, side TEXT NOT NULL, bar_end TEXT NOT NULL,
+                trigger REAL, invalidation REAL, spot REAL, atr21 REAL,
+                contract TEXT, ask REAL, bid REAL, delta REAL,
+                card_alert_id TEXT, features TEXT,
+                PRIMARY KEY(symbol, bar_end, family, side));
+            CREATE INDEX IF NOT EXISTS wave_shadow_day ON wave_shadow(day);
+            CREATE INDEX IF NOT EXISTS wave_shadow_lookup
+                ON wave_shadow(day, symbol, family, side, at);
         """)
         # Railway volumes retain older databases. Do not recast historical alerts
         # as active trades when the phase distinction did not exist yet.
@@ -115,7 +125,9 @@ class Store:
                             "side":candidate.option.side, "expiry":candidate.option.expiry.isoformat(),
                             "entry_ask":candidate.option.ask, "entry_bid":candidate.option.bid,
                             "spot":snap.spot, "blockers":candidate.blockers,
-                            "settings":asdict(settings)}
+                            # Drop wave_* keys so stored evaluations match the pre-shadow schema.
+                            "settings":{key: value for key, value in asdict(settings).items()
+                                        if not key.startswith("wave_")}}
                 self.db.execute("INSERT OR IGNORE INTO candidate_evaluations VALUES (?,?,?,?,?,?,?,?)",
                     (snap.day,snap.symbol,snap.at.isoformat(),candidate.option.symbol,STRATEGY_VERSION,
                      int(candidate.qualifying),candidate.score,json.dumps(features)))
@@ -190,6 +202,43 @@ class Store:
             row["max_return"] = row["max_bid"]/row["entry_ask"]-1
             row["min_return"] = row["min_bid"]/row["entry_ask"]-1
         return sorted(records.values(), key=lambda row:(row["underlying"], -row["max_return"], row["contract"]))
+
+    def wave_shadow(self, row: dict, cap: int = 2000) -> str:
+        """Insert one shadow row. Returns inserted, duplicate, or capped.
+
+        The cap bounds a full session if a detector ever fires on every name.
+        Updates of an existing card path do not go through this method.
+        """
+        features = row.get("features")
+        if not isinstance(features, str):
+            features = json.dumps(features if features is not None else {}, separators=(",", ":"))
+        with self.db:
+            count = self.db.execute("SELECT COUNT(*) FROM wave_shadow WHERE day=?", (row["day"],)).fetchone()[0]
+            if count >= cap:
+                return "capped"
+            cursor = self.db.execute(
+                """INSERT OR IGNORE INTO wave_shadow
+                   (day,symbol,at,family,side,bar_end,trigger,invalidation,spot,atr21,
+                    contract,ask,bid,delta,card_alert_id,features)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (row["day"], row["symbol"], row["at"], row["family"], row["side"], row["bar_end"],
+                 row.get("trigger"), row.get("invalidation"), row.get("spot"), row.get("atr21"),
+                 row.get("contract"), row.get("ask"), row.get("bid"), row.get("delta"),
+                 row.get("card_alert_id"), features))
+        return "inserted" if cursor.rowcount else "duplicate"
+
+    def wave_shadow_features(self, symbol: str, bar_end: str, family: str, side: str, features: dict) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE wave_shadow SET features=? WHERE symbol=? AND bar_end=? AND family=? AND side=?",
+                (json.dumps(features, separators=(",", ":")), symbol, bar_end, family, side))
+
+    def purge_wave_shadow(self, today: str, keep_days: int = 30) -> int:
+        # Retain `keep_days` dates including today. A day 30 dates back is dropped.
+        cutoff = (datetime.fromisoformat(today) - timedelta(days=keep_days)).date().isoformat()
+        with self.db:
+            cursor = self.db.execute("DELETE FROM wave_shadow WHERE day <= ?", (cutoff,))
+        return cursor.rowcount
 
     def count(self, day: str, symbol: str | None = None) -> int:
         query, args = "SELECT COUNT(*) FROM alerts WHERE day=?", [day]

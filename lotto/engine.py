@@ -1,3 +1,4 @@
+import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -6,6 +7,9 @@ from .discord import alert_payload
 from .features import candidates
 from .models import ET, Snapshot
 from .store import Store
+from .wave import run_shadow, shadow_enabled, volume_passed
+
+LOG = logging.getLogger(__name__)
 
 
 class Engine:
@@ -25,6 +29,14 @@ class Engine:
     def process(self, snapshots: list[Snapshot]) -> list[dict]:
         ready = []
         cfg = self.settings
+        # Shadow bookkeeping is allocated only when a flag is on, so the default
+        # path does not build extra lists or touch the wave_shadow table.
+        shadow = shadow_enabled(cfg)
+        fresh = [] if shadow else None
+        posted = [] if shadow else None
+        # Reject rows are a side log. The list stays None unless the flag is on,
+        # so the default path does not inspect blockers a second time.
+        rejects = [] if shadow and (cfg.wave_shadow or cfg.wave_reject_shadow) else None
         for snap in snapshots:
             key = (snap.day, snap.symbol)
             if key not in self.history:
@@ -51,6 +63,8 @@ class Engine:
             if self.last_bar.get(key) == snap.bars[-1].end:
                 continue
             self.last_bar[key] = snap.bars[-1].end
+            if fresh is not None:
+                fresh.append(snap)
             evaluated = candidates(snap, history, cfg)
             self.store.record_candidates(snap, evaluated, cfg)
             history.append(snap)
@@ -59,6 +73,11 @@ class Engine:
             best = max(evaluated, key=lambda c: c.score, default=None)
             if not valid:
                 self._clear_confirmation(key)
+                if rejects is not None:
+                    passed = [item for item in evaluated if volume_passed(item)]
+                    if passed:
+                        rejects.append({"candidate": max(passed, key=lambda item: item.score),
+                                        "stage": None, "extra": {}})
                 if best is not None:
                     if key in self.last_cooling and snap.at - self.last_cooling[key] > timedelta(seconds=150):
                         self.cool_since.pop(key, None)
@@ -97,16 +116,24 @@ class Engine:
                                      < timedelta(minutes=cfg.confirmation_minutes))
             if awaiting_confirmation and not opening_fast_lane:
                 self.store.decision(snap, "IGNITION", "confirming persistence", best)
+                if rejects is not None:
+                    rejects.append({"candidate": best, "stage": "confirm_wait",
+                                    "extra": {"wait": cfg.confirmation_minutes}})
                 continue
             if awaiting_confirmation and opening_fast_lane:
                 best.metrics["opening_fast_lane"] = 1
             # Flat strong scores can persist; materially deteriorating scores cannot alert.
             if best.score_change < -5:
                 self.store.decision(snap, "COOLING", "score deteriorating", best)
+                if rejects is not None:
+                    rejects.append({"candidate": best, "stage": "decay",
+                                    "extra": {"dscore": best.score_change}})
                 continue
             close = snap.session_end or snap.at.astimezone(ET).replace(hour=16, minute=0, second=0, microsecond=0)
             if close - snap.at <= timedelta(minutes=cfg.entry_cutoff_minutes):
                 self.store.decision(snap, "RUNNER", "entry cutoff; tracking only", best)
+                if rejects is not None:
+                    rejects.append({"candidate": best, "stage": "cutoff", "extra": {}})
                 continue
             phase = "POTENTIAL" if best.setup.building else "ACTIVE"
             last = self.store.last_alert(*key)
@@ -120,6 +147,12 @@ class Engine:
                     if (snap.at - datetime.fromisoformat(last["at"]) < timedelta(minutes=cfg.ticker_cooldown_minutes)
                             or (key not in self.rearmed and last["side"] == best.option.side)):
                         self.store.decision(snap, "RUNNER", "cooldown or fresh reset required", best)
+                        if rejects is not None:
+                            elapsed = (snap.at - datetime.fromisoformat(last["at"])).total_seconds() / 60
+                            rejects.append({"candidate": best, "stage": "lockout", "extra": {
+                                "rearm": int(key in self.rearmed), "lock_m": round(elapsed, 2),
+                                "same": int(last["side"] == best.option.side),
+                                "cd": cfg.ticker_cooldown_minutes}})
                         continue
             else:
                 best.state = "IGNITION"
@@ -134,16 +167,33 @@ class Engine:
                     or (cfg.max_alerts_per_day and self.store.count(snap.day) >= cfg.max_alerts_per_day)
                     or (cfg.max_alerts_per_ticker and self.store.count(snap.day, snap.symbol) >= cfg.max_alerts_per_ticker)):
                 self.store.decision(snap, candidate.state, "alert budget/ranking suppressed", candidate)
+                if rejects is not None and volume_passed(candidate):
+                    rejects.append({"candidate": candidate, "stage": "budget", "extra": {}})
                 continue
             phase = "POTENTIAL" if candidate.setup.building else "ACTIVE"
             last = self.store.last_alert(snap.day, snap.symbol)
             parent_id = (last["id"] if candidate.state == "ACTIVATION" and last else None)
             payload = alert_payload(candidate, phase, parent_id)
             ident = self.store.queue(candidate, payload, self.dry_run, phase, parent_id)
+            if posted is not None:
+                posted.append((candidate, ident))
             self.rearmed.discard((snap.day, snap.symbol))
             self.store.decision(snap, candidate.state, f"{phase.lower()} alert {ident}", candidate)
             alerts.append({"id": ident, "phase": phase, "parent_id": parent_id, "payload": payload})
+        if shadow:
+            try:
+                run_shadow(self.store, cfg, fresh or [], posted or [], snapshots, self._shadow_memory(),
+                           rejects or ())
+            except Exception:
+                LOG.exception("wave shadow failed; posted cards were left unchanged")
         return alerts
+
+    def _shadow_memory(self):
+        memory = getattr(self, "_shadow_memory_state", None)
+        if memory is None:
+            memory = {"symbols": {}, "skips": set(), "purged": None, "cap_warned": False}
+            self._shadow_memory_state = memory
+        return memory
 
     def _clear_confirmation(self, key):
         for score_key in list(self.qualified_since):

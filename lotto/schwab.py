@@ -69,6 +69,7 @@ class Schwab:
         self.baselines = {}
         self.calendar_cache = {}
         self.atrs = {}
+        self.atrs21 = {}
         self.levels = {}
         self.discovery = Discovery(int(os.getenv("LOTTO_CHAIN_CAPACITY", "30")),
             always_deep={s.strip().upper() for s in os.getenv(
@@ -183,12 +184,21 @@ class Schwab:
         if not hasattr(self, "atrs"):
             self.atrs = {}
         self.atrs[key] = sum(ranges[-14:])/14 if len(ranges) >= 14 else None
+        if not hasattr(self, "atrs21"):
+            self.atrs21 = {}
+        # ATR21 is the mean of 21 true ranges (22 sessions). Do not fall back to ATR14.
+        self.atrs21[key] = sum(ranges[-21:])/21 if len(ranges) >= 21 else None
         if not hasattr(self,"levels"):
             self.levels = {}
         if daily:
             prior = daily[max(daily)]
             self.levels.setdefault(key,{}).update(prior_high=max(r["high"] for r in prior),
                                                   prior_low=min(r["low"] for r in prior))
+            last20 = sorted(daily)[-20:]
+            if len(last20) == 20:
+                self.levels[key].update(
+                    prior_high_20d=max(max(r["high"] for r in daily[d]) for d in last20),
+                    prior_low_20d=min(min(r["low"] for r in daily[d]) for d in last20))
         profiles = defaultdict(dict)
         for raw in data.get("candles", []):
             at = epoch(raw.get("datetime"))
@@ -394,6 +404,7 @@ class Schwab:
                                        context, context_time, benchmark, "schwab", session[1],
                                        volume_source="SPY" if symbol == "SPX" else symbol,
                                        prior_atr=self.atrs.get((symbol, now.astimezone(ET).date())),
+                                       prior_atr21=getattr(self, "atrs21", {}).get((symbol, now.astimezone(ET).date())),
                                        market_return_5m=market_return, market_time=market_time, market_label=market,
                                        peer_return_5m=peer_return, peer_time=min((p[2] for p in peers), default=None),
                                        peer_leaders=leaders,

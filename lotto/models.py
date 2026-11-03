@@ -83,6 +83,9 @@ class Snapshot:
     premarket_high: float | None = None
     premarket_low: float | None = None
     volume_source: str | None = None  # SPX uses SPY share volume; never index volume.
+    prior_atr21: float | None = None  # Prior 21-session mean true range. Wave shadow only.
+    prior_high_20d: float | None = None  # Max RTH high of the prior 20 sessions.
+    prior_low_20d: float | None = None  # Min RTH low of the prior 20 sessions.
 
     @property
     def day(self) -> str:
@@ -97,7 +100,13 @@ class Snapshot:
             if isinstance(value, (tuple, list)):
                 return [convert(v) for v in value]
             return value
-        return convert(asdict(self))
+        payload = convert(asdict(self))
+        # Absent on older saved rows. Omitting nulls keeps new snapshots
+        # byte-identical until a live baseline actually fills them in.
+        for key in ("prior_atr21", "prior_high_20d", "prior_low_20d"):
+            if payload.get(key) is None:
+                payload.pop(key, None)
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict) -> "Snapshot":

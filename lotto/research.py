@@ -8,6 +8,15 @@ from .patterns import detect_setup, path_features
 from .schwab import Schwab, epoch
 
 
+def _wave_fields(client, symbol, day):
+    levels = getattr(client, "levels", {}).get((symbol, day), {})
+    return {
+        "prior_atr21": getattr(client, "atrs21", {}).get((symbol, day)),
+        "prior_high_20d": levels.get("prior_high_20d"),
+        "prior_low_20d": levels.get("prior_low_20d"),
+    }
+
+
 def price_replay(symbol, day, response):
     end = datetime.fromisoformat(day).replace(hour=16, tzinfo=ET)
     # Reuse precisely the live baseline/bar construction with an in-memory data source.
@@ -26,7 +35,8 @@ def price_replay(symbol, day, response):
         prefix = bars[:index+1]
         current = prefix[-1]
         snap = Snapshot(symbol, current.end, current.close, current.end, prior_close, prefix, (),
-                        prior_atr=client.atrs.get((symbol,end.date())))
+                        prior_atr=client.atrs.get((symbol,end.date())),
+                        **_wave_fields(client, symbol, end.date()))
         problems = snap.problems(min_bars=5)
         if problems:
             continue
@@ -58,7 +68,8 @@ def price_replay(symbol, day, response):
         prefix = bars[:elapsed]
         current = prefix[-1]
         snap = Snapshot(symbol, current.end, current.close, current.end, prior_close, prefix, (),
-                        prior_atr=client.atrs.get((symbol,end.date())))
+                        prior_atr=client.atrs.get((symbol,end.date())),
+                        **_wave_fields(client, symbol, end.date()))
         sides = {}
         for side, direction in (("CALL",1),("PUT",-1)):
             metrics = path_features(snap,direction)
