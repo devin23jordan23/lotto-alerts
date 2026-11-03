@@ -10,8 +10,12 @@ COLUMNS = (
 )
 
 
-def export_wave_shadow(db_path: str, day: str, out_path: str) -> int:
-    """Write one day's shadow rows to CSV. Opens the database read-only."""
+def export_wave_shadow(db_path: str, day: str, out_path: str, family: str | None = None) -> int:
+    """Write one day's shadow rows to CSV. Opens the database read-only.
+
+    ``family`` limits the file to one kind of row, such as REJECT. Omit it to
+    export every family, including posted-card tags and reject reasons.
+    """
     uri = f"file:{Path(db_path).resolve()}?mode=ro"
     connection = sqlite3.connect(uri, uri=True)
     connection.row_factory = sqlite3.Row
@@ -20,9 +24,13 @@ def export_wave_shadow(db_path: str, day: str, out_path: str) -> int:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='wave_shadow'").fetchone()
         if present is None:
             raise SystemExit("wave_shadow table is not in this database")
-        rows = connection.execute(
-            "SELECT * FROM wave_shadow WHERE day=? ORDER BY at, symbol, family, side",
-            (day,)).fetchall()
+        query = "SELECT * FROM wave_shadow WHERE day=?"
+        args = [day]
+        if family:
+            query += " AND family=?"
+            args.append(family)
+        query += " ORDER BY at, symbol, family, side"
+        rows = connection.execute(query, args).fetchall()
     finally:
         connection.close()
     destination = Path(out_path)

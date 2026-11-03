@@ -24,12 +24,114 @@ QUICK_PULLIN = timedelta(minutes=10)
 
 def shadow_enabled(settings: Settings) -> bool:
     return bool(settings.wave_shadow or settings.wave_card_shadow or settings.wave_f4_shadow
-                or settings.wave_f7_shadow or settings.wave_f1_shadow or settings.wave_f2_shadow)
+                or settings.wave_f7_shadow or settings.wave_f1_shadow or settings.wave_f2_shadow
+                or settings.wave_reject_shadow)
 
 
 def _family_on(settings: Settings, flag: int) -> bool:
     """Master enables every family. A per-item flag enables that family alone."""
     return bool(settings.wave_shadow) or bool(flag)
+
+
+# First failing check in this order is the reject stage. The stock-volume pace/burst
+# check is the gate, not a stage: rows are written only after it passes.
+_REJECT_STAGES = (
+    ("score below threshold", "score"),
+    ("stock volume pace fading", "fade"),
+    ("no developing price setup", "setup"),
+    ("opposing volume dominates", "oppose"),
+    ("options activity not replenishing", "options"),
+    ("independent sector/peer confirmation missing", "confirm"),
+    ("too far from price trigger", "trigger"),
+    ("price invalidation already crossed", "invalid"),
+    ("insufficient room to retest prior extreme", "room"),
+    ("short history needs a triggered broad setup", "short"),
+    ("three-bar opening needs high-score drive", "open3"),
+    ("late entry needs near-strike confirmed momentum", "late"),
+)
+_VOLUME_GATE = "stock volume pace/burst below threshold"
+
+
+def volume_passed(candidate) -> bool:
+    return _VOLUME_GATE not in candidate.blockers
+
+
+def _reject_why(candidate, stage):
+    codes = [code for label, code in _REJECT_STAGES if label in candidate.blockers]
+    if stage:
+        codes.append(stage)
+    if not codes:
+        return "unspecified", "unspecified"
+    return codes[0], "|".join(codes)
+
+
+def _score_need(candidate, settings: Settings) -> float:
+    snap = candidate.snapshot
+    close = snap.session_end or snap.at.astimezone(ET).replace(hour=16, minute=0, second=0, microsecond=0)
+    late = close - snap.at <= timedelta(minutes=30)
+    short = candidate.metrics.get("options_window_minutes", 5) <= 2
+    return settings.min_score + (5 if short else 0) + (3 if late else 0)
+
+
+def reject_features(candidate, settings: Settings, stage, extra: dict) -> dict:
+    """Compact stage plus the values that explain it. Stable `why` is the dedupe key."""
+    primary, why = _reject_why(candidate, stage)
+    metrics = candidate.metrics
+    setup = candidate.setup
+    bar_end = candidate.snapshot.bars[-1].end.isoformat()
+    features = {
+        "stage": primary, "why": why, "n": 1, "start": bar_end, "last": bar_end,
+        "score": _num(candidate.score, 2), "need": _score_need(candidate, settings),
+        "pace": _num(metrics.get("pace_rvol"), 3),
+        "fade": _num(metrics.get("pace_persistence"), 3),
+        "acc": _num(metrics.get("option_acceleration"), 3),
+        "flow": metrics.get("options_persistent_20m"),
+        "cluster": metrics.get("cluster_size"),
+        "ctx": _num(metrics.get("context_directional_return"), 4),
+        "rel": _num(metrics.get("relative_sector_5m"), 4),
+        "peer": _num(metrics.get("peer_directional_return"), 4),
+        "mkt": _num(metrics.get("relative_market_5m"), 4),
+        "gap": _num(metrics.get("trigger_gap_atr"), 4),
+        "opp": _num(metrics.get("opposing_volume_share"), 3),
+        "setup": None if setup is None else setup.name,
+        "ctr": candidate.option.symbol,
+    }
+    for key, value in extra.items():
+        features[key] = _num(value, 2) if isinstance(value, float) else value
+    return features
+
+
+def log_rejects(store, settings: Settings, rejects, memory) -> None:
+    """One REJECT row per ticker per streak. Identical next-minute reasons increment n."""
+    for event in rejects:
+        candidate = event["candidate"]
+        if not volume_passed(candidate) or not candidate.snapshot.bars:
+            continue
+        snap = candidate.snapshot
+        features = reject_features(candidate, settings, event.get("stage"), event.get("extra") or {})
+        bar_end = snap.bars[-1].end
+        previous = store.db.execute(
+            """SELECT bar_end, side, features FROM wave_shadow
+               WHERE day=? AND symbol=? AND family='REJECT'
+               ORDER BY bar_end DESC LIMIT 1""",
+            (snap.day, snap.symbol)).fetchone()
+        if previous is not None:
+            prior = json.loads(previous["features"])
+            last = datetime.fromisoformat(prior.get("last") or previous["bar_end"])
+            if prior.get("why") == features["why"] and previous["side"] == candidate.option.side:
+                gap = bar_end - last
+                if gap == timedelta(0):
+                    continue
+                if gap == timedelta(minutes=1):
+                    prior["n"] = int(prior.get("n") or 1) + 1
+                    prior["last"] = features["last"]
+                    for key, value in features.items():
+                        if key not in {"n", "start", "last"}:
+                            prior[key] = value
+                    store.wave_shadow_features(snap.symbol, previous["bar_end"], "REJECT", previous["side"], prior)
+                    continue
+        _write(store, memory, _row(
+            snap, "REJECT", candidate.option.side, candidate.setup, features, candidate.option))
 
 
 def _num(value, places=4):
@@ -736,7 +838,7 @@ def _log_signals(store, settings, snap: Snapshot, memory) -> None:
                 card_id=_nearby_alert(store, snap, side)))
 
 
-def run_shadow(store, settings: Settings, fresh, posted, batch, memory) -> None:
+def run_shadow(store, settings: Settings, fresh, posted, batch, memory, rejects=()) -> None:
     stamps = [snap.at for snap in list(batch) + list(fresh)]
     stamps.extend(item[0].snapshot.at for item in posted)
     if stamps:
@@ -757,3 +859,5 @@ def run_shadow(store, settings: Settings, fresh, posted, batch, memory) -> None:
             settings.wave_f1_shadow, settings.wave_f2_shadow)):
         for snap in fresh:
             _log_signals(store, settings, snap, memory)
+    if _family_on(settings, settings.wave_reject_shadow) and rejects:
+        log_rejects(store, settings, rejects, memory)

@@ -44,6 +44,7 @@ class Settings:
     wave_f7_shadow: int = 0  # 5m/2m EMA backtest entry variants. Would-be rows only.
     wave_f1_shadow: int = 0  # 5m-close VWAP loss/reclaim. Would-be rows only.
     wave_f2_shadow: int = 0  # HOD/LOD failure. Would-be rows only.
+    wave_reject_shadow: int = 0  # Per-ticker reject stage after the stock-volume gate. Never posts.
     wave_cooldown_minutes: int = 15  # Shadow dedupe only. Does not change live cooldowns.
 
     def __post_init__(self):

@@ -18,9 +18,11 @@ from lotto.patterns import detect_setup, path_features
 from lotto.schwab import Schwab
 from lotto.shadow_export import export_wave_shadow
 from lotto.store import Store
+from lotto.features import Candidate
+from lotto.patterns import Setup
 from lotto.wave import (
     aggregate, card_tags, checkpoints, detect_f1, detect_f2, detect_f4, detect_f7,
-    detect_signals, pick_contract, run_shadow,
+    detect_signals, log_rejects, pick_contract, run_shadow, volume_passed,
 )
 
 
@@ -106,7 +108,7 @@ class WaveShadowTests(unittest.TestCase):
             int("false")
         settings = Settings()
         for name in ("wave_shadow", "wave_card_shadow", "wave_f4_shadow", "wave_f7_shadow",
-                     "wave_f1_shadow", "wave_f2_shadow"):
+                     "wave_f1_shadow", "wave_f2_shadow", "wave_reject_shadow"):
             self.assertIs(type(getattr(settings, name)), int)
             self.assertEqual(getattr(settings, name), 0)
         self.assertEqual(settings.wave_cooldown_minutes, 15)
@@ -153,15 +155,26 @@ class WaveShadowTests(unittest.TestCase):
         partial, partial_alerts = _play(Settings(
             wave_card_shadow=1, wave_f4_shadow=1, wave_f7_shadow=1,
             wave_f1_shadow=1, wave_f2_shadow=1))
+        reject_only, reject_alerts = _play(Settings(wave_reject_shadow=1))
         self.assertEqual(_dump(quiet), _dump(loud))
         self.assertEqual(_dump(quiet), _dump(partial))
+        self.assertEqual(_dump(quiet), _dump(reject_only))
         self.assertEqual(quiet_alerts, loud_alerts)
         self.assertEqual(quiet_alerts, partial_alerts)
+        self.assertEqual(quiet_alerts, reject_alerts)
         self.assertTrue(quiet_alerts)
         self.assertEqual(quiet.db.execute("SELECT COUNT(*) FROM wave_shadow").fetchone()[0], 0)
         families = {row[0] for row in loud.db.execute("SELECT family FROM wave_shadow")}
         self.assertIn("CARD", families)
-        self.assertTrue(families <= {"CARD", "CARD_PULLIN", "CARD_REJECT"})
+        self.assertIn("REJECT", families)
+        self.assertTrue(families <= {"CARD", "CARD_PULLIN", "CARD_REJECT", "REJECT"})
+        reject_families = {row[0] for row in reject_only.db.execute("SELECT family FROM wave_shadow")}
+        self.assertEqual(reject_families, {"REJECT"})
+        posted = {(row["symbol"], row["bar_end"]) for row in loud.db.execute(
+            "SELECT symbol, bar_end FROM wave_shadow WHERE family='CARD'")}
+        rejected = {(row["symbol"], row["bar_end"]) for row in loud.db.execute(
+            "SELECT symbol, bar_end FROM wave_shadow WHERE family='REJECT'")}
+        self.assertFalse(posted & rejected)
         for alert in loud_alerts:
             self.assertNotIn("WAVE_", json.dumps(alert["payload"]))
         # Stored evaluations keep the pre-shadow settings keys.
@@ -344,6 +357,53 @@ class WaveShadowTests(unittest.TestCase):
         self.assertEqual(card_tags(tagged, 1, spy)["v6"], 0)
         self.assertEqual(card_tags(replace(snap, prior_high_20d=100), 1, spy)["v6"], 1)
 
+    def _reject_candidate(self, at, blockers, score=64):
+        bar = Bar(at, 100, 101, 99, 100.4, 1000, 5000)
+        option = _option(at, delta=0.4, bid=0.4, ask=0.45)
+        snap = Snapshot("MSFT", at, 100.4, at, 90, (bar,), (option,), prior_atr=2)
+        metrics = {
+            "pace_rvol": 2.4, "pace_persistence": 0.91, "option_acceleration": 1.05,
+            "options_persistent_20m": 0, "cluster_size": 3, "context_directional_return": -0.0008,
+            "relative_sector_5m": 0.0004, "peer_directional_return": 0.0,
+            "relative_market_5m": -0.001, "trigger_gap_atr": 0.42,
+            "opposing_volume_share": 0.18, "options_window_minutes": 5,
+        }
+        return Candidate(snap, option, score, {}, metrics, [], False,
+                         setup=Setup("CONTINUATION", 101, 99), blockers=tuple(blockers))
+
+    def test_reject_rows_keep_one_streak_per_ticker_and_skip_the_volume_gate(self):
+        start = datetime(2026, 11, 3, 14, 0, tzinfo=ET)
+        blocked = ("options activity not replenishing", "independent sector/peer confirmation missing")
+        gate = self._reject_candidate(start, ("stock volume pace/burst below threshold",) + blocked)
+        self.assertFalse(volume_passed(gate))
+        first = self._reject_candidate(start, blocked)
+        second = self._reject_candidate(start + timedelta(minutes=1), blocked, score=66)
+        third = self._reject_candidate(start + timedelta(minutes=2), ("score below threshold",), score=61)
+        store = Store(":memory:")
+        memory = {"cap_warned": False}
+        settings = Settings(wave_reject_shadow=1)
+        log_rejects(store, settings, [{"candidate": gate, "stage": None, "extra": {}}], memory)
+        self.assertEqual(store.db.execute("SELECT COUNT(*) FROM wave_shadow").fetchone()[0], 0)
+        for candidate in (first, second, third):
+            log_rejects(store, settings, [{"candidate": candidate, "stage": None, "extra": {}}], memory)
+        rows = store.db.execute(
+            "SELECT bar_end, features FROM wave_shadow WHERE family='REJECT' ORDER BY bar_end").fetchall()
+        self.assertEqual(len(rows), 2)
+        streak = json.loads(rows[0]["features"])
+        self.assertEqual(streak["why"], "options|confirm")
+        self.assertEqual(streak["stage"], "options")
+        self.assertEqual(streak["n"], 2)
+        self.assertEqual(streak["score"], 66)
+        self.assertEqual(streak["need"], 70)
+        self.assertEqual(streak["acc"], 1.05)
+        self.assertAlmostEqual(streak["gap"], 0.42)
+        self.assertEqual(streak["flow"], 0)
+        self.assertIn("mkt", streak)
+        changed = json.loads(rows[1]["features"])
+        self.assertEqual(changed["stage"], "score")
+        self.assertEqual(changed["n"], 1)
+        self.assertEqual(changed["score"], 61)
+
     def test_contract_prefers_the_35_to_45_delta_band(self):
         at = datetime(2026, 11, 3, 10, 0, tzinfo=ET)
         bars = _bars(datetime(2026, 11, 3, 9, 30, tzinfo=ET), [(100, 101, 99, 100, 100)])
@@ -375,6 +435,8 @@ class WaveShadowTests(unittest.TestCase):
             store.db.close()
             destination = str(Path(directory) / "wave.csv")
             self.assertEqual(export_wave_shadow(path, today, destination), 1)
+            self.assertEqual(export_wave_shadow(path, today, str(Path(directory) / "f1.csv"), family="F1"), 1)
+            self.assertEqual(export_wave_shadow(path, today, str(Path(directory) / "rejects.csv"), family="REJECT"), 0)
             with open(destination, newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(rows[0]["family"], "F1")
