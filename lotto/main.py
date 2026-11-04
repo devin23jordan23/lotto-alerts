@@ -17,6 +17,7 @@ from .models import ET, Snapshot
 from .schwab import Schwab
 from .store import Store
 from .nightly import maybe_nightly, run_nightly
+from .day_export import maybe_day_export
 from .health import check
 from .audit import audit_store, diagnose_symbols, audit_coil_burst_hypothesis
 from .forensics import export_case, export_window_closed
@@ -245,6 +246,8 @@ def main():
                         LOG.info("Operational outage notice delivered")
                 except Exception as notice_exc:
                     LOG.warning("Operational outage notice unavailable (%s)",type(notice_exc).__name__)
+        # Flag 0 returns before any database or network work. Failures stay off the scan loop.
+        maybe_day_export(engine.settings, database, datetime.now(timezone.utc))
         if args.once:
             break
         wait = max(1, poll_seconds - (time.monotonic() - began))
