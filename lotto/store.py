@@ -7,7 +7,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from .features import Candidate, quote_ok
-from .config import Settings, STRATEGY_VERSION
+from .config import Settings, STRATEGY_VERSION, recorded_settings
 from .models import ET, Snapshot
 
 
@@ -115,7 +115,7 @@ class Store:
                             "side":candidate.option.side, "expiry":candidate.option.expiry.isoformat(),
                             "entry_ask":candidate.option.ask, "entry_bid":candidate.option.bid,
                             "spot":snap.spot, "blockers":candidate.blockers,
-                            "settings":asdict(settings)}
+                            "settings":recorded_settings(settings)}
                 self.db.execute("INSERT OR IGNORE INTO candidate_evaluations VALUES (?,?,?,?,?,?,?,?)",
                     (snap.day,snap.symbol,snap.at.isoformat(),candidate.option.symbol,STRATEGY_VERSION,
                      int(candidate.qualifying),candidate.score,json.dumps(features)))

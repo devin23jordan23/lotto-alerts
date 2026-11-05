@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from math import isfinite
 
 STRATEGY_VERSION = "phase1-three-bar-opening-drive-2026-10-14"
@@ -37,6 +37,11 @@ class Settings:
     max_building_distance_atr: float = .06
     max_entry_extension_atr: float = .25
     min_opening_bars: int = 3
+    # Operational only. The loader casts with type(default)(raw); bool("0") is True.
+    day_export: int = 0
+    day_export_hour: int = 16
+    day_export_minute: int = 20
+    day_export_backfill_days: int = 5
 
     def __post_init__(self):
         if any(not isfinite(value) for value in vars(self).values()):
@@ -60,3 +65,16 @@ class Settings:
                 or not 0 < self.entry_cutoff_minutes < 390
                 or not 0 < self.max_spread_fraction < 1 or self.max_spread_dollars <= 0):
             raise ValueError("Invalid phase-one quality limits")
+        if type(self.day_export) is not int or self.day_export not in (0, 1):
+            raise ValueError("day_export must be 0 or 1")
+        if type(self.day_export_hour) is not int or not 0 <= self.day_export_hour <= 23:
+            raise ValueError("Invalid day export hour")
+        if type(self.day_export_minute) is not int or not 0 <= self.day_export_minute <= 59:
+            raise ValueError("Invalid day export minute")
+        if type(self.day_export_backfill_days) is not int or not 0 <= self.day_export_backfill_days <= 366:
+            raise ValueError("Invalid day export backfill")
+
+
+def recorded_settings(settings: Settings) -> dict:
+    """Strategy thresholds stored on candidate rows. Export flags stay operational."""
+    return {key: value for key, value in asdict(settings).items() if not key.startswith("day_export")}
