@@ -1,13 +1,16 @@
-"""Read-only weekday slices of the live database, uploaded to Google Drive.
+"""Read-only weekday slices of the live database, uploaded to Drive or S3.
 
 The scanner calls ``maybe_day_export`` once per cycle. With ``day_export`` left at
 0 the call returns before it touches the database, the network, or alert state.
 When it is 1, a daemon thread runs after the configured America/New_York clock
 on weekdays. That thread never writes the data volume: the source is opened
 ``mode=ro``, and the slice, gzip, and manifest live under ``/tmp`` until upload.
+``day_export_target`` 0 keeps the Google Drive upload. 1 signs a single PutObject
+for the same archive names on an S3-compatible bucket.
 """
 import base64
 import gzip
+import hmac
 import json
 import logging
 import os
@@ -15,6 +18,7 @@ import re
 import sqlite3
 import threading
 import time
+import xml.etree.ElementTree as ElementTree
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -33,6 +37,7 @@ _DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SHA256_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
 _DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
+_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 _LOCK = threading.Lock()
 _STATE = {"thread": None, "done": set(), "retry_at": 0.0}
 
@@ -403,6 +408,272 @@ def upload_file(token: str, folder_id: str, name: str, path: Path, mime: str, op
             response.read()
 
 
+def _aws_quote(value) -> str:
+    return quote(str(value), safe="-_.~")
+
+
+def _canonical_query(items) -> str:
+    encoded = sorted((_aws_quote(key), _aws_quote(value)) for key, value in items)
+    return "&".join(f"{key}={value}" for key, value in encoded)
+
+
+def _encode_key(key: str) -> str:
+    return "/".join(_aws_quote(part) for part in key.split("/"))
+
+
+def _canonical_headers(headers):
+    folded = {}
+    for name, value in headers.items():
+        key = name.strip().lower()
+        text = " ".join(str(value).strip().split())
+        folded[key] = text if key not in folded else folded[key] + "," + text
+    names = sorted(folded)
+    return "".join(f"{name}:{folded[name]}\n" for name in names), ";".join(names)
+
+
+def sigv4_authorization(method, uri, query, headers, payload_hash, *,
+                        access_key, secret_key, region, service="s3") -> str:
+    """AWS Signature Version 4 Authorization header for one S3 request.
+
+    ``headers`` are the signed headers only. ``query`` is already canonical.
+    The secret is an HMAC key and is not copied into the header.
+    """
+    canonical_headers, signed = _canonical_headers(headers)
+    amz_date = None
+    for name, value in headers.items():
+        if name.strip().lower() == "x-amz-date":
+            amz_date = " ".join(str(value).strip().split())
+    if not amz_date or len(amz_date) < 8:
+        raise RuntimeError("day export signature date is invalid")
+    canonical_request = (
+        f"{method.upper()}\n{uri}\n{query or ''}\n{canonical_headers}\n{signed}\n{payload_hash}"
+    )
+    datestamp = amz_date[:8]
+    scope = f"{datestamp}/{region}/{service}/aws4_request"
+    hashed = sha256(canonical_request.encode("utf-8")).hexdigest()
+    string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{hashed}"
+    key = ("AWS4" + secret_key).encode("utf-8")
+    for part in (datestamp, region, service, "aws4_request"):
+        key = hmac.new(key, part.encode("utf-8"), sha256).digest()
+    signature = hmac.new(key, string_to_sign.encode("utf-8"), sha256).hexdigest()
+    return (
+        f"AWS4-HMAC-SHA256 Credential={access_key}/{scope}, "
+        f"SignedHeaders={signed}, Signature={signature}"
+    )
+
+
+class _S3:
+    def __init__(self, bucket, access_key, secret_key, region, prefix, url_style, host):
+        self.bucket = bucket
+        self.access_key = access_key
+        self.secret_key = secret_key
+        self.region = region
+        self.prefix = prefix
+        self.url_style = url_style
+        self.host = host
+
+
+def _credential(value):
+    if not isinstance(value, str):
+        raise RuntimeError("day export is not configured")
+    value = value.strip()
+    if not value or len(value) > 256 or any(ord(ch) < 33 or ord(ch) > 126 for ch in value):
+        raise RuntimeError("day export is not configured")
+    return value
+
+
+def _normalize_prefix(raw):
+    if raw is None:
+        raw = "day-export/"
+    if not isinstance(raw, str):
+        raise RuntimeError("day export prefix is invalid")
+    if raw.startswith("/") or any(ord(ch) < 33 or ch in "?#\\" for ch in raw):
+        raise RuntimeError("day export prefix is invalid")
+    if raw and not raw.endswith("/"):
+        raw += "/"
+    parts = [part for part in raw.split("/") if part]
+    if any(part in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", part) for part in parts):
+        raise RuntimeError("day export prefix is invalid")
+    return "".join(part + "/" for part in parts)
+
+
+def _s3_config() -> _S3:
+    endpoint = os.getenv("LOTTO_S3_ENDPOINT", "").strip()
+    bucket = os.getenv("LOTTO_S3_BUCKET", "").strip()
+    access_raw = os.getenv("LOTTO_S3_ACCESS_KEY_ID", "")
+    secret_raw = os.getenv("LOTTO_S3_SECRET_ACCESS_KEY", "")
+    if not endpoint or not bucket or not access_raw.strip() or not secret_raw.strip():
+        raise RuntimeError("day export is not configured")
+    access_key = _credential(access_raw)
+    secret_key = _credential(secret_raw)
+    region = os.getenv("LOTTO_S3_REGION", "auto")
+    region = "auto" if region is None or not region.strip() else region.strip().lower()
+    style = os.getenv("LOTTO_S3_URL_STYLE", "virtual")
+    style = "virtual" if style is None or not style.strip() else style.strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", bucket):
+        raise RuntimeError("day export bucket is invalid")
+    if not re.fullmatch(r"[a-z0-9-]{1,32}", region):
+        raise RuntimeError("day export region is invalid")
+    if style not in ("virtual", "path"):
+        raise RuntimeError("day export url style is invalid")
+    parsed = urlparse(endpoint)
+    if (parsed.scheme != "https" or parsed.username or parsed.password or not parsed.hostname
+            or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+        raise RuntimeError("day export endpoint is invalid")
+    host = f"{bucket}.{parsed.hostname}" if style == "virtual" else parsed.hostname
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    return _S3(bucket, access_key, secret_key, region, _normalize_prefix(os.getenv("LOTTO_S3_PREFIX")), style, host)
+
+
+def _list_uri(cfg: _S3) -> str:
+    if cfg.url_style == "path":
+        return "/" + _aws_quote(cfg.bucket)
+    return "/"
+
+
+def _object_uri(cfg: _S3, key: str) -> str:
+    encoded = _encode_key(key)
+    if cfg.url_style == "path":
+        return "/" + _aws_quote(cfg.bucket) + "/" + encoded
+    return "/" + encoded
+
+
+def _s3_open(cfg: _S3, method, *, canonical_uri, query="", content_type=None, body_path=None,
+             payload_hash=None, opener, timeout, error):
+    payload_hash = payload_hash or _EMPTY_SHA256
+    if not re.fullmatch(r"[0-9a-f]{64}", payload_hash):
+        raise RuntimeError(error)
+    amz_date = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    signed = {
+        "host": cfg.host,
+        "x-amz-content-sha256": payload_hash,
+        "x-amz-date": amz_date,
+    }
+    if content_type:
+        signed["content-type"] = content_type
+    authorization = sigv4_authorization(
+        method, canonical_uri, query, signed, payload_hash,
+        access_key=cfg.access_key, secret_key=cfg.secret_key, region=cfg.region,
+    )
+    send = {
+        "Host": cfg.host,
+        "x-amz-content-sha256": payload_hash,
+        "x-amz-date": amz_date,
+        "Authorization": authorization,
+    }
+    if content_type:
+        send["Content-Type"] = content_type
+    data = None
+    if body_path is not None:
+        send["Content-Length"] = str(Path(body_path).stat().st_size)
+        data = Path(body_path).open("rb")
+    url = f"https://{cfg.host}{canonical_uri}"
+    if query:
+        url = f"{url}?{query}"
+    try:
+        request = Request(url, data=data, method=method, headers=send)
+        with opener(request, timeout=timeout) as response:
+            status = getattr(response, "status", None)
+            body = response.read()
+        if status is not None and int(status) >= 400:
+            raise RuntimeError(error)
+        return body or b""
+    finally:
+        if data is not None:
+            data.close()
+
+
+def _xml_local(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+def _parse_list(body):
+    try:
+        root = ElementTree.fromstring(body)
+    except ElementTree.ParseError:
+        raise RuntimeError("day export listing was refused") from None
+    if _xml_local(root.tag) != "ListBucketResult":
+        raise RuntimeError("day export listing was refused")
+    keys = []
+    truncated = False
+    token = None
+    for child in list(root):
+        name = _xml_local(child.tag)
+        if name == "Contents":
+            for inner in list(child):
+                if _xml_local(inner.tag) == "Key" and inner.text:
+                    keys.append(inner.text)
+        elif name == "IsTruncated":
+            truncated = (child.text or "").strip().lower() == "true"
+        elif name == "NextContinuationToken" and child.text:
+            token = child.text
+    return keys, truncated, token
+
+
+def _object_name(prefix, key):
+    if not key.startswith(prefix):
+        return None
+    name = key[len(prefix):]
+    if not name or "/" in name:
+        return None
+    if name.startswith("live_") and name.endswith((".sqlite3.gz", ".manifest.json")):
+        return name
+    return None
+
+
+def list_s3_archive_names(opener=urlopen) -> set:
+    """Archive file names already stored under the configured S3 prefix."""
+    return _s3_names(_s3_config(), opener)
+
+
+def _s3_names(cfg: _S3, opener) -> set:
+    names = set()
+    token = None
+    for _ in range(32):
+        items = [("list-type", "2"), ("max-keys", "1000"), ("prefix", cfg.prefix)]
+        if token:
+            items.append(("continuation-token", token))
+        body = _s3_open(
+            cfg, "GET", canonical_uri=_list_uri(cfg), query=_canonical_query(items),
+            opener=opener, timeout=60, error="day export listing was refused",
+        )
+        keys, truncated, token = _parse_list(body)
+        for key in keys:
+            name = _object_name(cfg.prefix, key)
+            if name:
+                names.add(name)
+        if not truncated:
+            return names
+        if not token:
+            raise RuntimeError("day export listing was refused")
+    raise RuntimeError("day export listing was refused")
+
+
+def _s3_put(cfg: _S3, name, path, mime, digest, opener):
+    _s3_open(
+        cfg, "PUT", canonical_uri=_object_uri(cfg, cfg.prefix + name),
+        content_type=mime, body_path=path, payload_hash=digest,
+        opener=opener, timeout=600, error="day export upload was refused",
+    )
+
+
+def _export_target(value=None) -> int:
+    if value is None:
+        value = os.getenv("LOTTO_DAY_EXPORT_TARGET", "0")
+    if isinstance(value, bool):
+        raise ValueError("day_export_target must be 0 or 1")
+    if isinstance(value, int):
+        target = value
+    elif isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        target = int(value.strip())
+    else:
+        raise ValueError("day_export_target must be 0 or 1")
+    if type(target) is not int or target not in (0, 1):
+        raise ValueError("day_export_target must be 0 or 1")
+    return target
+
+
 def _folder_id():
     folder = os.getenv("GDRIVE_FOLDER_ID", "").strip()
     if not folder or not all(ch.isalnum() or ch in "-_" for ch in folder):
@@ -427,7 +698,7 @@ def _remove(path: Path):
         Path(str(path) + suffix).unlink(missing_ok=True)
 
 
-def _export_one(database, day, token, folder, names, opener, work_dir: Path):
+def _export_one(database, day, names, upload, work_dir: Path):
     gz_name = f"live_{day}.sqlite3.gz"
     manifest_name = f"live_{day}.manifest.json"
     if gz_name in names:
@@ -450,9 +721,10 @@ def _export_one(database, day, token, folder, names, opener, work_dir: Path):
             "source_mtime": datetime.fromtimestamp(Path(database).stat().st_mtime, timezone.utc).isoformat(),
             "commit": code_commit(),
         }
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
-        upload_file(token, folder, gz_name, gz_path, "application/gzip", opener)
-        upload_file(token, folder, manifest_name, manifest_path, "application/json", opener)
+        manifest_text = json.dumps(manifest, indent=2, sort_keys=True)
+        manifest_path.write_text(manifest_text)
+        upload(gz_name, gz_path, "application/gzip", digest)
+        upload(manifest_name, manifest_path, "application/json", sha256(manifest_text.encode()).hexdigest())
         names.add(gz_name)
         names.add(manifest_name)
         LOG.info("Day export uploaded: %s", day)
@@ -462,7 +734,7 @@ def _export_one(database, day, token, folder, names, opener, work_dir: Path):
         manifest_path.unlink(missing_ok=True)
 
 
-def run_day_exports(database, dates, completed, *, opener=None, work_dir=None) -> int:
+def run_day_exports(database, dates, completed, *, opener=None, work_dir=None, target=None) -> int:
     """Upload each missing session date. Returns how many dates still need a retry."""
     opener = opener or urlopen
     root = Path(work_dir) if work_dir is not None else Path("/tmp")
@@ -470,8 +742,18 @@ def run_day_exports(database, dates, completed, *, opener=None, work_dir=None) -
     if source.parent == root.resolve():
         raise RuntimeError("day export refuses to write beside the source database")
     root.mkdir(parents=True, exist_ok=True)
-    token = fetch_access_token(_credentials(), opener)
-    names = list_archive_names(token, _folder_id(), opener)
+    chosen = _export_target(target)
+    if chosen == 1:
+        cfg = _s3_config()
+        names = _s3_names(cfg, opener)
+        def upload(name, path, mime, digest, cfg=cfg):
+            _s3_put(cfg, name, path, mime, digest, opener)
+    else:
+        token = fetch_access_token(_credentials(), opener)
+        folder = _folder_id()
+        names = list_archive_names(token, folder, opener)
+        def upload(name, path, mime, digest, token=token, folder=folder):
+            upload_file(token, folder, name, path, mime, opener)
     failures = 0
     for day in dates:
         if not _DAY.fullmatch(day):
@@ -479,7 +761,7 @@ def run_day_exports(database, dates, completed, *, opener=None, work_dir=None) -
             LOG.warning("Day export failed for %s (%s)", day, "ValueError")
             continue
         try:
-            _export_one(source, day, token, _folder_id(), names, opener, root)
+            _export_one(source, day, names, upload, root)
             completed.add(day)
         except Exception as exc:
             failures += 1
@@ -533,7 +815,12 @@ def maybe_day_export(settings, database, now, *, runner=run_day_exports, retry_s
         if local < cutoff:
             return None
         dates = weekday_window(local.date(), settings.day_export_backfill_days)
-        return _start(database, dates, runner, retry_seconds)
+        export = runner
+        if runner is run_day_exports:
+            chosen = settings.day_export_target
+            def export(database, pending, completed, _chosen=chosen):
+                return run_day_exports(database, pending, completed, target=_chosen)
+        return _start(database, dates, export, retry_seconds)
     except Exception as exc:
         LOG.warning("Day export unavailable (%s)", type(exc).__name__)
         return None
