@@ -208,6 +208,10 @@ promotion occurs.
 - Dedicated channel: `DISCORD_LOTTO_WEBHOOK`.
 - Set `LOTTO_SEND_ALERTS=true` for delivery. False is shadow observation.
 - Set the complete `LOTTO_UNIVERSE`; see [.env.example](.env.example).
+- `LOTTO_DAY_EXPORT=0` leaves alerts and Discord posting unchanged. `1` uploads
+  each finished weekday session. `LOTTO_DAY_EXPORT_TARGET=0` uses Google Drive.
+  `1` uses the Railway bucket `lotto-day-export`; the reference-variable mapping
+  is in [.env.example](.env.example).
 
 The worker logs a startup preflight. It reads quotes, a sample chain, session
 hours, database integrity and webhook metadata. It sends no test message.

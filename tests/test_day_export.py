@@ -2,6 +2,7 @@ import base64
 import gzip
 import io
 import json
+import os
 import sqlite3
 import subprocess
 import tempfile
@@ -12,7 +13,7 @@ from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote, urlparse
 
 from lotto.config import Settings, recorded_settings
 from lotto.day_export import (
@@ -21,9 +22,11 @@ from lotto.day_export import (
     fetch_access_token,
     gzip_sha256,
     list_archive_names,
+    list_s3_archive_names,
     maybe_day_export,
     open_readonly,
     run_day_exports,
+    sigv4_authorization,
     slice_session,
     weekday_window,
 )
@@ -36,6 +39,10 @@ from lotto.store import Store, read_snapshot
 
 
 SECRET = "SUPER_SECRET_KEY_MATERIAL"
+ACCESS = "AKIALOTTOEXPORTKEY"
+S3_ENDPOINT = "https://t3.storageapi.dev"
+S3_BUCKET = "lotto-bucket-abc123"
+S3_HOST = "lotto-bucket-abc123.t3.storageapi.dev"
 DAY = "2026-11-02"
 OTHER = "2026-11-03"
 
@@ -120,7 +127,8 @@ class DaySliceTests(unittest.TestCase):
         self.assertEqual(plain[1][0][6], "sent")
         stored = json.loads(plain[2][0][6])["settings"]
         self.assertNotIn("day_export", stored)
-        self.assertEqual(stored, recorded_settings(Settings(day_export=1)))
+        self.assertNotIn("day_export_target", stored)
+        self.assertEqual(stored, recorded_settings(Settings(day_export=1, day_export_target=1)))
 
     def test_env_flag_stays_an_int_zero(self):
         with patch.dict("os.environ", {
@@ -128,19 +136,28 @@ class DaySliceTests(unittest.TestCase):
             "LOTTO_DAY_EXPORT_HOUR": "16",
             "LOTTO_DAY_EXPORT_MINUTE": "20",
             "LOTTO_DAY_EXPORT_BACKFILL_DAYS": "5",
+            "LOTTO_DAY_EXPORT_TARGET": "0",
         }):
             settings = env_settings()
         self.assertEqual(settings.day_export, 0)
         self.assertIs(type(settings.day_export), int)
+        self.assertEqual(settings.day_export_target, 0)
+        self.assertIs(type(settings.day_export_target), int)
         self.assertEqual((settings.day_export_hour, settings.day_export_minute, settings.day_export_backfill_days), (16, 20, 5))
-        with patch.dict("os.environ", {"LOTTO_DAY_EXPORT": "1"}):
-            self.assertEqual(env_settings().day_export, 1)
+        with patch.dict("os.environ", {"LOTTO_DAY_EXPORT": "1", "LOTTO_DAY_EXPORT_TARGET": "1"}):
+            enabled = env_settings()
+        self.assertEqual(enabled.day_export, 1)
+        self.assertEqual(enabled.day_export_target, 1)
+        self.assertIs(type(enabled.day_export_target), int)
         for bad in ({"LOTTO_DAY_EXPORT": "2"}, {"LOTTO_DAY_EXPORT_HOUR": "24"},
-                    {"LOTTO_DAY_EXPORT_MINUTE": "60"}, {"LOTTO_DAY_EXPORT_BACKFILL_DAYS": "-1"}):
+                    {"LOTTO_DAY_EXPORT_MINUTE": "60"}, {"LOTTO_DAY_EXPORT_BACKFILL_DAYS": "-1"},
+                    {"LOTTO_DAY_EXPORT_TARGET": "2"}, {"LOTTO_DAY_EXPORT_TARGET": "true"}):
             with patch.dict("os.environ", bad), self.assertRaises(ValueError):
                 env_settings()
         with self.assertRaises(ValueError):
             Settings(day_export=True)
+        with self.assertRaises(ValueError):
+            Settings(day_export_target=True)
 
     def test_window_includes_recent_weekdays_only_after_the_close(self):
         today = date(2026, 11, 4)
@@ -308,6 +325,11 @@ class DaySliceTests(unittest.TestCase):
                     "marker": SECRET,
                 }),
                 "RAILWAY_GIT_COMMIT_SHA": "abc123",
+                "LOTTO_DAY_EXPORT_TARGET": "0",
+                "LOTTO_S3_ENDPOINT": S3_ENDPOINT,
+                "LOTTO_S3_BUCKET": S3_BUCKET,
+                "LOTTO_S3_ACCESS_KEY_ID": ACCESS,
+                "LOTTO_S3_SECRET_ACCESS_KEY": SECRET,
             }
             with patch.dict("os.environ", env), self.assertLogs("lotto.day_export", level="INFO") as logs:
                 failures = run_day_exports(source, [DAY, OTHER], completed := set(), opener=drive, work_dir=work)
@@ -406,6 +428,203 @@ class DaySliceTests(unittest.TestCase):
             list_archive_names("token", "folder", opener),
             {"live_2026-11-02.sqlite3.gz", "live_2026-11-02.manifest.json"})
 
+    def test_sigv4_matches_the_aws_get_object_example(self):
+        # AWS Signature Version 4 GET Object example:
+        # examplebucket/test.txt at 20130524T000000Z, us-east-1.
+        payload = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        headers = {
+            "host": "examplebucket.s3.amazonaws.com",
+            "range": "bytes=0-9",
+            "x-amz-content-sha256": payload,
+            "x-amz-date": "20130524T000000Z",
+        }
+        authorization = sigv4_authorization(
+            "GET", "/test.txt", "", headers, payload,
+            access_key="AKIAIOSFODNN7EXAMPLE",
+            secret_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            region="us-east-1",
+        )
+        self.assertEqual(authorization, (
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, "
+            "SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, "
+            "Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
+        ))
+        self.assertNotIn("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", authorization)
+
+    def test_s3_list_pages_in_path_style_and_ignores_other_keys(self):
+        pages = [
+            """<?xml version="1.0"?>
+            <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+              <IsTruncated>true</IsTruncated>
+              <NextContinuationToken>next/page</NextContinuationToken>
+              <Contents><Key>day-export/live_2026-11-02.sqlite3.gz</Key></Contents>
+              <Contents><Key>notes.txt</Key></Contents>
+            </ListBucketResult>""",
+            """<ListBucketResult>
+              <IsTruncated>false</IsTruncated>
+              <Contents><Key>day-export/live_2026-11-02.manifest.json</Key></Contents>
+              <Contents><Key>day-export/nested/live_other.sqlite3.gz</Key></Contents>
+            </ListBucketResult>""",
+        ]
+        seen = []
+
+        def opener(request, timeout=None):
+            seen.append(request)
+            assert_signed(self, request)
+            return Response(pages[len(seen) - 1])
+
+        env = {
+            "LOTTO_S3_ENDPOINT": S3_ENDPOINT,
+            "LOTTO_S3_BUCKET": S3_BUCKET,
+            "LOTTO_S3_ACCESS_KEY_ID": ACCESS,
+            "LOTTO_S3_SECRET_ACCESS_KEY": SECRET,
+            "LOTTO_S3_URL_STYLE": "path",
+        }
+        with patch.dict("os.environ", env):
+            os.environ.pop("LOTTO_S3_PREFIX", None)
+            os.environ.pop("LOTTO_S3_REGION", None)
+            names = list_s3_archive_names(opener)
+        self.assertEqual(names, {"live_2026-11-02.sqlite3.gz", "live_2026-11-02.manifest.json"})
+        self.assertEqual(len(seen), 2)
+        first, second = (request.full_url for request in seen)
+        self.assertTrue(first.startswith(f"{S3_ENDPOINT}/{S3_BUCKET}?"))
+        self.assertIn("list-type=2&max-keys=1000&prefix=day-export%2F", first)
+        self.assertIn(
+            "continuation-token=next%2Fpage&list-type=2&max-keys=1000&prefix=day-export%2F",
+            second,
+        )
+        self.assertEqual(request_headers(seen[0])["host"], "t3.storageapi.dev")
+        self.assertIn("/auto/s3/aws4_request", request_headers(seen[0])["authorization"])
+        self.assertNotIn(SECRET, "\n".join(request.full_url for request in seen))
+
+    def test_s3_upload_is_idempotent_and_cleans_temp_files(self):
+        bucket = Bucket()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "data" / "live.sqlite3"
+            work = root / "work"
+            self.build_fixture(source)
+            original = source.read_bytes()
+            env = {
+                "LOTTO_DAY_EXPORT_TARGET": "1",
+                "LOTTO_S3_ENDPOINT": S3_ENDPOINT,
+                "LOTTO_S3_BUCKET": S3_BUCKET,
+                "LOTTO_S3_ACCESS_KEY_ID": ACCESS,
+                "LOTTO_S3_SECRET_ACCESS_KEY": SECRET,
+                "LOTTO_S3_REGION": "auto",
+                "LOTTO_S3_PREFIX": "day-export/",
+                "LOTTO_S3_URL_STYLE": "virtual",
+                "RAILWAY_GIT_COMMIT_SHA": "abc123",
+            }
+            with patch.dict("os.environ", env), self.assertLogs("lotto.day_export", level="INFO") as logs:
+                failures = run_day_exports(source, [DAY, OTHER], completed := set(), opener=bucket, work_dir=work)
+            text = "\n".join(logs.output)
+            self.assertEqual(failures, 0)
+            self.assertEqual(completed, {DAY, OTHER})
+            self.assertNotIn(SECRET, text)
+            self.assertNotIn(ACCESS, text)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(list(work.iterdir()), [])
+            self.assertEqual(sorted(path.name for path in source.parent.iterdir()), ["live.sqlite3"])
+            self.assertEqual(bucket.puts, 4)
+            self.assertTrue(all(S3_HOST in request.full_url for request in bucket.requests))
+            self.assertFalse(any("googleapis" in request.full_url for request in bucket.requests))
+            for request in bucket.requests:
+                assert_signed(self, request)
+                headers = request_headers(request)
+                self.assertEqual(headers["host"], S3_HOST)
+                if request.get_method() == "PUT":
+                    key = unquote(urlparse(request.full_url).path.lstrip("/"))
+                    self.assertEqual(headers["x-amz-content-sha256"], sha256(bucket.objects[key]).hexdigest())
+                    self.assertTrue(key.startswith("day-export/live_"))
+                else:
+                    self.assertEqual(headers["x-amz-content-sha256"], sha256(b"").hexdigest())
+                    self.assertIn("prefix=day-export%2F", request.full_url)
+            for day, symbol in ((DAY, "LOCAL"), (OTHER, "NEXT")):
+                archive = bucket.objects[f"day-export/live_{day}.sqlite3.gz"]
+                manifest = json.loads(bucket.objects[f"day-export/live_{day}.manifest.json"])
+                self.assertEqual(manifest["date"], day)
+                self.assertEqual(manifest["sha256"], sha256(archive).hexdigest())
+                self.assertEqual(manifest["commit"], "abc123")
+                self.assertIn("source_mtime", manifest)
+                self.assertEqual(manifest["row_counts"]["reference_symbols"], 5)
+                with gzip.open(io.BytesIO(archive), "rb") as packed:
+                    restored = root / f"{day}.sqlite3"
+                    restored.write_bytes(packed.read())
+                conn = sqlite3.connect(restored)
+                self.addCleanup(conn.close)
+                self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                self.assertEqual(schema_sql(conn), schema_sql(sqlite3.connect(source)))
+                symbols = column(conn, "snapshots", "symbol")
+                self.assertIn(symbol, symbols)
+                self.assertNotIn("OUT", symbols)
+            self.assertEqual(column(sqlite3.connect(root / f"{DAY}.sqlite3"), "snapshots", "symbol"), ["IN", "LOCAL"])
+            self.assertEqual(column(sqlite3.connect(root / f"{OTHER}.sqlite3"), "snapshots", "symbol"), ["NEXT"])
+            puts = bucket.puts
+            with patch.dict("os.environ", env):
+                again = set()
+                failures = run_day_exports(root / "data" / "missing.sqlite3", [DAY, OTHER], again,
+                                            opener=bucket, work_dir=work)
+            self.assertEqual(failures, 0)
+            self.assertEqual(again, {DAY, OTHER})
+            self.assertEqual(bucket.puts, puts)
+            self.assertEqual(list(work.iterdir()), [])
+
+    def test_scheduler_s3_target_does_not_call_drive(self):
+        bucket = Bucket()
+        names = (
+            "live_2026-11-04.sqlite3", "live_2026-11-04.sqlite3.gz", "live_2026-11-04.manifest.json",
+            "live_2026-11-04.sqlite3-journal", "live_2026-11-04.sqlite3-wal", "live_2026-11-04.sqlite3-shm",
+        )
+        for name in names:
+            Path("/tmp", name).unlink(missing_ok=True)
+        self.addCleanup(lambda: [Path("/tmp", name).unlink(missing_ok=True) for name in names])
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "nested" / "live.sqlite3"
+            source.parent.mkdir()
+            sqlite3.connect(source).close()
+            env = {
+                "LOTTO_S3_ENDPOINT": S3_ENDPOINT,
+                "LOTTO_S3_BUCKET": S3_BUCKET,
+                "LOTTO_S3_ACCESS_KEY_ID": ACCESS,
+                "LOTTO_S3_SECRET_ACCESS_KEY": SECRET,
+            }
+            when = datetime(2026, 11, 4, 16, 20, tzinfo=ET)
+            settings = Settings(day_export=1, day_export_target=1, day_export_backfill_days=1)
+            with patch.dict("os.environ", env), patch("lotto.day_export.urlopen", bucket):
+                os.environ.pop("LOTTO_DAY_EXPORT_TARGET", None)
+                thread = maybe_day_export(settings, source, when)
+                self.assertIsNotNone(thread)
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+                self.assertIsNone(maybe_day_export(settings, source, when))
+        self.assertEqual(bucket.puts, 2)
+        self.assertTrue(any(request.get_method() == "GET" for request in bucket.requests))
+        self.assertTrue(all(S3_HOST in request.full_url for request in bucket.requests))
+        self.assertFalse(any("googleapis" in request.full_url for request in bucket.requests))
+        for request in bucket.requests:
+            assert_signed(self, request)
+        self.assertTrue(all(not (Path("/tmp") / name).exists() for name in names))
+
+
+def request_headers(request):
+    return {key.lower(): value for key, value in request.header_items()}
+
+
+def assert_signed(test, request, *, secret=SECRET, access=ACCESS, region="auto"):
+    headers = request_headers(request)
+    parsed = urlparse(request.full_url)
+    signed_names = headers["authorization"].split("SignedHeaders=", 1)[1].split(",", 1)[0]
+    used = {name: headers[name] for name in signed_names.split(";")}
+    expected = sigv4_authorization(
+        request.get_method(), parsed.path, parsed.query, used, headers["x-amz-content-sha256"],
+        access_key=access, secret_key=secret, region=region,
+    )
+    test.assertEqual(headers["authorization"], expected)
+    test.assertNotIn(secret, request.full_url)
+    for value in headers.values():
+        test.assertNotIn(secret, value)
+
 
 class Drive:
     def __init__(self):
@@ -433,6 +652,33 @@ class Drive:
             self.puts += 1
             return Response(b"{}")
         raise AssertionError(url)
+
+
+class Bucket:
+    def __init__(self):
+        self.objects = {}
+        self.puts = 0
+        self.requests = []
+
+    def __call__(self, request, timeout=None):
+        self.requests.append(request)
+        method = request.get_method()
+        parsed = urlparse(request.full_url)
+        if method == "GET":
+            keys = "".join(f"<Contents><Key>{key}</Key></Contents>" for key in sorted(self.objects))
+            body = (
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+                f"{keys}<IsTruncated>false</IsTruncated></ListBucketResult>"
+            )
+            return Response(body)
+        if method == "PUT":
+            data = request.data.read() if hasattr(request.data, "read") else request.data
+            key = unquote(parsed.path.lstrip("/"))
+            self.objects[key] = data
+            self.puts += 1
+            return Response(b"")
+        raise AssertionError(request.full_url)
 
 
 if __name__ == "__main__":
