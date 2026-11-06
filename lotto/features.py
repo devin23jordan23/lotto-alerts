@@ -9,7 +9,7 @@ from math import isfinite, log
 
 from .config import Settings
 from .models import ET, Option, Snapshot
-from .patterns import Setup, detect_setup, path_features
+from .patterns import Setup, dead_market_metrics, detect_setup, path_features
 
 
 def clamp(value: float) -> float:
@@ -313,6 +313,22 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         close = snap.session_end or snap.at.astimezone(ET).replace(hour=16,minute=0,second=0,microsecond=0)
         late = close-snap.at <= timedelta(minutes=30)
         short = window_minutes <= 2
+        dead = dead_market_metrics(snap, direction)
+        metrics.update({"dm_" + k: v for k, v in dead.items()})
+        minute = dead["session_minute"]
+        dead_zone = (dead["net30_atr"] is not None
+                     and settings.dead_zone_start_minute <= minute < settings.dead_zone_end_minute
+                     and dead["net30_atr"] < settings.dead_zone_max_net30_atr
+                     and dead["vwap_abs_atr"] < settings.dead_zone_max_vwap_atr)
+        burst_flat = (dead["volume_ratio_5_25"] is not None and minute >= settings.burst_flat_start_minute
+                      and dead["volume_ratio_5_25"] >= settings.burst_flat_min_volume_ratio
+                      and dead["net5_atr"] < settings.burst_flat_max_net5_atr)
+        spent = (dead["off_extreme_atr"] is not None and metrics["atr_available"]
+                 and minute >= settings.spent_start_minute
+                 and metrics["session_range_atr"] >= settings.spent_min_range_atr
+                 and dead["off_extreme_atr"] >= settings.spent_min_off_extreme_atr)
+        # Shadow flags are logged with every candidate (mode 1); only mode 2 blocks.
+        metrics.update({"dm_dead_zone": int(dead_zone), "dm_burst_flat": int(burst_flat), "dm_spent": int(spent)})
         checks = {
             "score below threshold": score >= settings.min_score+(5 if short else 0)+(3 if late else 0),
             "stock volume pace/burst below threshold": metrics["pace_rvol"] >= settings.min_pace_rvol or local_burst or improving or sustained_coil or early_flow or opening_break,
@@ -330,6 +346,9 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
             "late entry needs near-strike confirmed momentum": not late or (setup is not None and not setup.building
                 and abs(option.delta)>=.20 and (option.ask-option.bid)/option.ask <= .10
                 and (gap is None or 0 <= gap <= .10)),
+            "dead zone: flat 30m hugging VWAP (11:00-14:30)": not (settings.dead_zone_mode == 2 and dead_zone),
+            "volume burst on a flat stock": not (settings.burst_flat_mode == 2 and burst_flat),
+            "move already spent, off the extreme": not (settings.spent_mode == 2 and spent),
         }
         blockers = tuple(k for k,v in checks.items() if not v)
         qualifying = not blockers

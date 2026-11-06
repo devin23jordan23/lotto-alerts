@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from math import ceil, floor, isfinite
 
-from .models import Snapshot
+from .models import ET, Snapshot
 
 
 @dataclass(frozen=True)
@@ -190,3 +190,38 @@ def detect_setup(snap: Snapshot, direction: int, metrics: dict) -> Setup | None:
                          building=direction*(spot-pivot)<=0,target=level)
         return Setup("CONTINUATION", level, vwap, building=direction*(spot-level) <= 0)
     return None
+
+
+def dead_market_metrics(snap: Snapshot, direction: int) -> dict:
+    """Mirrored dead-market measures on completed regular-session bars (desk fix 2026-11-05).
+
+    Units are prior ATR. Missing ATR or short history returns None values, which never block.
+    """
+    bars = snap.bars
+    atr = snap.prior_atr if snap.prior_atr and isfinite(snap.prior_atr) and snap.prior_atr > 0 else None
+    local = snap.at.astimezone(ET)
+    minute = local.hour*60 + local.minute - 570
+    out = {"session_minute": minute, "net30_atr": None, "vwap_abs_atr": None, "volume_ratio_5_25": None,
+           "net5_atr": None, "off_extreme_atr": None}
+    if atr is None or len(bars) < 3:
+        return out
+    closes = [b.close for b in bars]
+    n = len(bars)
+    cumul_volume, cumul_value = 0, 0.0
+    for bar in bars:
+        cumul_volume += bar.volume
+        cumul_value += (bar.high + bar.low + bar.close) / 3 * bar.volume
+    vwap = cumul_value / max(1, cumul_volume)
+    last = closes[-1]
+    reference30 = closes[-30] if n > 30 else bars[0].open
+    out["net30_atr"] = direction*(last-reference30)/atr
+    out["vwap_abs_atr"] = abs(last-vwap)/atr
+    reference5 = closes[-6] if n >= 6 else closes[0]
+    out["net5_atr"] = direction*(last-reference5)/atr
+    if n > 10:
+        recent = [b.volume for b in bars[-5:]]
+        prior = [b.volume for b in bars[-30:-5]]
+        out["volume_ratio_5_25"] = (sum(recent)/len(recent)) / max(1, sum(prior)/len(prior))
+    extreme = max(b.high for b in bars) if direction == 1 else min(b.low for b in bars)
+    out["off_extreme_atr"] = direction*(extreme-last)/atr
+    return out
