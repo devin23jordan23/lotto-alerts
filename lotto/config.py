@@ -37,6 +37,25 @@ class Settings:
     max_building_distance_atr: float = .06
     max_entry_extension_atr: float = .25
     min_opening_bars: int = 3
+    # Dead-market blocks (desk fix 2026-11-05, FINAL). Mode: 0 off, 1 shadow (log only, no alert change), 2 block.
+    # Recommended live values: dead zone and burst-on-flat block (2); spent is shadow only (1).
+    # Python defaults stay shadow (1) so a merge does not change live posts. Enable block later with
+    # LOTTO_DEAD_ZONE_MODE=2 and LOTTO_BURST_FLAT_MODE=2. Spent stays LOTTO_SPENT_MODE=1.
+    # Env: LOTTO_DEAD_ZONE_MODE, LOTTO_BURST_FLAT_MODE, LOTTO_SPENT_MODE and the threshold names below.
+    # Thresholds fit on Oct 2025-Jul 2026 cards only; units are prior ATR (14-day mean daily range).
+    dead_zone_mode: int = 1
+    dead_zone_start_minute: int = 90      # minutes after 09:30 (11:00 ET)
+    dead_zone_end_minute: int = 300       # 14:30 ET
+    dead_zone_max_net30_atr: float = .12  # directional close-to-close move over last 30 bars
+    dead_zone_max_vwap_atr: float = .226  # |close - VWAP|
+    burst_flat_mode: int = 1
+    burst_flat_start_minute: int = 90
+    burst_flat_min_volume_ratio: float = 1.268  # mean vol last 5 bars / mean vol prior 25 bars
+    burst_flat_max_net5_atr: float = .116       # directional move over last 5 bars
+    spent_mode: int = 1
+    spent_start_minute: int = 90
+    spent_min_range_atr: float = 1.061      # session high-low already spent
+    spent_min_off_extreme_atr: float = .035 # not printing a fresh extreme on the card side
     # Operational only. The loader casts with type(default)(raw); bool("0") is True.
     day_export: int = 0
     day_export_hour: int = 16
@@ -59,6 +78,8 @@ class Settings:
                 raise ValueError(f"{name} cannot be negative")
         if not 0 < self.min_ask <= self.max_ask or not 0 < self.min_delta <= self.max_delta <= 1:
             raise ValueError("Invalid contract limits")
+        if any(getattr(self, n) not in (0, 1, 2) for n in ("dead_zone_mode", "burst_flat_mode", "spent_mode")):
+            raise ValueError("Dead-market block modes must be 0, 1 or 2")
         if not 0 <= self.max_dte <= 1:
             raise ValueError("Invalid maximum expiration")
         if (not self.max_ask <= self.max_scaled_ask or self.premium_atr_fraction <= 0
