@@ -12,7 +12,7 @@ def price_replay(symbol, day, response):
     end = datetime.fromisoformat(day).replace(hour=16, tzinfo=ET)
     # Reuse precisely the live baseline/bar construction with an in-memory data source.
     client = Schwab.__new__(Schwab)
-    client.baselines, client.atrs = {}, {}
+    client.baselines, client.atrs, client.hl_atrs, client.atr_meta = {}, {}, {}, {}
     client.candles = lambda *_:response
     bars = client.bars(symbol, end)
     previous = [(epoch(c.get("datetime")), c) for c in response.get("candles", [])]
@@ -26,7 +26,9 @@ def price_replay(symbol, day, response):
         prefix = bars[:index+1]
         current = prefix[-1]
         snap = Snapshot(symbol, current.end, current.close, current.end, prior_close, prefix, (),
-                        prior_atr=client.atrs.get((symbol,end.date())))
+                        prior_atr=client.atrs.get((symbol,end.date())),
+                        prior_hl_atr=client.hl_atrs.get((symbol,end.date())),
+                        atr_meta=client.atr_meta.get((symbol,end.date())))
         problems = snap.problems(min_bars=5)
         if problems:
             continue
@@ -58,7 +60,9 @@ def price_replay(symbol, day, response):
         prefix = bars[:elapsed]
         current = prefix[-1]
         snap = Snapshot(symbol, current.end, current.close, current.end, prior_close, prefix, (),
-                        prior_atr=client.atrs.get((symbol,end.date())))
+                        prior_atr=client.atrs.get((symbol,end.date())),
+                        prior_hl_atr=client.hl_atrs.get((symbol,end.date())),
+                        atr_meta=client.atr_meta.get((symbol,end.date())))
         sides = {}
         for side, direction in (("CALL",1),("PUT",-1)):
             metrics = path_features(snap,direction)
@@ -73,6 +77,8 @@ def price_replay(symbol, day, response):
             "open":bars[0].open, "close":bars[-1].close,
             "high":session_high, "low":session_low,
             "prior_close":prior_close, "prior_atr":client.atrs.get((symbol,end.date())),
+            "prior_hl_atr":client.hl_atrs.get((symbol,end.date())),
+            "atr_basis_version":(client.atr_meta.get((symbol,end.date())) or {}).get("version"),
             "complete_minutes":len(bars), "price_setups":findings,
             "close_location_in_range":close_location,
             "closed_near_high":close_location >= .9,

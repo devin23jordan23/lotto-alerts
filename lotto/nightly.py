@@ -11,6 +11,7 @@ from pathlib import Path
 from .config import Settings, STRATEGY_VERSION
 from .features import quote_ok
 from .models import ET
+from .persistence import assess_session, parse_timestamp
 from .research import price_replay
 from .schwab import epoch
 from .store import read_snapshot
@@ -373,9 +374,17 @@ def run_nightly(store, day, directory, symbols=(), client=None):
                     "side":feedback.get("side"), "expiry":feedback.get("expiry"),
                     "dte":feedback.get("dte")})
     activated_ids = {r["parent_id"] for r in alert_rows if r["phase"] == "ACTIVE" and r["parent_id"]}
+    session_assessment = assess_session(store.db, day, db_path=getattr(store, "path", None))
     result = {
         "day":day,"generated_at":datetime.now(timezone.utc).isoformat(),
         "report_strategy":STRATEGY_VERSION,
+        "session_assessment":session_assessment,
+        "full_day_grade":session_assessment["grade_as_full_day"],
+        "grader_boundary":(
+            "This nightly report labels stock returns and sampled option bids. "
+            "It is not the stop-or-+40% card grader, which is not in this repository. "
+            "A partial session_assessment is not a full-day win rate."
+        ),
         "universe":list(symbols),"universe_size":len(symbols),"full_universe_price_research":client is not None,
         "data_errors":errors,"discovery_coverage":coverage,"chain_coverage":chain_coverage,
         "universe_flow_events":flow_events,
@@ -398,7 +407,9 @@ def run_nightly(store, day, directory, symbols=(), client=None):
                           "Trade highs are price-potential labels, not realized returns or assumed fills.",
                           "Potential watches never count as active ideas; linked active alerts start a new measurement window.",
                           "Future labels never enter the feature calculation. No automatic live threshold changes.",
-                          "Small, selected daily cohorts do not establish predictive accuracy."],
+                          "Small, selected daily cohorts do not establish predictive accuracy.",
+                          "session_assessment.grade_as_full_day is the only full-day flag. Missing open minutes are not imputed.",
+                          "The external card grader must be given an explicit database path and session date."],
         "decision_reasons":dict(Counter(r["reason"] for r in rows)),
         "candidate_evaluations":evaluations,
         "all_expiry_side_evaluations":candidate_rows,
@@ -425,8 +436,12 @@ def maybe_nightly(store, client, symbols, directory, now):
     day = today if session and now>=session[1]+timedelta(minutes=5) else None
     if not day:
         # Catch up one previously captured session after a restart or on a holiday.
-        previous = store.db.execute("SELECT substr(at,1,10) AS day FROM snapshots WHERE at<? GROUP BY day ORDER BY day DESC LIMIT 1",(today,)).fetchone()
-        day = previous["day"] if previous else None
+        # Use the ET calendar date. A UTC timestamp after 19:00/20:00 ET rolls to the
+        # next UTC date and must not be treated as the next session or dropped.
+        latest = store.db.execute("SELECT at FROM snapshots ORDER BY at DESC LIMIT 1").fetchone()
+        captured = parse_timestamp(latest["at"]) if latest else None
+        previous = captured.date().isoformat() if captured is not None else None
+        day = previous if previous and previous < today else None
     if day and not store.db.execute("SELECT 1 FROM nightly_runs WHERE day=?",(day,)).fetchone():
         # Never let catch-up research block the live market collection loop.
         if session and session[0]<=now<session[1]:

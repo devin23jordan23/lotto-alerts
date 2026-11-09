@@ -2,6 +2,9 @@ from dataclasses import asdict, dataclass
 from math import isfinite
 
 STRATEGY_VERSION = "phase1-three-bar-opening-drive-2026-10-14"
+# Stamp stored with each decision. This is not a score-model version.
+ATR_BASIS_VERSION = "rth14-true-range-vs-high-low-2026-11-09"
+GATE_VERSION = "friday-fix-gates-2026-11-09"
 
 
 @dataclass(frozen=True)
@@ -42,7 +45,9 @@ class Settings:
     # Python defaults stay shadow (1) so a merge does not change live posts. Enable block later with
     # LOTTO_DEAD_ZONE_MODE=2 and LOTTO_BURST_FLAT_MODE=2. Spent stays LOTTO_SPENT_MODE=1.
     # Env: LOTTO_DEAD_ZONE_MODE, LOTTO_BURST_FLAT_MODE, LOTTO_SPENT_MODE and the threshold names below.
-    # Thresholds fit on Oct 2025-Jul 2026 cards only; units are prior ATR (14-day mean daily range).
+    # Thresholds were fit on Oct 2025-Jul 2026 cards using the 14-day high-low mean.
+    # Live prior_atr is the 14-day true range. Modes 0 and 1 keep blocking on that
+    # true range. High-low is telemetry unless dm_atr_basis_mode is 2.
     dead_zone_mode: int = 1
     dead_zone_start_minute: int = 90      # minutes after 09:30 (11:00 ET)
     dead_zone_end_minute: int = 300       # 14:30 ET
@@ -56,6 +61,18 @@ class Settings:
     spent_start_minute: int = 90
     spent_min_range_atr: float = 1.061      # session high-low already spent
     spent_min_off_extreme_atr: float = .035 # not printing a fresh extreme on the card side
+    # 0DTE only: direction*(strike-spot)/ATR / sqrt(minutes_left/390) >= max.
+    # ATR for this gate is the high-low mean when it is present, else true range.
+    # Mode 0 off, 1 log only (default), 2 block. The 0.8 cutoff was picked after
+    # seeing every split, so this build does not turn mode 2 on by itself.
+    # LOTTO_FAR_OTM_TIME_MODE, LOTTO_FAR_OTM_TIME_MAX_ATR.
+    far_otm_time_mode: int = 1
+    far_otm_time_max_atr: float = .8
+    # 0 = true-range blocks only. 1 = same blocks, plus high-low flags (default).
+    # 2 = block on the high-low mean. Not the default: live true range is what is
+    # blocking today, and the Friday high-low recount was about 4/41.
+    # LOTTO_DM_ATR_BASIS_MODE.
+    dm_atr_basis_mode: int = 1
     # Operational only. The loader casts with type(default)(raw); bool("0") is True.
     day_export: int = 0
     day_export_hour: int = 16
@@ -78,8 +95,11 @@ class Settings:
                 raise ValueError(f"{name} cannot be negative")
         if not 0 < self.min_ask <= self.max_ask or not 0 < self.min_delta <= self.max_delta <= 1:
             raise ValueError("Invalid contract limits")
-        if any(getattr(self, n) not in (0, 1, 2) for n in ("dead_zone_mode", "burst_flat_mode", "spent_mode")):
-            raise ValueError("Dead-market block modes must be 0, 1 or 2")
+        if any(getattr(self, n) not in (0, 1, 2) for n in (
+                "dead_zone_mode", "burst_flat_mode", "spent_mode", "far_otm_time_mode", "dm_atr_basis_mode")):
+            raise ValueError("Gate modes must be 0, 1, or 2")
+        if self.far_otm_time_max_atr <= 0:
+            raise ValueError("far_otm_time_max_atr must be positive")
         if not 0 <= self.max_dte <= 1:
             raise ValueError("Invalid maximum expiration")
         if (not self.max_ask <= self.max_scaled_ask or self.premium_atr_fraction <= 0

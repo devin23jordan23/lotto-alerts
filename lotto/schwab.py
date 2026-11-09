@@ -14,6 +14,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .config import ATR_BASIS_VERSION
 from .models import Bar, ET, Option, Snapshot
 from .discovery import Discovery
 from .coverage import ChainCoverage
@@ -173,16 +174,43 @@ class Schwab:
             if at and at.astimezone(ET).date() < day and wall_time(9,30) <= at.astimezone(ET).time() < wall_time(16):
                 if all(number(raw.get(k)) is not None for k in ("high", "low", "close")):
                     daily[at.astimezone(ET).date()].append(raw)
-        ranges, previous = [], None
+        ranges, tr_days, hl_values, hl_days = [], [], [], []
+        previous = None
         for d in sorted(daily):
             rows = sorted(daily[d], key=lambda r:r["datetime"])
             high, low = max(r["high"] for r in rows), min(r["low"] for r in rows)
-            if previous:
+            hl_values.append(high-low)
+            hl_days.append(d)
+            if previous is not None:
                 ranges.append(max(high-low, abs(high-previous), abs(low-previous)))
+                tr_days.append(d)
             previous = rows[-1]["close"]
         if not hasattr(self, "atrs"):
             self.atrs = {}
-        self.atrs[key] = sum(ranges[-14:])/14 if len(ranges) >= 14 else None
+        if not hasattr(self, "hl_atrs"):
+            self.hl_atrs = {}
+        if not hasattr(self, "atr_meta"):
+            self.atr_meta = {}
+        tr = sum(ranges[-14:])/14 if len(ranges) >= 14 else None
+        hl = sum(hl_values[-14:])/14 if len(hl_values) >= 14 else None
+        self.atrs[key] = tr
+        self.hl_atrs[key] = hl
+        # Today's session is already excluded by the daily filter. The date lists are
+        # the source of each average so a later grade can see which days were used.
+        self.atr_meta[key] = {
+            "version": ATR_BASIS_VERSION,
+            "session_date": day.isoformat(),
+            "excludes_session_date": day.isoformat(),
+            "tr": tr,
+            "hl": hl,
+            "tr_sessions": [item.isoformat() for item in tr_days[-14:]] if tr is not None else [],
+            "hl_sessions": [item.isoformat() for item in hl_days[-14:]] if hl is not None else [],
+            "tr_count": len(tr_days),
+            "hl_count": len(hl_days),
+            "min_sessions": 14,
+            "tr_definition": "mean of the last 14 prior RTH true ranges; true range = max(high-low, abs(high-previous RTH close), abs(low-previous RTH close))",
+            "hl_definition": "mean of the last 14 prior RTH high-low ranges with no overnight gap",
+        }
         if not hasattr(self,"levels"):
             self.levels = {}
         if daily:
@@ -394,6 +422,8 @@ class Schwab:
                                        context, context_time, benchmark, "schwab", session[1],
                                        volume_source="SPY" if symbol == "SPX" else symbol,
                                        prior_atr=self.atrs.get((symbol, now.astimezone(ET).date())),
+                                       prior_hl_atr=getattr(self, "hl_atrs", {}).get((symbol, now.astimezone(ET).date())),
+                                       atr_meta=getattr(self, "atr_meta", {}).get((symbol, now.astimezone(ET).date())),
                                        market_return_5m=market_return, market_time=market_time, market_label=market,
                                        peer_return_5m=peer_return, peer_time=min((p[2] for p in peers), default=None),
                                        peer_leaders=leaders,

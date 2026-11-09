@@ -79,7 +79,12 @@ Stock volume can qualify through either high cumulative same-time pace or a
 local five-minute volume burst accompanied by ATR expansion. A quieter-day
 recovery may instead qualify through improving local stock volume, directional
 progress and stronger multi-strike option acceleration. Baselines use prior
-sessions only. ATR uses 14 prior true ranges. Thresholds remain uncalibrated
+sessions only. The live ATR is 14 prior true ranges. Each decision also stores
+the 14-day high-low mean when it is available. Dead-zone and burst-on-flat
+blocks keep using the true range unless `LOTTO_DM_ATR_BASIS_MODE=2`. That
+override is not the default. A 0DTE strike that is far out of the money for
+the time left is logged (`LOTTO_FAR_OTM_TIME_MODE=1`) and blocks only at mode
+2, which this build does not turn on. Thresholds remain uncalibrated
 research defaults; the historical case study is not proof of an edge.
 
 During the first 45 completed bars, a triggered opening drive, opening break,
@@ -187,22 +192,40 @@ feedback remains separate from measured outcomes and can be recorded by ID:
 python3 -m lotto.main feedback --alert-id ID --outcome mixed --notes "First partial worked; remainder faded"
 ```
 
-Offline report from captured observations:
+Offline report from captured observations. `--day` is required. A session that
+does not cover the regular hours is refused unless `--allow-partial` is set,
+and the report stays marked partial either way. The command does not default
+to yesterday.
 
 ```bash
+python3 -m lotto.main session --db /app/data/live.sqlite3 --day YYYY-MM-DD
 python3 -m lotto.main nightly --db /app/data/live.sqlite3 --day YYYY-MM-DD
+python3 -m lotto.main exit-replay --db /app/data/live.sqlite3 --day YYYY-MM-DD
 ```
+
+`exit-replay` is an offline sampled-bid stop and time-stop harness. It does not
+change a live stop. Quote holes and paths that never reach a rule are flagged
+rather than filled in.
+
+`session` only prints coverage and exits 2 when the day is not a full capture.
+That is the check an external grader has to pass before it scores the day.
+The stop-or-+40% card grader is not in this repository. This nightly report
+labels stock returns and sampled bids; it does not replace that grader.
 
 Offline reports do not mark the automatic full-universe job complete. Daily
 cohorts count only the first symbol/side/setup observation, rather than treating
 overlapping minute samples as independent trials. No automatic parameter
-promotion occurs.
+promotion occurs. The database migration, backup, and rollback steps are in
+[the database note](docs/operations-database-2026-11-09.md).
 
 ## Railway
 
 - GitHub: `devin23jordan23/lotto-alerts`, branch `main`.
 - Dockerfile and `railway.json` run `python -m lotto.main live`.
 - One replica, persistent volume at `/app/data`, `DATA_DIR=/app/data`.
+  `LOTTO_DB_PATH` may name the file explicitly and must stay on that volume.
+  Live mode refuses to create an empty database during 09:30–16:00 ET, and on
+  Railway it refuses to start when the volume is not actually mounted.
 - Shared authentication: `SCHWAB_TOKEN_BROKER_URL` and
   `SCHWAB_TOKEN_BROKER_KEY`. Direct client/refresh credentials remain supported.
 - Dedicated channel: `DISCORD_LOTTO_WEBHOOK`.

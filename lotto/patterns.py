@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from math import ceil, floor, isfinite
 
+from .config import ATR_BASIS_VERSION, GATE_VERSION
 from .models import ET, Snapshot
 
 
@@ -192,17 +193,105 @@ def detect_setup(snap: Snapshot, direction: int, metrics: dict) -> Setup | None:
     return None
 
 
-def dead_market_metrics(snap: Snapshot, direction: int) -> dict:
-    """Mirrored dead-market measures on completed regular-session bars (desk fix 2026-11-05).
+def _positive_atr(value):
+    return value is not None and isfinite(value) and value > 0
 
-    Units are prior ATR. Missing ATR or short history returns None values, which never block.
+
+def true_range_atr(snap: Snapshot):
+    """Live prior_atr: 14-day mean of RTH true range. None when missing."""
+    value = getattr(snap, "prior_atr", None)
+    return value if _positive_atr(value) else None
+
+
+def research_atr(snap: Snapshot):
+    """14-day mean of RTH high-low, the basis the dead-market thresholds were fit on."""
+    value = getattr(snap, "prior_hl_atr", None)
+    return value if _positive_atr(value) else None
+
+
+def far_otm_time_metrics(snap: Snapshot, strike: float, expiry, direction: int, close, quote_time=None) -> dict:
+    """0DTE strike distance scaled by the time left.
+
+    otm_atr = direction*(strike-spot)/ATR, with ATR the high-low mean when it is
+    present and the true range otherwise. otm_time_atr divides that by
+    sqrt(minutes_left/390). minutes_left is the time to the session close,
+    capped at 390 and floored at 5 once the close is still ahead. Missing ATR,
+    a non-zero DTE, a missing spot, or a snapshot at/after the close never flags.
+    Bars after `snap.at` are not read. Today's range is not used as ATR.
+    """
+    out = {
+        "dte": None, "otm_atr": None, "minutes_left": None, "otm_time_atr": None,
+        "atr_basis": "missing", "atr_value": None, "missing": None, "direction": direction,
+        "strike": strike, "spot": snap.spot,
+        "spot_time": snap.spot_time.isoformat() if getattr(snap, "spot_time", None) is not None else None,
+        "quote_time": quote_time.isoformat() if quote_time is not None else None,
+        "expiry": expiry.isoformat() if hasattr(expiry, "isoformat") else None,
+        "session_close": close.isoformat() if close is not None and getattr(close, "tzinfo", None) else None,
+    }
+    hl, tr = research_atr(snap), true_range_atr(snap)
+    if hl is not None:
+        atr, basis = hl, "hl"
+    elif tr is not None:
+        atr, basis = tr, "tr"
+    else:
+        atr, basis = None, "missing"
+    out["atr_basis"] = basis
+    out["atr_value"] = atr
+    try:
+        local = snap.at.astimezone(ET)
+        out["dte"] = (expiry - local.date()).days
+    except (TypeError, ValueError, AttributeError):
+        out["missing"] = "bad_expiry"
+        return out
+    if not _positive_atr(snap.spot) or not _positive_atr(strike):
+        out["missing"] = "missing_spot"
+        return out
+    if direction not in (1, -1):
+        out["missing"] = "bad_direction"
+        return out
+    if out["dte"] != 0:
+        out["missing"] = "not_0dte"
+        return out
+    if close is None or getattr(close, "tzinfo", None) is None or getattr(snap.at, "tzinfo", None) is None:
+        out["missing"] = "bad_close"
+        return out
+    raw_left = (close - snap.at).total_seconds() / 60
+    if raw_left <= 0:
+        out["missing"] = "at_or_after_close"
+        return out
+    if atr is None:
+        out["missing"] = "missing_atr"
+        return out
+    left = max(5.0, min(390.0, raw_left))
+    out["minutes_left"] = left
+    out["otm_atr"] = direction * (strike - snap.spot) / atr
+    out["otm_time_atr"] = out["otm_atr"] / (left / 390) ** .5
+    return out
+
+
+def dead_market_metrics(snap: Snapshot, direction: int, basis: str = "tr") -> dict:
+    """Mirrored dead-market measures on completed regular-session bars.
+
+    `basis="tr"` uses the live true-range ATR. `basis="hl"` uses the high-low
+    mean and, if that value is missing, falls back to true range and sets
+    atr_fallback. Missing ATR or fewer than three bars leaves the ratios None,
+    which never blocks. The current session is not part of either ATR.
     """
     bars = snap.bars
-    atr = snap.prior_atr if snap.prior_atr and isfinite(snap.prior_atr) and snap.prior_atr > 0 else None
+    requested = basis if basis in {"hl", "tr"} else "tr"
+    hl, tr = research_atr(snap), true_range_atr(snap)
+    if requested == "hl" and hl is not None:
+        atr, used, fallback = hl, "hl", 0
+    elif tr is not None:
+        atr, used, fallback = tr, "tr", int(requested == "hl")
+    else:
+        atr, used, fallback = None, None, int(requested == "hl")
     local = snap.at.astimezone(ET)
     minute = local.hour*60 + local.minute - 570
     out = {"session_minute": minute, "net30_atr": None, "vwap_abs_atr": None, "volume_ratio_5_25": None,
-           "net5_atr": None, "off_extreme_atr": None}
+           "net5_atr": None, "off_extreme_atr": None, "session_range_atr": None,
+           "atr_basis_requested": requested, "atr_basis_used": used, "atr_value": atr,
+           "atr_fallback": fallback}
     if atr is None or len(bars) < 3:
         return out
     closes = [b.close for b in bars]
@@ -224,4 +313,110 @@ def dead_market_metrics(snap: Snapshot, direction: int) -> dict:
         out["volume_ratio_5_25"] = (sum(recent)/len(recent)) / max(1, sum(prior)/len(prior))
     extreme = max(b.high for b in bars) if direction == 1 else min(b.low for b in bars)
     out["off_extreme_atr"] = direction*(extreme-last)/atr
+    out["session_range_atr"] = (max(b.high for b in bars) - min(b.low for b in bars)) / atr
     return out
+
+
+def dead_market_flags(dead: dict, settings, session_range_atr) -> dict:
+    """Same DZ/BF/SP comparisons the live checks use. None ratios never flag."""
+    minute = dead["session_minute"]
+    net30 = dead["net30_atr"]
+    return {
+        "dead_zone": bool(net30 is not None
+                          and settings.dead_zone_start_minute <= minute < settings.dead_zone_end_minute
+                          and net30 < settings.dead_zone_max_net30_atr
+                          and dead["vwap_abs_atr"] < settings.dead_zone_max_vwap_atr),
+        "burst_flat": bool(dead["volume_ratio_5_25"] is not None and minute >= settings.burst_flat_start_minute
+                           and dead["volume_ratio_5_25"] >= settings.burst_flat_min_volume_ratio
+                           and dead["net5_atr"] < settings.burst_flat_max_net5_atr),
+        "spent": bool(dead["off_extreme_atr"] is not None and session_range_atr is not None
+                      and minute >= settings.spent_start_minute
+                      and session_range_atr >= settings.spent_min_range_atr
+                      and dead["off_extreme_atr"] >= settings.spent_min_off_extreme_atr),
+    }
+
+
+def apply_research_gates(metrics: dict, snap: Snapshot, option, direction: int, settings, close) -> dict:
+    """Attach ATR and far-OTM telemetry. Blocking stays on true range unless mode is 2.
+
+    Far-OTM blocks only when far_otm_time_mode is 2. Missing inputs do not flag.
+    No market-direction gate and no loss kill-switch is applied here.
+    """
+    blocking_basis = "hl" if settings.dm_atr_basis_mode == 2 else "tr"
+    dead = dead_market_metrics(snap, direction, blocking_basis)
+    metrics.update({"dm_" + key: value for key, value in dead.items()})
+    tr, hl = true_range_atr(snap), research_atr(snap)
+    used = dead.get("atr_basis_used")
+    metrics["dm_atr_basis"] = used or "missing"
+    metrics["dm_atr_basis_version"] = ATR_BASIS_VERSION
+    metrics["dm_prior_atr"] = tr
+    metrics["dm_prior_hl_atr"] = hl
+    metrics["dm_hl_over_tr"] = (hl / tr) if tr and hl else None
+    if used == "hl":
+        spent_range = dead.get("session_range_atr")
+    else:
+        spent_range = metrics.get("session_range_atr") if metrics.get("atr_available") else None
+    flags = dead_market_flags(dead, settings, spent_range)
+    metrics["dm_dead_zone"] = int(flags["dead_zone"])
+    metrics["dm_burst_flat"] = int(flags["burst_flat"])
+    metrics["dm_spent"] = int(flags["spent"])
+    if settings.dm_atr_basis_mode >= 1 and hl is not None:
+        hl_dead = dead if used == "hl" and not dead.get("atr_fallback") else dead_market_metrics(snap, direction, "hl")
+        hl_flags = dead_market_flags(hl_dead, settings, hl_dead.get("session_range_atr"))
+        for key in ("net30_atr", "vwap_abs_atr", "net5_atr", "off_extreme_atr", "session_range_atr", "volume_ratio_5_25"):
+            metrics["dmhl_" + key] = hl_dead.get(key)
+        metrics["dmhl_dead_zone"] = int(hl_flags["dead_zone"])
+        metrics["dmhl_burst_flat"] = int(hl_flags["burst_flat"])
+        metrics["dmhl_spent"] = int(hl_flags["spent"])
+        metrics["dmhl_atr_basis"] = hl_dead.get("atr_basis_used")
+    far = far_otm_time_metrics(snap, option.strike, option.expiry, direction, close, option.quote_time)
+    far_otm = far["otm_time_atr"] is not None and far["otm_time_atr"] >= settings.far_otm_time_max_atr
+    metrics.update({"ft_" + key: value for key, value in far.items()})
+    metrics["ft_far_otm"] = int(far_otm)
+    meta = getattr(snap, "atr_meta", None)
+    metrics["provenance"] = {
+        "gate_version": GATE_VERSION,
+        "atr_basis_version": ATR_BASIS_VERSION,
+        "atr": {
+            "blocking_basis": metrics["dm_atr_basis"],
+            "basis_mode": settings.dm_atr_basis_mode,
+            "prior_atr": tr,
+            "prior_hl_atr": hl,
+            "hl_over_tr": metrics["dm_hl_over_tr"],
+            "fallback": dead.get("atr_fallback"),
+            "source": "prior completed RTH sessions only; the session being traded is excluded",
+            "snapshot_at": snap.at.isoformat(),
+            "meta": meta,
+        },
+        "far_otm": {
+            **far,
+            "mode": settings.far_otm_time_mode,
+            "threshold": settings.far_otm_time_max_atr,
+            "flag": int(far_otm),
+            "blocks": int(settings.far_otm_time_mode == 2 and far_otm),
+            "rule": "0DTE only; otm_atr/sqrt(minutes_left/390) >= threshold; missing data never flags",
+        },
+        "dead_market": {
+            "dead_zone": int(flags["dead_zone"]),
+            "burst_flat": int(flags["burst_flat"]),
+            "spent": int(flags["spent"]),
+            "dead_zone_blocks": int(settings.dead_zone_mode == 2 and flags["dead_zone"]),
+            "burst_flat_blocks": int(settings.burst_flat_mode == 2 and flags["burst_flat"]),
+            "spent_blocks": int(settings.spent_mode == 2 and flags["spent"]),
+            "missing_data": "missing ATR or fewer than 3 bars never blocks",
+        },
+        "quotes": {
+            "contract": option.symbol,
+            "side": option.side,
+            "strike": option.strike,
+            "expiry": option.expiry.isoformat(),
+            "bid": option.bid,
+            "ask": option.ask,
+            "quote_time": option.quote_time.isoformat(),
+            "spot": snap.spot,
+            "spot_time": snap.spot_time.isoformat(),
+            "snapshot_at": snap.at.isoformat(),
+        },
+    }
+    return {"dead_zone": flags["dead_zone"], "burst_flat": flags["burst_flat"],
+            "spent": flags["spent"], "far_otm": far_otm}
