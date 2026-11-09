@@ -90,3 +90,17 @@ Before an external grader runs:
 
 A rollback does not need a schema downgrade. Leaving version 2 in place is
 safe for the previous build.
+
+## Gates that stay in shadow
+
+`LOTTO_FAR_OTM_TIME_MODE` and `LOTTO_DM_ATR_BASIS_MODE` default to 1. Mode 1
+writes the flag and the inputs (both ATR values, the basis that actually
+blocked, the 0DTE distance, minutes left, quote, and timestamps) onto the
+candidate and the decision. It does not change which cards post.
+
+Do not set either mode to 2 from this change:
+
+- Far-OTM mode 2 is a 0DTE rule, `direction * (strike - spot) / ATR / sqrt(minutes_left / 390) >= 0.8`, using the high-low ATR when the snapshot has one. The 0.8 cutoff was selected after looking at every split. The attached research file reports out-of-sample 44.0% to 44.6% and recent 39.1% to 40.2%. This repository does not contain that card harness, so those figures were not recomputed here. The same file's Friday result is 13% to 15%. That does not clear a day like Nov 6.
+- ATR mode 2 would block dead-zone and burst-on-flat on the high-low mean. Live blocking today is the true range, because that is what `prior_atr` has always been. The attached comparison says the high-low basis keeps about 80% of held +100 runners and the true-range basis keeps about 76%. Friday, if the blocked names had been released, was reported near 4 wins in 41 cards. Mode 2 waits for a later sample that still keeps at least 80% of held +100s.
+
+`LOTTO_DEAD_ZONE_MODE` and `LOTTO_BURST_FLAT_MODE` are unchanged. Code defaults remain 1. A deployment that already sets them to 2 keeps blocking. `LOTTO_SPENT_MODE` stays 1. There is no new market-direction gate and no loss kill-switch. Unset the two new mode variables to roll the shadow telemetry back; the previous build ignores the extra snapshot fields.

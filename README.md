@@ -79,7 +79,12 @@ Stock volume can qualify through either high cumulative same-time pace or a
 local five-minute volume burst accompanied by ATR expansion. A quieter-day
 recovery may instead qualify through improving local stock volume, directional
 progress and stronger multi-strike option acceleration. Baselines use prior
-sessions only. ATR uses 14 prior true ranges. Thresholds remain uncalibrated
+sessions only. The live ATR is 14 prior true ranges. Each decision also stores
+the 14-day high-low mean when it is available. Dead-zone and burst-on-flat
+blocks keep using the true range unless `LOTTO_DM_ATR_BASIS_MODE=2`. That
+override is not the default. A 0DTE strike that is far out of the money for
+the time left is logged (`LOTTO_FAR_OTM_TIME_MODE=1`) and blocks only at mode
+2, which this build does not turn on. Thresholds remain uncalibrated
 research defaults; the historical case study is not proof of an edge.
 
 During the first 45 completed bars, a triggered opening drive, opening break,

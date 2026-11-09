@@ -71,7 +71,9 @@ class Snapshot:
     context_label: str = ""
     source: str = "replay"
     session_end: datetime | None = None  # Required for live; respects holidays/early closes.
-    prior_atr: float | None = None  # Completed prior daily sessions only.
+    prior_atr: float | None = None  # 14-day mean true range; completed prior RTH sessions only.
+    prior_hl_atr: float | None = None  # 14-day mean high-low of those sessions, no overnight gap.
+    atr_meta: dict | None = None  # Session dates and definitions for both averages.
     market_return_5m: float | None = None
     market_time: datetime | None = None
     market_label: str = "SPY"

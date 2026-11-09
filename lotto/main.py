@@ -248,6 +248,10 @@ def main():
              "disabled" if not any((engine.settings.max_alerts_per_day, engine.settings.max_alerts_per_ticker,
                                      engine.settings.max_alerts_per_cycle)) else "configured")
     LOG.info("Strategy %s settings: %s",STRATEGY_VERSION,json.dumps(asdict(engine.settings),sort_keys=True))
+    if engine.settings.far_otm_time_mode == 2:
+        LOG.warning("LOTTO_FAR_OTM_TIME_MODE=2 blocks far 0DTE strikes. The 0.8 cutoff was not independently re-validated in this build.")
+    if engine.settings.dm_atr_basis_mode == 2:
+        LOG.warning("LOTTO_DM_ATR_BASIS_MODE=2 blocks on high-low ATR. Live blocking stays on true range unless this override is set.")
     LOG.info("Coverage plan: %d deep slots; continuous=%s; full-universe sweep target=%d minutes",
              client.discovery.capacity,",".join(sorted(client.discovery.always_deep)),client.coverage.interval.seconds//60)
     local_start = datetime.now(ET)
