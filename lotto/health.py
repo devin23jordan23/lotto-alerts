@@ -2,27 +2,42 @@
 import json
 import os
 from pathlib import Path
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .models import ET
+from .persistence import (
+    assess_session, connect_readonly, directory_is_mountpoint, list_session_days,
+    live_start_blockers, path_is_under, resolve_database_path,
+)
 from .schwab import api_symbol
 
 
-def check(client, symbols, directory):
+def check(client, symbols, directory, database=None):
     now=datetime.now(timezone.utc)
     result={"at":now.isoformat(),"universe_count":len(symbols),"delivery_enabled":os.getenv("LOTTO_SEND_ALERTS", "false").lower()=="true"}
     result['persistent_volume_mounted']=os.getenv('RAILWAY_VOLUME_MOUNT_PATH')==str(directory)
-    database=Path(directory)/'live.sqlite3'
-    if database.exists():
-        with sqlite3.connect(f'file:{database}?mode=ro',uri=True) as connection:
+    mount = os.getenv('RAILWAY_VOLUME_MOUNT_PATH') or ''
+    result['volume_device_mounted'] = bool(mount) and directory_is_mountpoint(Path(mount))
+    database=Path(database or resolve_database_path('check', None))
+    result['database']=str(database)
+    result['database_on_volume']=bool(mount) and path_is_under(database, Path(mount))
+    result['live_start_blockers']=live_start_blockers(str(database), datetime.now(ET))
+    if database.is_file() and database.stat().st_size > 0:
+        connection = connect_readonly(database)
+        try:
             result['database_integrity']=connection.execute('PRAGMA quick_check').fetchone()[0]
             result['recorded_snapshots']=connection.execute('SELECT COUNT(*) FROM snapshots').fetchone()[0]
             result['latest_snapshot']=connection.execute('SELECT MAX(at) FROM snapshots').fetchone()[0]
             result['decision_counts']=[{'reason':r[0],'count':r[1]} for r in connection.execute(
                 'SELECT reason,COUNT(*) FROM decisions GROUP BY reason ORDER BY COUNT(*) DESC LIMIT 8')]
+            days = list_session_days(connection)
+            result['captured_session_days']=days
+            if days:
+                result['latest_session']=assess_session(connection, days[-1], db_path=str(database), now=datetime.now(ET))
+        finally:
+            connection.close()
     session=client.session(now)
     result["session"]=[t.isoformat() for t in session] if session else None
     quote_response=client.get('/quotes',{'symbols':','.join(api_symbol(s) for s in symbols)})
@@ -51,7 +66,8 @@ def check(client, symbols, directory):
     result['ready']=(not missing and not delayed and result['chain_contracts_parsed']>0
                      and not result['chain_delayed'] and result['webhook_valid'] and result['delivery_enabled'])
     if os.getenv('RAILWAY_SERVICE_ID'):
-        result['ready']=result['ready'] and result['persistent_volume_mounted'] and result.get('database_integrity')=='ok'
+        result['ready']=(result['ready'] and result['persistent_volume_mounted']
+                         and result.get('database_integrity')=='ok' and not result['live_start_blockers'])
     result['market_open_now']=bool(session and session[0]<=now<session[1])
     result['limitation']='After-hours connectivity check does not establish live quote freshness or strategy performance.'
     return result

@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import zlib
 from dataclasses import asdict
@@ -9,6 +10,7 @@ from pathlib import Path
 from .features import Candidate, quote_ok
 from .config import Settings, STRATEGY_VERSION, recorded_settings
 from .models import ET, Snapshot
+from .persistence import SCHEMA_VERSION, PersistenceError, file_identity, schema_version
 
 
 def read_snapshot(payload):
@@ -19,10 +21,21 @@ def read_snapshot(payload):
 
 class Store:
     def __init__(self, path: str):
+        self.path = path
         if path != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            parent = Path(path).parent
+            if not parent.exists():
+                # Creating the directory on Railway hides a volume that failed to mount
+                # and starts an empty database on container disk.
+                if os.getenv("RAILWAY_SERVICE_ID"):
+                    raise PersistenceError(
+                        f"Database directory {parent} does not exist. "
+                        "Refusing to create it, because a missing Railway volume must not be replaced by an empty database."
+                    )
+                parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
+        self._refuse_newer_schema()
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS snapshots (
                 symbol TEXT, at TEXT, payload TEXT, PRIMARY KEY(symbol, at));
@@ -60,6 +73,13 @@ class Store:
             CREATE TABLE IF NOT EXISTS user_feedback (
                 alert_id TEXT PRIMARY KEY, outcome TEXT NOT NULL, notes TEXT NOT NULL,
                 recorded_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS runtime_starts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL, mode TEXT NOT NULL,
+                db_path TEXT NOT NULL, file_existed INTEGER NOT NULL, file_bytes INTEGER NOT NULL,
+                schema_version INTEGER NOT NULL, snapshot_count INTEGER NOT NULL,
+                earliest_snapshot TEXT, latest_snapshot TEXT, strategy TEXT NOT NULL, note TEXT NOT NULL);
         """)
         # Railway volumes retain older databases. Do not recast historical alerts
         # as active trades when the phase distinction did not exist yet.
@@ -71,6 +91,38 @@ class Store:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN parent_id TEXT")
             if "thesis_id" not in columns:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN thesis_id TEXT")
+            self.db.execute(
+                "INSERT OR REPLACE INTO schema_meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+            self.db.execute(
+                "INSERT OR REPLACE INTO schema_meta VALUES ('migrated_at', ?)",
+                (datetime.now(timezone.utc).isoformat(),))
+            self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    def _refuse_newer_schema(self) -> None:
+        version = schema_version(self.db)
+        if version > SCHEMA_VERSION:
+            self.db.close()
+            raise PersistenceError(
+                f"Database schema {version} is newer than this build ({SCHEMA_VERSION}). "
+                "Refusing to open it for write so an older build cannot stamp a downgrade. "
+                "Deploy the matching build, or restore a backup of this file."
+            )
+
+    def note_start(self, mode: str, *, existed: bool, note: str) -> None:
+        """Append a startup row. Does not rewrite snapshots, alerts, or decisions."""
+        identity = file_identity(self.path) if self.path != ":memory:" else {
+            "exists": True, "bytes": 0, "path": ":memory:", "inode": None, "device": None}
+        span = self.db.execute("SELECT MIN(at), MAX(at), COUNT(*) FROM snapshots").fetchone()
+        payload = {"text": note, "identity": identity}
+        with self.db:
+            self.db.execute(
+                """INSERT INTO runtime_starts
+                   (started_at, mode, db_path, file_existed, file_bytes, schema_version,
+                    snapshot_count, earliest_snapshot, latest_snapshot, strategy, note)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (datetime.now(timezone.utc).isoformat(), mode, self.path, int(existed),
+                 identity.get("bytes") or 0, SCHEMA_VERSION, span[2] or 0, span[0], span[1],
+                 STRATEGY_VERSION, json.dumps(payload)))
 
     def record(self, snap: Snapshot) -> None:
         with self.db:
