@@ -26,6 +26,7 @@ from .persistence import (
     PersistenceError, assess_session, backup_database, connect_readonly, file_identity,
     list_session_days, live_start_blockers, require_existing_database, resolve_database_path,
 )
+from .exit_replay import build_specs, replay_day, write_replay
 
 LOG = logging.getLogger(__name__)
 
@@ -105,6 +106,25 @@ def _run_nightly_cli(args, database, data_dir):
     }, indent=2))
 
 
+def _floats(raw: str) -> list[float]:
+    return [float(part) for part in raw.split(",") if part.strip()]
+
+
+def _run_exit_replay(args, database):
+    if not args.day:
+        print(json.dumps({
+            "error": "exit-replay needs an explicit --day. It does not choose yesterday or the newest file.",
+            "live_stops_changed": False,
+        }, indent=2))
+        raise SystemExit(2)
+    report = replay_day(database, args.day, build_specs(_floats(args.stops), _floats(args.targets), _floats(args.time_stops)))
+    print(json.dumps(report, indent=2))
+    if not report["full_day_grade"] and not args.allow_partial:
+        raise SystemExit(2)
+    if args.output:
+        write_replay(report, args.output)
+
+
 def _log_open_session(store, database):
     days = list_session_days(store.db)
     if not days:
@@ -131,13 +151,17 @@ def replay_frames(path):
 def main():
     parser = argparse.ArgumentParser(description="Potential watches and active options ideas")
     parser.add_argument("mode", choices=("demo", "replay", "live", "report", "nightly", "check", "feedback",
-                                         "session", "backup", "migrate"), nargs="?", default="demo")
+                                         "session", "backup", "migrate", "exit-replay"), nargs="?", default="demo")
     parser.add_argument("--input", help="Replay JSONL: one snapshot array per scan cycle")
     parser.add_argument("--db", help="SQLite state path. Does not create a replacement for an existing live file")
     parser.add_argument("--day", help="Explicit America/New_York session date (YYYY-MM-DD)")
     parser.add_argument("--allow-partial", action="store_true",
                         help="Write a nightly report even when the captured session is incomplete")
     parser.add_argument("--dest", help="Backup destination. Must not already exist")
+    parser.add_argument("--stops", default="-0.35", help="Comma-separated option-bid stop returns, each negative")
+    parser.add_argument("--targets", default="0.40,1.0", help="Comma-separated option-bid target returns")
+    parser.add_argument("--time-stops", default="", help="Comma-separated time stops in minutes")
+    parser.add_argument("--output", help="Write exit-replay JSON here. Refuses to replace an existing file")
     parser.add_argument("--once", action="store_true", help="Poll one live cycle, retaining warmup requirements")
     parser.add_argument("--alert-id", help="Alert ID from the Discord footer for feedback")
     parser.add_argument("--outcome", choices=("worked","failed","mixed"))
@@ -158,7 +182,7 @@ def main():
         print(json.dumps(result,indent=2))
         raise SystemExit(0 if result['ready'] else 1)
     try:
-        if args.mode in {"report", "nightly", "feedback", "session", "backup", "migrate"}:
+        if args.mode in {"report", "nightly", "feedback", "session", "backup", "migrate", "exit-replay"}:
             require_existing_database(database)
         if args.mode == "session":
             _print_session(database, args.day, args.allow_partial)
@@ -182,6 +206,12 @@ def main():
             return
         if args.mode == "nightly":
             _run_nightly_cli(args, database, data_dir)
+            return
+        if args.mode == "exit-replay":
+            try:
+                _run_exit_replay(args, database)
+            except (ValueError, FileExistsError) as exc:
+                raise SystemExit(str(exc))
             return
     except PersistenceError as exc:
         raise SystemExit(str(exc))

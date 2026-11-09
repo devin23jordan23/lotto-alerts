@@ -104,3 +104,9 @@ Do not set either mode to 2 from this change:
 - ATR mode 2 would block dead-zone and burst-on-flat on the high-low mean. Live blocking today is the true range, because that is what `prior_atr` has always been. The attached comparison says the high-low basis keeps about 80% of held +100 runners and the true-range basis keeps about 76%. Friday, if the blocked names had been released, was reported near 4 wins in 41 cards. Mode 2 waits for a later sample that still keeps at least 80% of held +100s.
 
 `LOTTO_DEAD_ZONE_MODE` and `LOTTO_BURST_FLAT_MODE` are unchanged. Code defaults remain 1. A deployment that already sets them to 2 keeps blocking. `LOTTO_SPENT_MODE` stays 1. There is no new market-direction gate and no loss kill-switch. Unset the two new mode variables to roll the shadow telemetry back; the previous build ignores the extra snapshot fields.
+
+## Exit replay
+
+`python3 -m lotto.main exit-replay --db PATH --day YYYY-MM-DD` replays stored option bids for that date. It is read-only. The default specs are a -35% bid stop against a +40% target and the same stop against a +100% target. `--time-stops` adds minute exits. A quote hole that jumps the stop or the target is flagged (`stop_crossed_in_gap`, `target_crossed_in_gap`). A path that never prints the stop, the target, or the time stop is `censored`. Pass `--allow-partial` to print a partial session anyway; the report still says `full_day_grade: false`.
+
+This harness does not change live stops, and a run of it is not an out-of-sample exit study. No market-direction gate or loss kill-switch was added. Those failed the earlier held-out checks and are not in this build.

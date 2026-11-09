@@ -200,7 +200,12 @@ to yesterday.
 ```bash
 python3 -m lotto.main session --db /app/data/live.sqlite3 --day YYYY-MM-DD
 python3 -m lotto.main nightly --db /app/data/live.sqlite3 --day YYYY-MM-DD
+python3 -m lotto.main exit-replay --db /app/data/live.sqlite3 --day YYYY-MM-DD
 ```
+
+`exit-replay` is an offline sampled-bid stop and time-stop harness. It does not
+change a live stop. Quote holes and paths that never reach a rule are flagged
+rather than filled in.
 
 `session` only prints coverage and exits 2 when the day is not a full capture.
 That is the check an external grader has to pass before it scores the day.
