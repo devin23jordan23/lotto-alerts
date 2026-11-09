@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from lotto.main import main
-from lotto.models import ET, Snapshot
+from lotto.models import ET, Option, Snapshot
 from lotto.nightly import maybe_nightly
 from lotto.persistence import (
     SCHEMA_VERSION, PersistenceError, assess_session, backup_database, connect_readonly,
@@ -18,15 +18,18 @@ from lotto.persistence import (
 from lotto.store import Store
 
 
-def snap(at):
-    return Snapshot("SPY", at, 100, at, 99, (), ())
+def snap(at, session_end=None, quote_time=None):
+    options = ()
+    if quote_time is not None:
+        options = (Option(f"SPY{at.minute}", at.date(), "PUT", 90, .4, .45, 10, 1, -.2, .01, quote_time),)
+    return Snapshot("SPY", at, 100, at, 99, (), options, session_end=session_end)
 
 
-def fill(store, day, start=(9, 31), end=(15, 56), step=5):
+def fill(store, day, start=(9, 31), end=(15, 56), step=5, session_end=None, quote_time=None):
     clock = datetime.fromisoformat(day).replace(hour=start[0], minute=start[1], tzinfo=ET)
     stop = datetime.fromisoformat(day).replace(hour=end[0], minute=end[1], tzinfo=ET)
     while clock <= stop:
-        store.record(snap(clock))
+        store.record(snap(clock, session_end=session_end, quote_time=quote_time))
         clock += timedelta(minutes=step)
 
 
@@ -65,11 +68,20 @@ class DatabasePathTests(unittest.TestCase):
             root.mkdir()
             db = root / "live.sqlite3"
             Store(str(db)).db.close()
-            env = {"RAILWAY_SERVICE_ID": "svc", "RAILWAY_VOLUME_MOUNT_PATH": str(root)}
-            blocked = live_start_blockers(str(db), datetime(2026, 11, 8, 12, tzinfo=ET), env)
+            env = {"RAILWAY_SERVICE_ID": "svc", "RAILWAY_VOLUME_MOUNT_PATH": str(root),
+                   "RAILWAY_VOLUME_NAME": "lotto-data"}
+            blocked = live_start_blockers(str(db), datetime(2026, 11, 8, 12, tzinfo=ET), env, mount_table=[])
             self.assertTrue(any("not a mounted filesystem" in item for item in blocked))
+            self.assertTrue(any("path prefix" in item for item in blocked))
+            named_only = {k: v for k, v in env.items() if k != "RAILWAY_VOLUME_NAME"}
+            missing_name = live_start_blockers(str(db), datetime(2026, 11, 8, 12, tzinfo=ET), named_only,
+                                               mount_table=[str(root.resolve())])
+            self.assertTrue(any("not attached" in item for item in missing_name))
+            mounted = live_start_blockers(str(db), datetime(2026, 11, 8, 12, tzinfo=ET), env,
+                                          mount_table=[str(root.resolve())])
+            self.assertFalse(mounted)
             trusted = {**env, "LOTTO_TRUST_VOLUME_MOUNT": "1"}
-            self.assertFalse(live_start_blockers(str(db), datetime(2026, 11, 8, 12, tzinfo=ET), trusted))
+            self.assertFalse(live_start_blockers(str(db), datetime(2026, 11, 8, 12, tzinfo=ET), trusted, mount_table=[]))
             outside = live_start_blockers("/tmp/not-on-volume.sqlite3", datetime(2026, 11, 8, 12, tzinfo=ET), trusted)
             self.assertTrue(any("outside the Railway volume" in item for item in outside))
 
@@ -109,8 +121,12 @@ class MigrationTests(unittest.TestCase):
             newer.execute("PRAGMA user_version=9")
             newer.commit()
             newer.close()
+            before = path.read_bytes()
+            sidecars = sorted(item.name for item in path.parent.iterdir())
             with self.assertRaises(PersistenceError):
                 Store(str(path))
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(sorted(item.name for item in path.parent.iterdir()), sidecars)
             check = sqlite3.connect(path)
             self.assertEqual(check.execute("PRAGMA user_version").fetchone()[0], 9)
             self.assertEqual(check.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 1)
@@ -191,7 +207,9 @@ class SessionDateTests(unittest.TestCase):
             connection = connect_readonly(path)
             self.addCleanup(connection.close)
             flagged = assess_session(connection, "2026-11-05")
-            self.assertIn("unparsed_timestamps", flagged["defects"])
+            self.assertIn("internal_gap", flagged["defects"])
+            self.assertGreater(flagged["unparsed_heartbeat_timestamps"]["snapshots"], 0)
+            self.assertNotIn("unparsed_timestamps", flagged["defects"])
             self.assertFalse(flagged["grade_as_full_day"])
 
     def test_in_progress_morning_is_not_a_finished_grade(self):
@@ -204,6 +222,81 @@ class SessionDateTests(unittest.TestCase):
             self.assertEqual(running["status"], "in_progress")
             self.assertNotIn("ends_before_close", running["defects"])
             self.assertFalse(running["grade_as_full_day"])
+
+    def test_quiet_session_and_sparse_quotes_do_not_fail_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(str(Path(directory) / "live.sqlite3"))
+            self.addCleanup(store.db.close)
+            stale_quote = datetime(2026, 11, 5, 10, 0, tzinfo=ET)
+            fill(store, "2026-11-05", quote_time=stale_quote)
+            quiet = assess_session(store.db, "2026-11-05")
+            self.assertTrue(quiet["grade_as_full_day"])
+            self.assertTrue(quiet["quiet_session"])
+            self.assertFalse(quiet["missing_capture"])
+            self.assertFalse(quiet["alerts_used_for_coverage"])
+            self.assertFalse(quiet["option_quotes_used_for_coverage"])
+            self.assertEqual(quiet["counts"]["alerts"], 0)
+            store.db.execute(
+                "INSERT INTO decisions VALUES (?,?,?,?,?,?)",
+                ("SPY", "2026-11-05T15:00:00", "DISCOVERY", "ignored", 1, "{}"))
+            store.db.commit()
+            with_junk = assess_session(store.db, "2026-11-05")
+            self.assertEqual(with_junk["unparsed_decision_timestamps"], 1)
+            self.assertTrue(with_junk["grade_as_full_day"])
+            self.assertNotIn("unparsed_timestamps", with_junk["defects"])
+
+    def test_discovery_heartbeats_cover_a_day_alerts_cannot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(str(Path(directory) / "live.sqlite3"))
+            self.addCleanup(store.db.close)
+            day = "2026-11-05"
+            clock = datetime(2026, 11, 5, 9, 31, tzinfo=ET)
+            end = datetime(2026, 11, 5, 15, 56, tzinfo=ET)
+            while clock <= end:
+                store.db.execute("INSERT INTO discovery VALUES (?,?,?,?,?)",
+                                 (day, "SPY", clock.isoformat(), 0, "{}"))
+                clock += timedelta(minutes=5)
+            store.record(snap(datetime(2026, 11, 5, 10, 40, tzinfo=ET)))
+            store.db.execute(
+                "INSERT INTO alerts (id,day,symbol,side,contract,at,entry_ask) VALUES (?,?,?,?,?,?,?)",
+                ("a", day, "SPY", "PUT", "SPY-P", "2026-11-05T09:31:00-05:00", .4))
+            store.db.commit()
+            covered = assess_session(store.db, day)
+            self.assertTrue(covered["grade_as_full_day"])
+            self.assertNotIn("opens_after_grace", covered["defects"])
+            self.assertGreater(covered["discovery_count"], 0)
+            hole = Store(":memory:")
+            self.addCleanup(hole.db.close)
+            fill(hole, day, end=(11, 0))
+            fill(hole, day, start=(12, 0))
+            for minute in range(11 * 60, 12 * 60, 5):
+                hole.db.execute(
+                    "INSERT INTO alerts (id,day,symbol,side,contract,at,entry_ask) VALUES (?,?,?,?,?,?,?)",
+                    (f"h{minute}", day, "QQQ", "CALL", "QQQ-C",
+                     datetime(2026, 11, 5, minute // 60, minute % 60, tzinfo=ET).isoformat(), .5))
+            hole.db.commit()
+            gapped = assess_session(hole.db, day)
+            self.assertIn("internal_gap", gapped["defects"])
+            self.assertGreater(gapped["counts"]["alerts"], 0)
+
+    def test_early_close_and_weekend_are_not_a_missing_16_close(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(str(Path(directory) / "live.sqlite3"))
+            self.addCleanup(store.db.close)
+            for day, hour in (("2026-07-02", 13), ("2026-11-06", 13)):
+                close = datetime.fromisoformat(day).replace(hour=hour, tzinfo=ET)
+                fill(store, day, end=(12, 56), session_end=close)
+                graded = assess_session(store.db, day)
+                self.assertTrue(graded["grade_as_full_day"], graded)
+                self.assertTrue(graded["quiet_session"])
+                self.assertEqual(graded["scheduled_close_source"], "snapshot.session_end")
+                self.assertIn(f"T{hour:02d}:00", graded["scheduled_close"])
+            weekend = assess_session(store.db, "2026-11-08")
+            self.assertEqual(weekend["status"], "market_closed")
+            self.assertIn("weekend", weekend["defects"])
+            self.assertFalse(weekend["missing_capture"])
+            self.assertNotIn("opens_after_grace", weekend["defects"])
+            self.assertFalse(weekend["grade_as_full_day"])
 
     def test_catchup_uses_the_et_date_after_utc_midnight(self):
         store = Store(":memory:")

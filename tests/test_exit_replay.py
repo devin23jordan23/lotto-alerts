@@ -37,13 +37,15 @@ class ExitReplayTests(unittest.TestCase):
         start = datetime(2026, 11, 6, 12, 0, tzinfo=ET)
         jumped = replay_exit(1.0, start, [q(0, 1.0, start=start), q(10, .20, start=start)],
                              stop_return=-.35, target_return=.40, max_gap_seconds=120)
-        self.assertEqual(jumped["outcome"], "stop")
+        self.assertEqual(jumped["outcome"], "ambiguous")
         self.assertIn("quote_gap", jumped["flags"])
         self.assertIn("stop_crossed_in_gap", jumped["flags"])
+        self.assertIn("ordering_unknown", jumped["flags"])
         ran = replay_exit(1.0, start, [q(0, 1.0, start=start), q(10, 2.5, start=start)],
                           stop_return=-.35, target_return=1.0, max_gap_seconds=120)
-        self.assertEqual(ran["outcome"], "target")
+        self.assertEqual(ran["outcome"], "ambiguous")
         self.assertIn("target_crossed_in_gap", ran["flags"])
+        self.assertIn("ordering_unknown", ran["flags"])
         quiet = replay_exit(1.0, start, [q(1, .90, start=start), q(2, .95, start=start)],
                             stop_return=-.35, target_return=.40,
                             session_close=datetime(2026, 11, 6, 16, 0, tzinfo=ET))
@@ -98,7 +100,7 @@ class ExitReplayTests(unittest.TestCase):
             self.assertFalse(report["full_day_grade"])
             self.assertEqual(report["alerts"][0]["side"], "PUT")
             by_outcome = {item["outcome"] for item in report["alerts"][0]["specs"]}
-            self.assertEqual(by_outcome, {"target", "time_stop"})
+            self.assertEqual(by_outcome, {"ambiguous", "time_stop"})
             self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), before)
             self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), before)
             reopened = Store(str(path))

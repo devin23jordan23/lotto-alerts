@@ -16,7 +16,10 @@ from .persistence import assess_session, connect_readonly, require_existing_data
 from .store import read_snapshot
 
 EXIT_REPLAY_VERSION = "sampled-bid-2026-11-09"
-_NOTE = "Sampled bids only. A stop is not a known fill. No live stop was changed."
+_NOTE = (
+    "Sampled bids only. A quote hole that crosses a stop or a target is ambiguous: "
+    "stop-before-target is not inferred. No live stop was changed."
+)
 
 
 def build_specs(stops, targets, time_stops) -> list[dict]:
@@ -82,12 +85,21 @@ def replay_exit(entry_ask, entry_at, quotes, *, stop_return=-0.35, target_return
         gap = (at - anchor).total_seconds()
         max_gap = max(max_gap, gap)
         ret = bid / entry_ask - 1
+        crossed_stop = stop_return is not None and prior_return > stop_return >= ret
+        crossed_target = target_return is not None and prior_return < target_return <= ret
         if gap > max_gap_seconds:
             flags.add("quote_gap")
-            if stop_return is not None and prior_return > stop_return >= ret:
+            if crossed_stop:
                 flags.add("stop_crossed_in_gap")
-            if target_return is not None and prior_return < target_return <= ret:
+            if crossed_target:
                 flags.add("target_crossed_in_gap")
+            # The unobserved interval can contain the other barrier first.
+            # Landing on one side of the hole does not order stop before target.
+            if crossed_stop or crossed_target:
+                flags.add("ordering_unknown")
+                outcome, exit_at, exit_bid, exit_return = "ambiguous", at, bid, ret
+                seen += 1
+                break
         seen += 1
         if stop_return is not None and ret <= stop_return:
             outcome, exit_at, exit_bid, exit_return = "stop", at, bid, ret
@@ -96,6 +108,8 @@ def replay_exit(entry_ask, entry_at, quotes, *, stop_return=-0.35, target_return
             outcome, exit_at, exit_bid, exit_return = "target", at, bid, ret
             break
         if time_stop_minutes is not None and (at - entry_at).total_seconds() >= time_stop_minutes * 60:
+            if gap > max_gap_seconds:
+                flags.add("time_stop_on_gap")
             outcome, exit_at, exit_bid, exit_return = "time_stop", at, bid, ret
             break
         previous_at, previous_return = at, ret

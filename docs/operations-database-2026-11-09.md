@@ -13,21 +13,27 @@ on the previous disk is gone. The old process did not delete rows. It started a
 different file.
 
 `session` and `nightly` now refuse a missing file instead of creating one.
-Live mode refuses to create one during the weekday 09:30–16:00 ET clock, and on
-Railway it also refuses to start unless the database is under
-`RAILWAY_VOLUME_MOUNT_PATH` and that path is a real mount. Set
-`LOTTO_TRUST_VOLUME_MOUNT=1` only after confirming the path is durable when the
-platform bind-mounts it on the same device. That flag still rejects a path
-outside the volume.
+Live mode refuses to create one during the weekday 09:30–16:00 ET clock.
+
+Railway's own reference says `RAILWAY_VOLUME_MOUNT_PATH` and
+`RAILWAY_VOLUME_NAME` are both injected only when a volume is attached. This
+repo's `railway.json` does not declare that volume. A path that merely starts
+with the mount string is not treated as a volume. Live mode also requires the
+directory to be a real mount (a different device from its parent, or an entry
+in `/proc/self/mountinfo`). `LOTTO_TRUST_VOLUME_MOUNT=1` skips that mount check
+and is an unverified override. It still rejects a database path outside the
+configured mount path. The production service's volume name and mount were not
+inspected from this repo, so that attachment remains a rollout prerequisite.
 
 ## What a startup does to an existing file
 
-Opening the file adds tables that are not already there (`schema_meta`,
-`runtime_starts`) and records schema version 2. It adds the older `phase`,
-`parent_id`, and `thesis_id` alert columns only when those columns are absent.
-It appends one `runtime_starts` row in live mode. It does not drop tables, delete
-rows, or replace the file. A database whose schema version is newer than this
-build is refused before those statements run.
+An existing file is opened read-only first. If its schema version is newer than
+this build, the process stops before any writable connection. Nothing is
+deleted. A recognized file is then opened for write and only adds tables that
+are not already there (`schema_meta`, `runtime_starts`) and records schema
+version 2. It adds the older `phase`, `parent_id`, and `thesis_id` alert
+columns only when those columns are absent. It appends one `runtime_starts`
+row in live mode. It does not drop tables, delete rows, or replace the file.
 
 `python -m lotto.main migrate --db PATH` is the same open, plus a printed inode
 check. `session`, `backup`, and a refused `nightly` open the file read-only and
@@ -68,10 +74,20 @@ bids. It requires `--day` and refuses an incomplete capture unless
 The in-process catch-up after the close still runs, and it stamps the same
 field. That catch-up is not permission to publish a win rate.
 
+Coverage uses the union of `discovery.at` and `snapshots.at`. Those are the
+collector heartbeats. Alert timestamps, decision timestamps, and one
+contract's option quotes do not fill a hole and do not reject a quiet session.
+Zero alerts with heartbeats from the open through the close is a complete day.
+The close is `snapshot.session_end` when the first and last snapshots of that
+ET date agree, including a 13:00 early close. Otherwise the close is 16:00 ET.
+Saturday and Sunday are `market_closed`, not a missing capture. A weekday with
+no heartbeats is ungraded. This repo has no exchange holiday calendar, so a
+holiday is not inferred.
+
 Before an external grader runs:
 
 1. Call `session --db <the volume file> --day <the session date>`.
-2. Grade only when the exit code is 0.
+2. Grade only when the exit code is 0 (`grade_as_full_day` true, `missing_capture` false).
 3. On exit 2, mark the day partial. Do not fill in the missing open.
 4. Pass that same path and date into the grader. Do not open a new empty path
    and do not default to yesterday or to whichever file is newest.
@@ -107,6 +123,14 @@ Do not set either mode to 2 from this change:
 
 ## Exit replay
 
-`python3 -m lotto.main exit-replay --db PATH --day YYYY-MM-DD` replays stored option bids for that date. It is read-only. The default specs are a -35% bid stop against a +40% target and the same stop against a +100% target. `--time-stops` adds minute exits. A quote hole that jumps the stop or the target is flagged (`stop_crossed_in_gap`, `target_crossed_in_gap`). A path that never prints the stop, the target, or the time stop is `censored`. Pass `--allow-partial` to print a partial session anyway; the report still says `full_day_grade: false`.
+`python3 -m lotto.main exit-replay --db PATH --day YYYY-MM-DD` replays stored option bids for that date. It is read-only. The default specs are a -35% bid stop against a +40% target and the same stop against a +100% target. `--time-stops` adds minute exits. A quote hole that jumps the stop or the target is `ambiguous` (`ordering_unknown`). The landing print is not treated as stop-before-target. A path that never prints a rule is `censored`. Pass `--allow-partial` to print a partial session anyway; the report still says `full_day_grade: false`.
 
 This harness does not change live stops, and a run of it is not an out-of-sample exit study. No market-direction gate or loss kill-switch was added. Those failed the earlier held-out checks and are not in this build.
+
+## Still outside this repository
+
+- The stop-or-+40% / +100 card grader, including which database file and which session date it opens. `session` is the check it must pass. It is not wired in here.
+- The card-level harness behind the attached OOS table and the Friday 4/41 recount.
+- The production Railway volume attachment (`RAILWAY_VOLUME_NAME` at `DATA_DIR`). `railway.json` does not declare it.
+- Exchange holiday dates. Weekends are handled. A closed weekday is not labeled a holiday.
+- Any promotion of far-OTM or high-low ATR from log-only (mode 1) to blocking (mode 2).

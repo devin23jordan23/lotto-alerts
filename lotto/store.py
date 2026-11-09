@@ -10,7 +10,7 @@ from pathlib import Path
 from .features import Candidate, quote_ok
 from .config import Settings, STRATEGY_VERSION, recorded_settings
 from .models import ET, Snapshot
-from .persistence import SCHEMA_VERSION, PersistenceError, file_identity, schema_version
+from .persistence import SCHEMA_VERSION, PersistenceError, file_identity, refuse_newer_schema, schema_version
 
 
 def read_snapshot(payload):
@@ -23,7 +23,12 @@ class Store:
     def __init__(self, path: str):
         self.path = path
         if path != ":memory:":
-            parent = Path(path).parent
+            existing = Path(path)
+            if existing.is_file() and existing.stat().st_size > 0:
+                # Read-only. A writable connect can replay a journal before we know
+                # the schema version, so an existing file is checked first.
+                refuse_newer_schema(path)
+            parent = existing.parent
             if not parent.exists():
                 # Creating the directory on Railway hides a volume that failed to mount
                 # and starts an empty database on container disk.

@@ -8,8 +8,8 @@ from urllib.request import Request, urlopen
 
 from .models import ET
 from .persistence import (
-    assess_session, connect_readonly, directory_is_mountpoint, list_session_days,
-    live_start_blockers, path_is_under, resolve_database_path,
+    assess_session, connect_readonly, list_session_days, live_start_blockers,
+    path_is_under, resolve_database_path, volume_mount_evidenced,
 )
 from .schwab import api_symbol
 
@@ -17,9 +17,19 @@ from .schwab import api_symbol
 def check(client, symbols, directory, database=None):
     now=datetime.now(timezone.utc)
     result={"at":now.isoformat(),"universe_count":len(symbols),"delivery_enabled":os.getenv("LOTTO_SEND_ALERTS", "false").lower()=="true"}
-    result['persistent_volume_mounted']=os.getenv('RAILWAY_VOLUME_MOUNT_PATH')==str(directory)
     mount = os.getenv('RAILWAY_VOLUME_MOUNT_PATH') or ''
-    result['volume_device_mounted'] = bool(mount) and directory_is_mountpoint(Path(mount))
+    volume_name = os.getenv('RAILWAY_VOLUME_NAME') or ''
+    evidenced = bool(mount) and volume_mount_evidenced(Path(mount))
+    # Railway sets the path and the name together only when a volume is attached.
+    # The path string by itself does not mean the directory is that volume.
+    result['volume_env_present']=bool(mount and volume_name)
+    result['volume_mount_evidenced']=evidenced
+    result['volume_trust_override']=os.getenv('LOTTO_TRUST_VOLUME_MOUNT')=='1'
+    result['persistent_volume_mounted']=bool(mount and volume_name and mount==str(directory) and evidenced)
+    result['volume_unresolved']=(
+        'railway.json does not declare a volume. Production attachment of '
+        'RAILWAY_VOLUME_NAME at DATA_DIR is outside this repo and was not inspected.'
+    )
     database=Path(database or resolve_database_path('check', None))
     result['database']=str(database)
     result['database_on_volume']=bool(mount) and path_is_under(database, Path(mount))
