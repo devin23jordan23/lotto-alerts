@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 from .models import Bar, ET, Option, Snapshot
 from .discovery import Discovery
 from .coverage import ChainCoverage
+from .resilience import flag
 
 LOG = logging.getLogger(__name__)
 BASE = "https://api.schwabapi.com/marketdata/v1"
@@ -59,6 +60,7 @@ class Schwab:
         self.broker_key = os.getenv("SCHWAB_TOKEN_BROKER_KEY", "")
         self.broker_token = ""
         self.broker_deadline = 0.0
+        self.broker_expiry = 0.0  # real expiry (monotonic); used only by LOTTO_TOKEN_RESILIENCE_MODE=1
         self.token_path = Path(data_dir) / "schwab_tokens.json"
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
         if bool(self.broker_url) != bool(self.broker_key):
@@ -105,6 +107,8 @@ class Schwab:
         return fresh["access_token"]
 
     def token_from_broker(self):
+        if flag("LOTTO_TOKEN_RESILIENCE_MODE") == 1:
+            return self.resilient_broker_token()
         if self.broker_token and time.monotonic() < self.broker_deadline:
             return self.broker_token
         request = Request(self.broker_url, headers={
@@ -123,6 +127,44 @@ class Schwab:
         self.broker_token = token
         self.broker_deadline = time.monotonic() + ttl
         return token
+
+    def resilient_broker_token(self, sleep=time.sleep):
+        """Refresh early, retry briefly, and keep a still-valid token through a broker blip."""
+        now = time.monotonic()
+        if self.broker_token and now < self.broker_deadline:
+            return self.broker_token
+        last_error = None
+        for delay in (0, 1, 2, 4):
+            if delay:
+                sleep(delay)
+            request = Request(self.broker_url, headers={
+                "Authorization": f"Bearer {self.broker_key}",
+                "Accept": "application/json",
+            })
+            try:
+                with urlopen(request, timeout=5) as response:
+                    payload = json.load(response)
+                token = payload.get("access_token", "")
+                if not token:
+                    raise RuntimeError("Schwab token broker returned no access token")
+                lifetime = max(30, int(payload.get("expires_in", 240)))
+                lead = max(10, flag("LOTTO_TOKEN_REFRESH_LEAD_SECONDS", 60))
+                fetched = time.monotonic()
+                self.broker_token = token
+                self.broker_expiry = fetched + lifetime - 5
+                self.broker_deadline = fetched + max(15, lifetime - lead)
+                return token
+            except HTTPError as exc:
+                last_error = RuntimeError(f"Schwab token broker rejected request (HTTP {exc.code})")
+                if exc.code in (401, 403):
+                    break  # a bad key will not heal by retrying
+            except Exception as exc:  # timeout, DNS, connection reset, bad JSON
+                last_error = exc if isinstance(exc, RuntimeError) else RuntimeError(
+                    f"Schwab token broker unavailable ({type(exc).__name__})")
+        if self.broker_token and time.monotonic() < self.broker_expiry:
+            LOG.warning("Schwab token broker refresh failed (%s); reusing the cached token until it expires", last_error)
+            return self.broker_token
+        raise last_error or RuntimeError("Schwab token broker unavailable")
 
     def get(self, path: str, params: dict) -> dict:
         for attempt in range(2):

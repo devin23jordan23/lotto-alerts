@@ -5,6 +5,7 @@ from .config import Settings
 from .discord import alert_payload
 from .features import candidates
 from .models import ET, Snapshot
+from .resilience import gap_is_bridgeable, note_feed_time
 from .store import Store
 
 
@@ -26,6 +27,7 @@ class Engine:
         ready = []
         cfg = self.settings
         for snap in snapshots:
+            note_feed_time(snap.at)
             key = (snap.day, snap.symbol)
             if key not in self.history:
                 self.history[key] = [s for s in self.store.recent(snap.symbol, snap.day)
@@ -51,6 +53,7 @@ class Engine:
             if self.last_bar.get(key) == snap.bars[-1].end:
                 continue
             self.last_bar[key] = snap.bars[-1].end
+            gap_seconds = (snap.at - history[-1].at).total_seconds() if history else 0.0
             evaluated = candidates(snap, history, cfg)
             self.store.record_candidates(snap, evaluated, cfg)
             history.append(snap)
@@ -95,6 +98,13 @@ class Engine:
             opening_fast_lane = opening_fast_lane or bool(best.metrics.get("opening_expansion"))
             awaiting_confirmation = (snap.bars[-1].end - self.qualified_since[score_key]
                                      < timedelta(minutes=cfg.confirmation_minutes))
+            if (awaiting_confirmation and not opening_fast_lane and gap_seconds > 150
+                    and gap_is_bridgeable(snap.at - timedelta(seconds=gap_seconds), snap.at, "LOTTO_GAP_CONFIRM_MODE")
+                    and bars_confirm_after_gap(snap, best)):
+                # The feed gap, not the setup, interrupted the persistence check. Two completed
+                # one-minute bars already closed through the trigger on the card side.
+                awaiting_confirmation = False
+                best.metrics["gap_bar_confirmation"] = 1
             if awaiting_confirmation and not opening_fast_lane:
                 self.store.decision(snap, "IGNITION", "confirming persistence", best)
                 continue
@@ -149,3 +159,12 @@ class Engine:
         for score_key in list(self.qualified_since):
             if score_key[:2] == key:
                 self.qualified_since.pop(score_key, None)
+
+
+def bars_confirm_after_gap(snap, candidate) -> bool:
+    """Two completed 1m closes on the card side of a triggered (not building) setup."""
+    setup = candidate.setup
+    if setup is None or setup.building or setup.trigger is None or len(snap.bars) < 2:
+        return False
+    direction = 1 if candidate.option.side == "CALL" else -1
+    return all(direction * (bar.close - setup.trigger) > 0 for bar in snap.bars[-2:])

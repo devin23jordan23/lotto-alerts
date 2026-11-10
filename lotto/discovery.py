@@ -2,6 +2,7 @@
 from collections import defaultdict
 from datetime import timedelta
 from math import isfinite
+from .resilience import gap_bridge_seconds
 
 
 class Discovery:
@@ -40,8 +41,17 @@ class Discovery:
                 continue
             history = self.history[symbol]
             old = [v for v in history if 300 <= (now-v["at"]).total_seconds() <= 390]
+            bridge = gap_bridge_seconds()
+            bridged = False
+            if not old and bridge:
+                # Feed gap: measure from the last pre-gap quote (a 5-to-15 minute span, never newer
+                # than 5 minutes) instead of waiting five fresh minutes for a reference.
+                old = [v for v in history if 300 <= (now-v["at"]).total_seconds() <= bridge]
+                bridged = bool(old)
             ret5 = price/old[-1]["price"]-1 if old else None
             delta = volume-old[-1]["volume"] if old else None
+            if bridged and delta is not None:
+                delta = delta*300/(now-old[-1]["at"]).total_seconds()  # keep volume_5m a 5-minute rate
             old_delta = old[-1].get("volume_5m") if old else None
             acceleration = delta/old_delta if delta is not None and delta >= 0 and old_delta and old_delta > 0 else None
             high, low = q.get("high"), q.get("low")
@@ -53,7 +63,8 @@ class Discovery:
                       "volume_5m":delta, "volume_acceleration":acceleration, "priority":score}
             if not history or at > history[-1]["at"]:
                 history.append(record)
-            self.history[symbol] = [v for v in history if now-v["at"] <= timedelta(minutes=12)]
+            keep = timedelta(seconds=max(720, bridge + 60)) if bridge else timedelta(minutes=12)
+            self.history[symbol] = [v for v in history if now-v["at"] <= keep]
             if symbol in universe:
                 ranks[symbol] = score
                 self.observations.append(record)
