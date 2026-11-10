@@ -127,15 +127,42 @@ def bridged_endpoint(history, target, bridge_seconds):
     return max(before, key=lambda s: s.at) if before else None
 
 
+def _widths(snap):
+    early_bars = getattr(snap, "bars", None)
+    return (5, 2, 1) if early_bars is not None and len(early_bars) < 5 else (5, 2)
+
+
+def _gap_free_window(snap, history, width):
+    """One width, with the flag-0 endpoint rule. A hole at this width is a miss, not a void of the others."""
+    endpoints = []
+    for minutes in (width, 2*width):
+        target = snap.at - timedelta(minutes=minutes)
+        endpoint = window_endpoint(history, target)
+        if endpoint is None:
+            return None
+        endpoints.append(endpoint)
+    if not (endpoints[1].at < endpoints[0].at < snap.at):
+        return None
+    five, ten = endpoints
+    window = sorted([s for s in history if ten.at <= s.at < snap.at] + [snap], key=lambda s: s.at)
+    if any((b.at - a.at).total_seconds() > 150 for a, b in zip(window, window[1:])):
+        return None
+    return five, ten, window, width
+
+
 def observation_window(snap, history):
     # Windows use real timestamps, never poll counts. Missing windows do not become zeros.
-    window = _observation_window(snap, history, 0)
     bridge = gap_bridge_seconds()
-    if window is None and bridge:
-        # Flag 1 only: when no gap-free window exists, bridge the one feed gap. A gap-free window,
-        # at any width, always wins, so normal behaviour is untouched once fresh history exists.
-        window = _observation_window(snap, history, bridge)
-    return window
+    if not bridge:
+        return _observation_window(snap, history, 0)
+    # Flag on only. The unbridged search commits to the first width whose endpoints exist and then
+    # voids that result if it contains a hole, so a clean 2-minute window would lose to a 5-minute
+    # window that merely straddles a short gap. A gap-free window at any width wins first.
+    for width in _widths(snap):
+        found = _gap_free_window(snap, history, width)
+        if found is not None:
+            return found
+    return _observation_window(snap, history, bridge)
 
 
 def _observation_window(snap, history, bridge):
@@ -301,6 +328,8 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
             "option_velocity": 15 * max(clamp(acceleration / 2), 1 if persistent else 0),
             "strike_breadth": 10 * clamp(len(best) / 4),
             "entry_location": 10 * entry_quality,
+            # Benchmark return (SMH/SPY/QQQ) copied from discovery onto the snapshot.
+            # A feed-gap bridge fills it; a missing value leaves this part at 0.
             "sector_context": (5+5*clamp(max(context,relative)/.002)) if context_confirms else 0,
             "liquidity": 5 * clamp(1-(option.ask-option.bid)/option.ask/settings.max_spread_fraction),
             "contract_response": 5*clamp(response),

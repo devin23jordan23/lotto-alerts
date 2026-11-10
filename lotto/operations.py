@@ -33,6 +33,7 @@ class HealthMonitor:
     def failed_cycle(self, now, reason):
         if not watch_hours(now):
             self.failures = 0
+            self.first_failure = None
             return False
         self.failures += 1
         if self.first_failure is None:

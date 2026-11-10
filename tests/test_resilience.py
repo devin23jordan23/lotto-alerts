@@ -3,18 +3,22 @@ import io
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 
 from lotto import resilience
+from lotto.config import Settings
+from lotto.demo import demo_frames
+from lotto.discord import alert_payload
 from lotto.discovery import Discovery
 from lotto.engine import bars_confirm_after_gap
-from lotto.features import observation_window
+from lotto.features import candidates, observation_window
 from lotto.models import ET
 from lotto.operations import HealthMonitor
-from lotto.schwab import Schwab
+from lotto.schwab import Schwab, benchmark_for
 from lotto.store import Store
 
 T0 = datetime(2026, 11, 10, 14, 30, tzinfo=timezone.utc)
@@ -94,9 +98,31 @@ class WindowTests(unittest.TestCase):
         with patch.dict("os.environ", {"LOTTO_GAP_BRIDGE_MODE": "1", "LOTTO_GAP_BRIDGE_MAX_SECONDS": "300"}, clear=True):
             self.assertIsNone(observation_window(self.snap, self.history))
 
+    def test_clean_shorter_window_beats_a_longer_one_that_straddles_a_gap(self):
+        # A 4-minute hole sits inside the 5-minute window's tolerance, while the
+        # 2-minute window is already contiguous. Flag 0 still voids on the first
+        # matching width. Flag 1 keeps the clean window instead of bridging the hole.
+        resilience.reset_feed_state()
+        snap_at = datetime(2026, 11, 10, 15, 0, tzinfo=timezone.utc)
+        missing = {snap_at - timedelta(minutes=m) for m in (10, 9, 8)}
+        times = [snap_at - timedelta(minutes=m) for m in range(30, 0, -1)
+                 if snap_at - timedelta(minutes=m) not in missing]
+        history = [SimpleNamespace(at=t, bars=[None] * 10) for t in times]
+        resilience.note_feed_time(snap_at - timedelta(minutes=11))
+        resilience.note_feed_time(snap_at - timedelta(minutes=7))
+        snap = SimpleNamespace(at=snap_at, bars=[None] * 10)
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertIsNone(observation_window(snap, history))
+        with patch.dict("os.environ", {"LOTTO_GAP_BRIDGE_MODE": "1"}, clear=True):
+            _five, ten, window, minutes = observation_window(snap, history)
+        self.assertEqual(minutes, 2)
+        self.assertGreaterEqual(ten.at, snap_at - timedelta(minutes=7))
+        self.assertFalse(any((b.at - a.at).total_seconds() > 150 for a, b in zip(window, window[1:])))
+
 
 class DiscoveryBridgeTests(unittest.TestCase):
     def run_gap(self, env):
+        resilience.reset_feed_state()
         d = Discovery(8, always_deep={"SPY"})
         quote = lambda at, price, vol: {"SPY": {"price": price, "open": 100.0, "previous": 99.0,
                                                 "volume": vol, "at": at}}
@@ -106,6 +132,7 @@ class DiscoveryBridgeTests(unittest.TestCase):
                 d.update(quote(at, 100.0, 1000.0*m), at, ["SPY"])
             after = T0 + timedelta(minutes=14, seconds=440)
             d.update(quote(after, 101.0, 30000.0), after, ["SPY"])
+        resilience.reset_feed_state()
         return d.history["SPY"][-1]
 
     def test_flag_zero_has_no_return_right_after_gap(self):
@@ -218,6 +245,101 @@ class FastHealthTests(unittest.TestCase):
             self.assertIn("10 s", sent[0]["embeds"][0]["description"])
             m.failed_cycle(now + timedelta(seconds=20), "Schwab token broker unavailable")
             self.assertEqual(len(sent), 1)
+
+    def test_fast_mode_does_not_carry_the_clock_across_the_close(self):
+        now = datetime(2026, 11, 10, 15, 59, tzinfo=ET)
+        with patch.dict("os.environ", {"LOTTO_HEALTH_FAST_MODE": "1"}, clear=True):
+            m, sent = self.monitor()
+            self.assertFalse(m.failed_cycle(now, "x"))
+            self.assertFalse(m.failed_cycle(now + timedelta(minutes=2), "x"))
+            opened = datetime(2026, 11, 11, 9, 31, tzinfo=ET)
+            self.assertFalse(m.failed_cycle(opened, "x"))
+            self.assertTrue(m.failed_cycle(opened + timedelta(seconds=10), "x"))
+            self.assertEqual(len(sent), 1)
+
+
+def quote_at(at, price):
+    return {"price": price, "open": price, "previous": price, "volume": 1000.0, "at": at}
+
+
+class BenchmarkBridgeTests(unittest.TestCase):
+    """sector_context reads the benchmark return (SMH for MU/AVGO/AMD, SPY for QQQ)."""
+
+    before = {"MU": 100.0, "AMD": 110.0, "AVGO": 120.0, "QQQ": 400.0, "SMH": 200.0, "SPY": 500.0}
+    after_prices = {"MU": 101.0, "AMD": 112.0, "AVGO": 123.0, "QQQ": 404.0, "SMH": 202.0, "SPY": 505.0}
+
+    def tearDown(self):
+        resilience.reset_feed_state()
+
+    def feed(self, prices_before, prices_after, bridge_mode, hold=()):
+        resilience.reset_feed_state()
+        discovery = Discovery(12)
+        env = {"LOTTO_GAP_BRIDGE_MODE": str(bridge_mode)} if bridge_mode else {}
+        with patch.dict("os.environ", env, clear=True):
+            for minute in range(15):
+                at = T0 + timedelta(minutes=minute)
+                discovery.update({s: quote_at(at, p) for s, p in prices_before.items()}, at, list(prices_before))
+            if hold:
+                for step in range(1, 8):
+                    at = T0 + timedelta(minutes=14, seconds=60 * step)
+                    discovery.update({s: quote_at(at, prices_before[s]) for s in hold}, at, list(hold))
+            after = T0 + timedelta(minutes=14, seconds=440)
+            discovery.update({s: quote_at(after, p) for s, p in prices_after.items()}, after, list(prices_after))
+        return discovery, after
+
+    def sector_context(self, symbol, label, context_return):
+        snaps = [frame[0] for frame in demo_frames()]
+        when = snaps[30].at if context_return is not None else None
+        snap = replace(snaps[30], symbol=symbol, context_label=label,
+                       context_return_5m=context_return, context_time=when)
+        with patch.dict("os.environ", {}, clear=True):
+            found = candidates(snap, snaps[10:30], Settings())
+        self.assertTrue(found)
+        for candidate in found:
+            self.assertTrue(candidate.option and candidate.option.symbol)
+            card = alert_payload(candidate, "POTENTIAL" if candidate.setup and candidate.setup.building else "ACTIVE")
+            self.assertIn(f"{candidate.option.strike:g}", card["embeds"][0]["description"])
+            self.assertIn(f"${candidate.option.ask:.2f}", card["embeds"][0]["description"])
+        return found[0].parts["sector_context"], found[0].metrics["context_directional_return"]
+
+    def test_flag_off_leaves_benchmark_return_missing_and_sector_context_zero(self):
+        self.assertEqual(benchmark_for("MU"), "SMH")
+        self.assertEqual(benchmark_for("AMD"), "SMH")
+        self.assertEqual(benchmark_for("AVGO"), "SMH")
+        self.assertEqual(benchmark_for("QQQ"), "SPY")
+        discovery, after = self.feed(self.before, self.after_prices, 0)
+        self.assertEqual(discovery.return_5m("SMH", after), (None, None))
+        self.assertEqual(discovery.return_5m("SPY", after), (None, None))
+        term, context = self.sector_context("MU", "SMH", None)
+        self.assertEqual(term, 0)
+        self.assertEqual(context, 0)
+        # The same contract scores a benchmark term when the return is present.
+        present, _ = self.sector_context("MU", "SMH", 0.01)
+        self.assertGreater(present, 0)
+
+    def test_feed_gap_bridges_benchmark_into_sector_context(self):
+        discovery, after = self.feed(self.before, self.after_prices, 1)
+        smh, smh_at = discovery.return_5m("SMH", after)
+        spy, spy_at = discovery.return_5m("SPY", after)
+        self.assertAlmostEqual(smh, 202.0 / 200.0 - 1)
+        self.assertAlmostEqual(spy, 505.0 / 500.0 - 1)
+        self.assertLessEqual((after - smh_at).total_seconds(), 90)
+        self.assertLessEqual((after - spy_at).total_seconds(), 90)
+        mu_term, mu_context = self.sector_context("MU", "SMH", smh)
+        qqq_term, qqq_context = self.sector_context("QQQ", "SPY", spy)
+        self.assertGreater(mu_term, 0)
+        self.assertGreater(qqq_term, 0)
+        self.assertAlmostEqual(mu_context, smh)
+        self.assertAlmostEqual(qqq_context, spy)
+
+    def test_mode_one_does_not_bridge_a_benchmark_while_the_feed_keeps_printing(self):
+        discovery, after = self.feed(self.before, self.after_prices, 1, hold=("SPY",))
+        self.assertEqual(discovery.return_5m("SMH", after), (None, None))
+        term, _ = self.sector_context("MU", "SMH", None)
+        self.assertEqual(term, 0)
+        bridged, after = self.feed(self.before, self.after_prices, 2, hold=("SPY",))
+        value, _ = bridged.return_5m("SMH", after)
+        self.assertAlmostEqual(value, 202.0 / 200.0 - 1)
 
 
 if __name__ == "__main__":

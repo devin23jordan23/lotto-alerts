@@ -103,6 +103,7 @@ class Engine:
                     and bars_confirm_after_gap(snap, best)):
                 # The feed gap, not the setup, interrupted the persistence check. Two completed
                 # one-minute bars already closed through the trigger on the card side.
+                # best.option was required to get here, so the card is still that contract.
                 awaiting_confirmation = False
                 best.metrics["gap_bar_confirmation"] = 1
             if awaiting_confirmation and not opening_fast_lane:

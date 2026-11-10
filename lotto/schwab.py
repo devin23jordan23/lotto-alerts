@@ -128,8 +128,10 @@ class Schwab:
         self.broker_deadline = time.monotonic() + ttl
         return token
 
-    def resilient_broker_token(self, sleep=time.sleep):
+    def resilient_broker_token(self, sleep=None):
         """Refresh early, retry briefly, and keep a still-valid token through a broker blip."""
+        if sleep is None:
+            sleep = time.sleep
         now = time.monotonic()
         if self.broker_token and now < self.broker_deadline:
             return self.broker_token
@@ -419,6 +421,7 @@ class Schwab:
                                                    volume=int(number(q.get("totalVolume")) or option.volume)))
                 at = datetime.now(timezone.utc)
                 benchmark = benchmark_for(symbol)
+                # Benchmark 5-minute return (SMH/SPY/QQQ). Discovery bridges it across a feed gap.
                 context, context_time = self.discovery.return_5m(benchmark, at)
                 market = "QQQ" if symbol == "SPY" else "SPY"
                 market_return, market_time = self.discovery.return_5m(market, at)

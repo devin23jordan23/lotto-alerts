@@ -2,7 +2,7 @@
 from collections import defaultdict
 from datetime import timedelta
 from math import isfinite
-from .resilience import gap_bridge_seconds
+from .resilience import gap_bridge_seconds, gap_is_bridgeable, note_feed_time
 
 
 class Discovery:
@@ -32,6 +32,14 @@ class Discovery:
             self.day = day
         ranks = {}
         self.observations = []
+        bridge = gap_bridge_seconds()
+        if bridge:
+            # Record this batch before any return is measured so the first poll after a hole can
+            # bridge. Quote times stay within one cycle, so they do not invent a feed gap.
+            fresh = sorted({q.get("at") for q in quotes.values()
+                            if q.get("at") is not None and 0 <= (now-q["at"]).total_seconds() <= 90})
+            for stamp in fresh:
+                note_feed_time(stamp)
         for symbol, q in quotes.items():
             price, opening, previous, volume = (q.get(k) for k in ("price", "open", "previous", "volume"))
             at = q.get("at")
@@ -41,13 +49,14 @@ class Discovery:
                 continue
             history = self.history[symbol]
             old = [v for v in history if 300 <= (now-v["at"]).total_seconds() <= 390]
-            bridge = gap_bridge_seconds()
             bridged = False
             if not old and bridge:
-                # Feed gap: measure from the last pre-gap quote (a 5-to-15 minute span, never newer
-                # than 5 minutes) instead of waiting five fresh minutes for a reference.
-                old = [v for v in history if 300 <= (now-v["at"]).total_seconds() <= bridge]
-                bridged = bool(old)
+                # Same rule for the name and its benchmark (SMH/SPY/QQQ), which is what
+                # sector_context reads. Mode 1 keeps a single-name hole unbridged.
+                older = [v for v in history if 300 <= (now-v["at"]).total_seconds() <= bridge]
+                if older and gap_is_bridgeable(older[-1]["at"], at):
+                    old = older
+                    bridged = True
             ret5 = price/old[-1]["price"]-1 if old else None
             delta = volume-old[-1]["volume"] if old else None
             if bridged and delta is not None:

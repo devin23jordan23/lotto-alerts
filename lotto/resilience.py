@@ -1,8 +1,9 @@
 """Outage-resilience flags (desk fix 2026-11-10). Every flag is an integer env var; 0 = current behavior.
 
-LOTTO_GAP_BRIDGE_MODE            1: option-flow windows and 5-minute context/peer returns may span one
-                                    feed-wide outage gap (every symbol silent) instead of waiting for a
-                                    fresh contiguous 4-10 min of post-gap data. 2: also bridge a single
+LOTTO_GAP_BRIDGE_MODE            1: option-flow windows and 5-minute context, benchmark
+                                    (sector_context via SMH/SPY/QQQ), market, and peer returns may span
+                                    one feed-wide outage gap (every symbol silent) instead of waiting for
+                                    a fresh contiguous 4-10 min of post-gap data. 2: also bridge a single
                                     symbol's own gap (chain-rotation re-promotion). Default 0.
 LOTTO_GAP_BRIDGE_MAX_SECONDS     longest gap that may be bridged (default 900).
 LOTTO_GAP_CONFIRM_MODE           1: on the first observation after a feed-wide outage gap (2: any gap), two completed 1m bars closing on
