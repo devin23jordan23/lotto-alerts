@@ -21,6 +21,7 @@ from .day_export import maybe_day_export
 from .health import check
 from .audit import audit_store, diagnose_symbols, audit_coil_burst_hypothesis
 from .forensics import export_case, export_window_closed
+from .resilience import flag
 from .operations import HealthMonitor
 
 LOG = logging.getLogger(__name__)
@@ -107,7 +108,7 @@ def main():
     if live_delivery and not webhook:
         raise SystemExit("DISCORD_LOTTO_WEBHOOK is required when LOTTO_SEND_ALERTS=true")
     engine = Engine(store, env_settings(), dry_run=not live_delivery)
-    health_monitor = HealthMonitor(store, webhook)
+    health_monitor = HealthMonitor(store, os.getenv("LOTTO_HEALTH_WEBHOOK", "").strip() or webhook)
     if args.mode in {"demo", "replay"}:
         if args.mode == "replay" and not args.input:
             parser.error("replay requires --input")
@@ -195,6 +196,7 @@ def main():
             LOG.warning("Forensic export unavailable (%s)", type(exc).__name__)
     while not stop:
         began = time.monotonic()
+        cycle_failed = False
         try:
             today = datetime.now(ET).date().isoformat()
             tracked = store.active_options(today)
@@ -238,6 +240,7 @@ def main():
         except Exception as exc:
             detail = str(exc) if type(exc) is RuntimeError else type(exc).__name__
             LOG.error("Cycle failed (%s); retaining state for retry", detail)
+            cycle_failed = True
             if live_delivery:
                 reason = ("Schwab token broker unavailable" if "Schwab token broker" in detail
                           else "market-data cycle unavailable")
@@ -250,7 +253,9 @@ def main():
         maybe_day_export(engine.settings, database, datetime.now(timezone.utc))
         if args.once:
             break
-        wait = max(1, poll_seconds - (time.monotonic() - began))
+        retry_seconds = flag("LOTTO_FAILED_CYCLE_RETRY_SECONDS")
+        cycle_seconds = min(poll_seconds, max(5, retry_seconds)) if cycle_failed and retry_seconds > 0 else poll_seconds
+        wait = max(1, cycle_seconds - (time.monotonic() - began))
         deadline = time.monotonic() + wait
         while not stop and time.monotonic() < deadline:
             time.sleep(max(0, min(1, deadline - time.monotonic())))

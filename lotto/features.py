@@ -10,6 +10,7 @@ from math import isfinite, log
 from .config import Settings
 from .models import ET, Option, Snapshot
 from .patterns import Setup, dead_market_metrics, detect_setup, path_features
+from .resilience import gap_bridge_seconds, gap_is_bridgeable
 
 
 def clamp(value: float) -> float:
@@ -120,8 +121,51 @@ def window_endpoint(history, target):
     return min(matches, key=lambda s: abs((target-s.at).total_seconds())) if matches else None
 
 
+def bridged_endpoint(history, target, bridge_seconds):
+    """Across a feed gap, use the last observation before the target (never a later one)."""
+    before = [s for s in history if 0 <= (target-s.at).total_seconds() <= bridge_seconds]
+    return max(before, key=lambda s: s.at) if before else None
+
+
+def _widths(snap):
+    early_bars = getattr(snap, "bars", None)
+    return (5, 2, 1) if early_bars is not None and len(early_bars) < 5 else (5, 2)
+
+
+def _gap_free_window(snap, history, width):
+    """One width, with the flag-0 endpoint rule. A hole at this width is a miss, not a void of the others."""
+    endpoints = []
+    for minutes in (width, 2*width):
+        target = snap.at - timedelta(minutes=minutes)
+        endpoint = window_endpoint(history, target)
+        if endpoint is None:
+            return None
+        endpoints.append(endpoint)
+    if not (endpoints[1].at < endpoints[0].at < snap.at):
+        return None
+    five, ten = endpoints
+    window = sorted([s for s in history if ten.at <= s.at < snap.at] + [snap], key=lambda s: s.at)
+    if any((b.at - a.at).total_seconds() > 150 for a, b in zip(window, window[1:])):
+        return None
+    return five, ten, window, width
+
+
 def observation_window(snap, history):
     # Windows use real timestamps, never poll counts. Missing windows do not become zeros.
+    bridge = gap_bridge_seconds()
+    if not bridge:
+        return _observation_window(snap, history, 0)
+    # Flag on only. The unbridged search commits to the first width whose endpoints exist and then
+    # voids that result if it contains a hole, so a clean 2-minute window would lose to a 5-minute
+    # window that merely straddles a short gap. A gap-free window at any width wins first.
+    for width in _widths(snap):
+        found = _gap_free_window(snap, history, width)
+        if found is not None:
+            return found
+    return _observation_window(snap, history, bridge)
+
+
+def _observation_window(snap, history, bridge):
     endpoints, window_minutes = [], 5
     early_bars = getattr(snap, "bars", None)
     for width in ((5, 2, 1) if early_bars is not None and len(early_bars) < 5 else (5, 2)):
@@ -129,6 +173,8 @@ def observation_window(snap, history):
         for minutes in (width, 2*width):
             target = snap.at - timedelta(minutes=minutes)
             endpoint = window_endpoint(history, target)
+            if endpoint is None and bridge:
+                endpoint = bridged_endpoint(history, target, bridge)
             if endpoint is None:
                 break
             endpoints.append(endpoint)
@@ -139,7 +185,12 @@ def observation_window(snap, history):
         return None
     five, ten = endpoints
     window = sorted([s for s in history if ten.at <= s.at < snap.at] + [snap],key=lambda s:s.at)
-    if any((b.at - a.at).total_seconds() > 150 for a, b in zip(window, window[1:])):
+    long_gaps = [(a, b) for a, b in zip(window, window[1:]) if (b.at - a.at).total_seconds() > 150]
+    # Unbridged (flag 0 path): any gap over 150 s voids the window. Bridged: one gap up to the bridge
+    # limit is kept as missing time; flows stay per real second, the pre-gap sample is never re-dated.
+    if long_gaps and not (bridge and len(long_gaps) == 1
+                          and (long_gaps[0][1].at - long_gaps[0][0].at).total_seconds() <= bridge
+                          and gap_is_bridgeable(long_gaps[0][0].at, long_gaps[0][1].at)):
         return None
     return five, ten, window, window_minutes
 
@@ -277,12 +328,19 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
             "option_velocity": 15 * max(clamp(acceleration / 2), 1 if persistent else 0),
             "strike_breadth": 10 * clamp(len(best) / 4),
             "entry_location": 10 * entry_quality,
+            # Benchmark return (SMH/SPY/QQQ) copied from discovery onto the snapshot.
+            # A feed-gap bridge fills it; a missing value leaves this part at 0.
             "sector_context": (5+5*clamp(max(context,relative)/.002)) if context_confirms else 0,
             "liquidity": 5 * clamp(1-(option.ask-option.bid)/option.ask/settings.max_spread_fraction),
             "contract_response": 5*clamp(response),
         })
+        if gap_bridge_seconds():
+            metrics["history_gap_seconds"] = max([0.0] + [(b.at - a.at).total_seconds() for a, b in zip(window, window[1:])])
         metrics.update({"option_acceleration": acceleration, "cluster_size": len(best),
-                        "migration": migration, "option_volume_5m": now_total,
+                        "migration": migration,
+                        # Bridged windows can span more than 5 minutes; keep this a true 5-minute volume.
+                        "option_volume_5m": (now_total*300/duration_now if gap_bridge_seconds() and duration_now > 390
+                                             else now_total),
                         "context_directional_return": context, "relative_sector_5m": relative,
                         "peer_directional_return": peer, "options_persistent_20m": int(persistent),
                         "options_window_minutes": window_minutes, "trigger_gap_atr": gap,
