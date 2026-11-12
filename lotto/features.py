@@ -10,7 +10,8 @@ from math import isfinite, log
 from .config import Settings
 from .models import ET, Option, Snapshot
 from .patterns import Setup, dead_market_metrics, detect_setup, path_features
-from .resilience import gap_bridge_seconds, gap_is_bridgeable
+from .resilience import flag, gap_bridge_seconds, gap_is_bridgeable
+from .weekly import expiry_limit, weekly_fallback_dte
 
 
 def clamp(value: float) -> float:
@@ -40,12 +41,14 @@ def quote_ok(option: Option, snap: Snapshot, settings: Settings) -> bool:
 
 def contract_ok(option: Option, snap: Snapshot, settings: Settings) -> bool:
     dte = (option.expiry - snap.at.astimezone(ET).date()).days
+    # Flag 0 keeps the 0–1 DTE cap. A wider limit applies only to names with no near expiry.
+    dte_cap = settings.max_dte if weekly_fallback_dte() <= 0 else expiry_limit(snap, settings)
     spread = option.ask - option.bid
     direction = 1 if option.side == "CALL" else -1
     moneyness = direction * (option.strike / snap.spot - 1)
     atr = snap.prior_atr if snap.prior_atr and isfinite(snap.prior_atr) and snap.prior_atr > 0 else None
     premium_cap = max(settings.max_ask, min(settings.max_scaled_ask, atr*settings.premium_atr_fraction)) if atr else settings.max_ask
-    return (quote_ok(option, snap, settings) and 0 <= dte <= settings.max_dte
+    return (quote_ok(option, snap, settings) and 0 <= dte <= dte_cap
             and option.bid > 0 and settings.min_ask <= option.ask <= premium_cap
             and spread / option.ask <= settings.max_spread_fraction
             and spread <= settings.max_spread_dollars
@@ -255,8 +258,9 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
                 or any(b.volume < a.volume for a, b in zip(observations, observations[1:]))):
             continue
         usable[ident] = option
+    dte_cap = settings.max_dte if weekly_fallback_dte() <= 0 else expiry_limit(snap, settings)
     groups = {(o.expiry, o.side) for o in snap.options
-              if 0 <= (o.expiry - snap.at.astimezone(ET).date()).days <= settings.max_dte}
+              if 0 <= (o.expiry - snap.at.astimezone(ET).date()).days <= dte_cap}
     results = []
     for expiry, side in sorted(groups):
         direction = 1 if side == "CALL" else -1
@@ -426,4 +430,7 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
         if peer_valid and peer > 0:
             reasons.append("Peers: " + ", ".join(snap.peer_leaders))
         results.append(Candidate(snap, option, score, parts, metrics, reasons, qualifying, setup=setup, blockers=blockers))
+    if flag("LOTTO_ANDRE_WEIGHTS_MODE") == 1:
+        from .andre import apply_mode
+        return apply_mode(results)
     return results
