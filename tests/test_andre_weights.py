@@ -9,7 +9,7 @@ from lotto.andre import (
     TAPE, aggregate, apply_mode, blended_ema, burst_multiple, ema_weights,
     evaluate_side_full, remember_levels, remember_rvol, reset_state, rvol_now, time_points,
 )
-from lotto.andre_config import WEIGHTS
+from lotto.andre_config import WEIGHTS, threshold
 from lotto.config import Settings
 from lotto.demo import demo_frames
 from lotto.engine import Engine
@@ -73,15 +73,22 @@ class FlagOffTests(unittest.TestCase):
         again = candidates(snap, history, Settings())
         self.assertEqual(again[0].score, 91.79)
 
-    def test_weight_table_caps_at_100_before_the_named_bonus(self):
-        positive = (WEIGHTS["LEVEL_PM"] + WEIGHTS["LEVEL_PD"] + WEIGHTS["LEVEL_N3"] + WEIGHTS["LEVEL_N5"]
-                    + WEIGHTS["SPY_TREND"] + WEIGHTS["SPY_LEVEL"] + WEIGHTS["QQQ_TREND"] + WEIGHTS["QQQ_LEVEL"]
-                    + WEIGHTS["SECTOR_ETF"] + WEIGHTS["PEERS"] + WEIGHTS["LEADER"] + WEIGHTS["RVOL_3"]
-                    + WEIGHTS["ENTRY"] + WEIGHTS["TIME_P1"])
-        self.assertEqual(positive, 100)
-        self.assertEqual(WEIGHTS["NAMED"], 5)
-        self.assertEqual(WEIGHTS["PENALTY_CHASE"], 15)
-        self.assertEqual(WEIGHTS["PENALTY_STRETCH"], 10)
+    def test_verified_weights_are_additive_and_the_cut_is_six(self):
+        # The spec's 38 counts both morning buckets. They do not co-fire; the
+        # highest single card is TIME_P1 plus the other seven terms.
+        listed = (WEIGHTS["TIME_P1"] + WEIGHTS["TIME_P2"] + WEIGHTS["SPY_EFF"] + WEIGHTS["SPY_D3"]
+                  + WEIGHTS["PACE_2"] + WEIGHTS["RVOL_3"] + WEIGHTS["BURST_PD"] + WEIGHTS["GAP_1ATR"]
+                  + WEIGHTS["EARN_D1"])
+        self.assertEqual(listed, 38)
+        self.assertEqual(listed - WEIGHTS["TIME_P2"], 33)
+        self.assertEqual(threshold("MIN_SCORE"), 6)
+        self.assertEqual(threshold("TOP_SCORE"), 8)
+        self.assertEqual(WEIGHTS["TIME_P4"], -2)
+        self.assertEqual(WEIGHTS["LEVEL_PM"], 0)
+        self.assertEqual(WEIGHTS["SPY_LEVEL"], 0)
+        self.assertEqual(WEIGHTS["SECTOR_ETF"], 0)
+        with patch.dict(os.environ, {"LOTTO_ANDRE_MIN_SCORE": "0"}):
+            self.assertEqual(threshold("MIN_SCORE"), 0)
 
 
 class StructureTests(unittest.TestCase):
@@ -104,13 +111,14 @@ class StructureTests(unittest.TestCase):
         self.assertAlmostEqual(blended["ema9"], blended["ema9_2"])
         self.assertGreater(blended["weights"][0], 0)
 
-    def test_time_windows_include_the_afternoon_and_are_configurable(self):
-        self.assertEqual(time_points(20), 10)
-        self.assertEqual(time_points(70), 6)
-        self.assertEqual(time_points(120), 0)
-        self.assertEqual(time_points(270), 6)
-        with patch.dict(os.environ, {"LOTTO_ANDRE_W_TIME_P4": "9"}):
-            self.assertEqual(time_points(270), 9)
+    def test_time_windows_follow_the_verified_buckets(self):
+        self.assertEqual(time_points(20), 8)     # 09:50
+        self.assertEqual(time_points(37), 5)     # 10:07
+        self.assertEqual(time_points(120), 0)    # 11:30
+        self.assertEqual(time_points(240), -2)   # 13:30, not a bonus
+        self.assertEqual(time_points(400), -2)
+        with patch.dict(os.environ, {"LOTTO_ANDRE_W_TIME_P4": "0"}):
+            self.assertEqual(time_points(240), 0)
 
     def test_rvol_uses_twenty_sessions_then_fourteen_and_is_unknown_below_that(self):
         day = datetime(2026, 11, 11, tzinfo=ET).date()
@@ -153,131 +161,147 @@ class TriggerTests(unittest.TestCase):
                       {len(snap.bars): (volume / rvol, sessions)})
         return evaluate_side_full(snap, direction)
 
-    def test_level_break_room_and_each_named_path(self):
-        # Fresh PMH cross with the next layer far away: the level break is allowed.
-        closes = [99.5] * 10 + [100.4, 100.4]
-        snap = _snap(_bars(closes), symbol="ZZZ", premarket_high=100, prior_high=110, prior_close=110)
-        far = self._score(snap, rvol=2)
-        self.assertIn("LEVEL_BREAK", far["metrics"]["andre_triggers"])
-        self.assertNotIn("room to next layer", far["blockers"])
+    def test_score_matches_the_verified_table(self):
+        # 10:07 is the +5 bucket. A prior-day burst adds +1. Nothing else verified.
+        # Own-catalyst must not fill in SPY points.
+        start = datetime(2026, 11, 11, 9, 31, tzinfo=ET)
+        closes = [100] * 28 + [101.2, 101.2]
+        snap = _snap(_bars(closes, start=start), symbol="MSFT", premarket_high=90, prior_high=101,
+                     prior_atr=5, prior_close=100.2)
+        TAPE.seed("SPY", price=101, open=100, pdh=90, at=snap.at)
+        remember_rvol("MSFT", snap.at.astimezone(ET).date(), {}, {minute: (200.0, 20) for minute in range(40)})
+        result = self._score(snap, rvol=1.2)
+        self.assertEqual(result["parts"]["time_window"], 5)
+        self.assertEqual(result["parts"]["burst_pd"], 1)
+        self.assertEqual(result["parts"]["spy_eff"], 0)
+        self.assertEqual(result["parts"]["spy_d3"], 0)
+        self.assertEqual(result["parts"]["pace"], 0)
+        self.assertEqual(result["parts"]["spy_trend"], 0)
+        self.assertEqual(result["score"], 6)
+        self.assertEqual(threshold("MIN_SCORE"), 6)
 
-        # PDH sits 0.2 ATR overhead and RVOL is only 1.6: the break is held.
-        tight = _snap(_bars(closes), symbol="ZZZ", premarket_high=100, prior_high=100.6, prior_atr=1, prior_close=110)
-        held = self._score(tight, rvol=1.6)
-        self.assertIn("room to next layer", held["blockers"])
-        self.assertNotIn("LEVEL_BREAK", held["metrics"]["andre_triggers"].split(","))
+        afternoon = datetime(2026, 11, 11, 13, 30, tzinfo=ET)
+        late = _snap(_bars([100, 100.2], start=afternoon), symbol="ZZZ", premarket_high=90,
+                     prior_atr=5, prior_close=100)
+        late_score = self._score(late, rvol=1.0)
+        self.assertEqual(late_score["parts"]["time_window"], -2)
 
-        # Sector, SPY, and RVOL >= 3 clear the same tight break.
-        TAPE.seed("SPY", price=101, open=100, at=tight.at)
-        TAPE.seed("QQQ", price=101, open=100, at=tight.at)
-        cleared = self._score(tight, rvol=3.2)
-        # ZZZ has no sector ETF, so sector_working is false and the hold remains.
-        self.assertIn("room to next layer", cleared["blockers"])
-        mapped = _snap(_bars(closes), symbol="MU", premarket_high=100, prior_high=100.6, prior_atr=1, prior_close=110)
-        TAPE.seed("SMH", price=110, open=100, vwap=105, at=mapped.at)
-        released = self._score(mapped, rvol=3.2)
-        self.assertNotIn("room to next layer", released["blockers"])
-        self.assertIn("LEVEL_BREAK", released["metrics"]["andre_triggers"])
+        watched = _snap(_bars([99.5] * 10 + [100.4, 100.4]), symbol="MU",
+                        premarket_high=100, prior_high=110, prior_atr=5, prior_close=100)
+        TAPE.seed("SMH", price=110, open=100, vwap=105, at=watched.at)
+        TAPE.seed("SPY", price=110, open=100, pdh=90, at=watched.at)
+        watched_score = self._score(watched, rvol=1.1)
+        self.assertEqual(watched_score["parts"]["spy_level"], 0)
+        self.assertEqual(watched_score["parts"]["sector_etf"], 0)
+        self.assertEqual(watched_score["parts"]["level_pm"], 0)
+        self.assertEqual(watched_score["parts"]["level_pd"], 0)
+        self.assertIn("LEVEL_BREAK", watched_score["metrics"]["andre_watch"])
+        self.assertEqual(watched_score["metrics"]["andre_fast_path"], 0)
 
-    def test_opening_range_break_is_inside_the_first_hour(self):
-        closes = [100, 100, 100, 100, 100, 100, 101, 101]
-        snap = _snap(_bars(closes), symbol="ZZZ", prior_close=90, premarket_high=120, prior_atr=5)
-        result = self._score(snap, rvol=2)
-        self.assertIn("OR5", result["metrics"]["andre_triggers"])
+    def test_only_the_open_flush_and_a_deep_trend_reclaim_can_fire(self):
+        # Tight flush into PDL, reclaim inside three 2-minute bars, depth >= 5, 09:32-10:00.
+        closes = [100, 100, 100, 100, 97.8, 97.8, 99, 99, 102, 102]
+        snap = _snap(_bars(closes), symbol="ZZZ", premarket_high=90, prior_low=98, prior_high=101,
+                     prior_atr=2, prior_close=100.4)
+        TAPE.seed("SPY", price=100, open=100, at=snap.at)
+        fired = self._score(snap, rvol=2)
+        self.assertIn("FLUSH_V", fired["metrics"]["andre_triggers"])
+        self.assertEqual(fired["metrics"]["andre_fast_path"], 1)
+        self.assertGreaterEqual(fired["score"], 6)
 
-    def test_n_day_break_adds_the_range_points(self):
-        closes = [99] * 10 + [101, 101]
-        snap = _snap(_bars(closes), symbol="ZZZ", premarket_high=90, prior_high=90, prior_close=98, prior_atr=5)
-        remember_levels("ZZZ", snap.at.astimezone(ET).date(), [(100, 90)] * 5)
-        result = self._score(snap, rvol=2)
-        self.assertIn("NDAY_BREAK", result["metrics"]["andre_triggers"])
-        self.assertEqual(result["parts"]["level_n3"], WEIGHTS["LEVEL_N3"])
-        self.assertEqual(result["parts"]["level_n5"], WEIGHTS["LEVEL_N5"])
+        reset_state()
+        late_start = datetime(2026, 11, 11, 11, 0, tzinfo=ET)
+        midday = _snap(_bars(closes, start=late_start), symbol="ZZZ", premarket_high=90, prior_low=98,
+                       prior_high=101, prior_atr=2, prior_close=100.4)
+        TAPE.seed("SPY", price=100, open=100, at=midday.at)
+        quiet = self._score(midday, rvol=2)
+        self.assertNotIn("FLUSH_V", quiet["metrics"]["andre_triggers"])
+        self.assertEqual(quiet["metrics"]["andre_fast_path"], 0)
 
-    def test_s29_split_flush_and_fade(self):
-        # S29-B does not fire on a bare level cross with no earlier reclaim.
-        lone = _snap(_bars([99] * 10 + [101, 101]), symbol="ZZZ", premarket_high=100, prior_high=130, prior_atr=5)
-        self.assertNotIn("S29B", self._score(lone, rvol=2.5)["metrics"]["andre_triggers"])
+    def test_watchlist_setups_do_not_fast_path_and_dropped_setups_do_not_fire(self):
+        level = _snap(_bars([99.5] * 10 + [100.4, 100.4]), symbol="ZZZ", premarket_high=100,
+                      prior_high=110, prior_atr=5, prior_close=110)
+        level_result = self._score(level, rvol=2)
+        self.assertIn("LEVEL_BREAK", level_result["metrics"]["andre_watch"])
+        self.assertNotIn("LEVEL_BREAK", level_result["metrics"]["andre_triggers"])
+        self.assertEqual(level_result["metrics"]["andre_fast_path"], 0)
 
-        # Inside-range VWAP cross after a flush: exempt from the outside-range gate.
-        rows = [(220, 20)] * 2 + [(88, 9000)] * 6 + [(70, 100)] * 10
-        rows += [(70 + (index + 1) * 1.3, 80) for index in range(30)]
-        early = _snap(_varied(rows[:44]), symbol="ZZZ", premarket_high=300, prior_high=300, prior_atr=10, prior_close=100)
-        reclaim = self._score(early, rvol=1.3)
-        self.assertIn("S29A", reclaim["metrics"]["andre_triggers"])
-        self.assertNotIn("outside the range", reclaim["blockers"])
-        self.assertNotIn("S29B", reclaim["metrics"]["andre_triggers"])
+        opening = _snap(_bars([100] * 6 + [101, 101]), symbol="ZZZ", prior_close=90,
+                        premarket_high=120, prior_atr=5)
+        opening_result = self._score(opening, rvol=2)
+        self.assertIn("OR5", opening_result["metrics"]["andre_watch"])
+        self.assertEqual(opening_result["metrics"]["andre_fast_path"], 0)
 
-        # Later PMH cross on a name that already reclaimed VWAP. RVOL >= 2.
-        follow_closes = [100] * 8 + [94] * 6 + [100] * 6 + [101] * 10 + [103, 103]
-        follow = _snap(_bars(follow_closes), symbol="ZZZ", premarket_high=102, prior_high=140, prior_atr=5, prior_close=99)
-        self.assertIn("S29B", self._score(follow, rvol=2.5)["metrics"]["andre_triggers"])
+        nday = _snap(_bars([99] * 10 + [101, 101]), symbol="ZZZ", premarket_high=90, prior_high=90,
+                     prior_close=98, prior_atr=5)
+        from lotto.andre import remember_levels
+        remember_levels("ZZZ", nday.at.astimezone(ET).date(), [(100, 90)] * 5)
+        nday_result = self._score(nday, rvol=2)
+        self.assertNotIn("NDAY_BREAK", nday_result["metrics"]["andre_triggers"])
+        self.assertNotIn("NDAY_BREAK", nday_result["metrics"]["andre_watch"])
+        self.assertEqual(nday_result["metrics"]["andre_fast_path"], 0)
 
-        flushed = _snap(_bars([100] * 6 + [90] * 6 + [96] * 2), symbol="ZZZ", premarket_low=90, prior_atr=8, prior_close=100)
-        self.assertIn("FLUSH_REVERSAL", self._score(flushed, rvol=2)["metrics"]["andre_triggers"])
+        follow = _snap(_bars([100] * 8 + [94] * 6 + [100] * 6 + [101] * 10 + [103, 103]),
+                       symbol="ZZZ", premarket_high=102, prior_high=140, prior_atr=5, prior_close=99)
+        follow_result = self._score(follow, rvol=2.5)
+        self.assertIn("S29B", follow_result["metrics"]["andre_watch"])
+        self.assertEqual(follow_result["metrics"]["andre_fast_path"], 0)
 
-        # Opening sell-off, then a VWAP rejection between 10:00 and 11:00.
+        leader = _snap(_bars([99] * 10 + [101, 101]), symbol="MU", premarket_high=100, prior_high=130,
+                       prior_atr=5, prior_close=98)
+        TAPE.seed("SMH", price=50, open=80, high=80, low=49, vwap=70, at=leader.at)
+        for peer in peers_for("MU"):
+            TAPE.seed(peer, price=100, open=100, at=leader.at)
+        leader_result = self._score(leader, rvol=2)
+        self.assertIn("S31", leader_result["metrics"]["andre_watch"])
+        self.assertEqual(leader_result["metrics"]["andre_fast_path"], 0)
+
+        early = _snap(_bars([100] * 12 + [101, 101]), symbol="ZZZ", premarket_high=300, prior_atr=5, prior_close=100)
+        early_result = self._score(early, rvol=2)
+        self.assertNotIn("S29A", early_result["metrics"]["andre_triggers"])
+        self.assertEqual(early_result["metrics"]["andre_fast_path"], 0)
+
         fade_closes = [100 - index * 0.3 for index in range(16)] + [95 + index * 0.4 for index in range(12)] + [98, 98, 94, 94]
         faded = _snap(_bars(fade_closes), symbol="ZZZ", premarket_low=93, prior_atr=8, prior_close=101)
-        self.assertIn("FADE_REJECT", self._score(faded, direction=-1, rvol=2)["metrics"]["andre_triggers"])
+        faded_result = self._score(faded, direction=-1, rvol=2)
+        self.assertNotIn("FADE_REJECT", faded_result["metrics"]["andre_triggers"])
+        self.assertNotIn("FADE_LEVEL", faded_result["metrics"]["andre_triggers"])
+        self.assertEqual(faded_result["metrics"]["andre_fast_path"], 0)
 
-    def test_trend_pullback_requires_the_drive(self):
-        rise = [100 + index * 0.15 for index in range(36)]
-        bars = list(_bars(rise))
-        # Last bar tags back toward the EMA and closes up with the trend.
-        last = bars[-1]
-        bars[-1] = Bar(last.end, last.open, last.high, 103.5, last.close, last.volume)
-        snap = _snap(tuple(bars), symbol="ZZZ", premarket_high=100.2, prior_high=104, prior_atr=2, prior_close=99)
-        result = self._score(snap, rvol=2)
-        self.assertIn("TREND_PULLBACK", result["metrics"]["andre_triggers"])
-        inside = _snap(tuple(bars), symbol="ZZZ", premarket_high=200, prior_high=200, prior_atr=2)
-        self.assertNotIn("TREND_PULLBACK", self._score(inside, rvol=2)["metrics"]["andre_triggers"])
-
-    def test_s31_leader_breaks_while_the_etf_is_weak(self):
-        closes = [99] * 10 + [101, 101]
-        snap = _snap(_bars(closes), symbol="MU", premarket_high=100, prior_high=130, prior_atr=5, prior_close=98)
-        TAPE.seed("SMH", price=50, open=80, high=80, low=49, vwap=70, at=snap.at)
-        for peer in peers_for("MU"):
-            TAPE.seed(peer, price=100, open=100, at=snap.at)
-        result = self._score(snap, rvol=2)
-        self.assertIn("S31", result["metrics"]["andre_triggers"])
-
-    def test_mid_range_burst_scores_nothing_and_an_aligned_burst_does_not_wait(self):
-        bars = _bars([100, 100.1], volume=5_000)
-        quiet = _snap(bars, symbol="RVOL", premarket_high=200, prior_atr=5)
-        day = quiet.at.astimezone(ET).date()
-        remember_rvol("RVOL", day, {}, {0: (100.0, 20), 1: (100.0, 20)})
-        quiet_result = evaluate_side_full(quiet, 1)
-        self.assertEqual(quiet_result["metrics"]["andre_burst_aligned"], 0)
-        self.assertEqual(quiet_result["parts"]["rvol"], 0.0)
-        aligned = _snap(bars, symbol="RVOL", premarket_high=100, prior_high=140, prior_atr=5, prior_close=99)
-        hit = evaluate_side_full(aligned, 1)
-        self.assertEqual(hit["metrics"]["andre_burst_aligned"], 1)
-        self.assertEqual(hit["parts"]["rvol"], WEIGHTS["RVOL_15"])
-
-    def test_exhausted_approach_holds_unless_catalyst_or_pull_in(self):
+    def test_old_holds_and_the_catalyst_fill_are_gone(self):
         climb = [98 + index * (1.9 / 20) for index in range(22)] + [100.2, 100.2]
         snap = _snap(_bars(climb), symbol="ZZZ", premarket_high=100, prior_high=130, prior_atr=1, prior_close=98)
-        TAPE.seed("SPY", price=102.0, open=100, atr=1, at=snap.at, samples=deque([
+        TAPE.seed("SPY", price=102.0, open=100, atr=1, pdh=90, at=snap.at, samples=deque([
             (snap.at - timedelta(minutes=16), 101.4), (snap.at, 102.0)]))
         held = self._score(snap, rvol=2)
-        self.assertIn("exhausted approach", held["blockers"])
-        self.assertEqual(held["parts"]["chase"], -WEIGHTS["PENALTY_CHASE"])
-        # Own catalyst: the stock's ATR move from the open outruns SPY.
-        TAPE.seed("SPY", price=100.2, open=100, atr=1, at=snap.at, samples=deque([
-            (snap.at - timedelta(minutes=16), 99.5), (snap.at, 100.2)]))
-        exempt = self._score(snap, rvol=2)
-        self.assertNotIn("exhausted approach", exempt["blockers"])
-        self.assertEqual(exempt["metrics"]["andre_catalyst"], 1)
+        self.assertNotIn("exhausted approach", held["blockers"])
+        self.assertNotIn("room to next layer", held["blockers"])
+        self.assertEqual(held["parts"]["chase"], 0)
+        self.assertEqual(held["parts"]["spy_eff"], 0)
+        self.assertEqual(held["parts"]["spy_d3"], 0)
 
-    def test_after_eleven_blocks_a_red_reclaim_and_the_afternoon_is_not_zero(self):
-        start = datetime(2026, 11, 11, 13, 40, tzinfo=ET)
-        closes = [110] + [99] * 10 + [100.2, 100.2]
-        snap = _snap(_bars(closes, start=start), symbol="ZZZ", premarket_high=120, prior_high=100,
-                     prior_atr=5, prior_close=110)
-        result = self._score(snap, rvol=2)
-        self.assertIn("in-range after 11:00", result["blockers"])
-        self.assertEqual(time_points(250), WEIGHTS["TIME_P4"])
+        tight = _snap(_bars([99.5] * 10 + [100.4, 100.4]), symbol="MU", premarket_high=100,
+                      prior_high=100.6, prior_atr=1, prior_close=110)
+        TAPE.seed("SMH", price=110, open=100, vwap=105, at=tight.at)
+        TAPE.seed("SPY", price=101, open=100, at=tight.at)
+        self.assertNotIn("room to next layer", self._score(tight, rvol=1.6)["blockers"])
+
+    def test_after_eleven_inside_range_is_blocked_and_costs_four(self):
+        start = datetime(2026, 11, 11, 11, 20, tzinfo=ET)
+        snap = _snap(_bars([100] * 8, start=start), symbol="ZZZ", premarket_high=120, prior_high=120,
+                     prior_atr=5, prior_close=100)
+        result = self._score(snap, rvol=1)
+        self.assertEqual(result["parts"]["inside_after_11"], -4)
+        self.assertEqual(result["metrics"]["andre_fast_path"], 0)
+        self.assertIn("no andre setup", result["blockers"])
+
+    def test_midday_in_range_ema_touch_does_not_fire(self):
+        start = datetime(2026, 11, 11, 11, 40, tzinfo=ET)
+        closes = [100 + index * 0.02 for index in range(20)]
+        snap = _snap(_bars(closes, start=start), symbol="ZZZ", premarket_high=130, prior_high=140, prior_atr=5)
+        result = self._score(snap, rvol=0.8)
+        self.assertNotIn("TREND_PULLBACK", result["metrics"]["andre_triggers"])
+        self.assertEqual(result["metrics"]["andre_fast_path"], 0)
 
     def test_fast_path_does_not_wait_for_a_second_bar(self):
         frames = list(demo_frames())

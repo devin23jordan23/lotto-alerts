@@ -54,7 +54,7 @@ class _Tape:
         samples = row["samples"]
         if not samples or at > samples[-1][0]:
             samples.append((at, price))
-        cutoff = at - timedelta(minutes=20)
+        cutoff = at - timedelta(minutes=35)
         while samples and samples[0][0] < cutoff:
             samples.popleft()
 
@@ -119,12 +119,21 @@ class _Tape:
 TAPE = _Tape()
 _PROFILES = {}
 _ROTATE = {"i": 0}
+_FLUSH_SEEN = set()
+_EARNINGS = set()
 
 
 def reset_state():
     TAPE.clear()
     _PROFILES.clear()
     _ROTATE["i"] = 0
+    _FLUSH_SEEN.clear()
+    _EARNINGS.clear()
+
+
+def note_earnings(symbol, day):
+    """Mark an earnings day-1. There is no live calendar in this repo, so this stays empty in production."""
+    _EARNINGS.add((symbol, day.isoformat() if hasattr(day, "isoformat") else day))
 
 
 def remember_baseline(symbol, day, profiles, observations, daily):
@@ -138,8 +147,9 @@ def remember_baseline(symbol, day, profiles, observations, daily):
     cumulative = {minute: (float(median(values)), len(values)) for minute, values in observations.items() if values}
     days = []
     for day_key in sorted(daily):
-        rows = daily[day_key]
-        days.append((day_key.isoformat(), max(row["high"] for row in rows), min(row["low"] for row in rows)))
+        rows = sorted(daily[day_key], key=lambda row: row.get("datetime") or 0)
+        close = rows[-1].get("close")
+        days.append((day_key.isoformat(), max(row["high"] for row in rows), min(row["low"] for row in rows), close))
     _PROFILES[(symbol, day.isoformat())] = {"minute": per_minute, "cum": cumulative, "days": days}
 
 
@@ -150,16 +160,22 @@ def copy_volume_profile(source, dest, day, daily):
         return
     days = []
     for day_key in sorted(daily):
-        rows = daily[day_key]
-        days.append((day_key.isoformat(), max(row["high"] for row in rows), min(row["low"] for row in rows)))
+        rows = sorted(daily[day_key], key=lambda row: row.get("datetime") or 0)
+        close = rows[-1].get("close")
+        days.append((day_key.isoformat(), max(row["high"] for row in rows), min(row["low"] for row in rows), close))
     _PROFILES[(dest, day.isoformat())] = {"minute": borrowed["minute"], "cum": borrowed["cum"], "days": days}
 
 
 def remember_levels(symbol, day, days):
-    """Test helper: days is a sequence of (high, low) before today, oldest first."""
+    """Test helper: days is a sequence of (high, low) or (high, low, close), oldest first."""
     key = (symbol, day.isoformat() if hasattr(day, "isoformat") else day)
     row = _PROFILES.setdefault(key, {"minute": {}, "cum": {}, "days": []})
-    row["days"] = [(str(index), high, low) for index, (high, low) in enumerate(days)]
+    stored = []
+    for index, item in enumerate(days):
+        high, low = item[0], item[1]
+        close = item[2] if len(item) > 2 else None
+        stored.append((str(index), high, low, close))
+    row["days"] = stored
 
 
 def remember_rvol(symbol, day, cumulative, per_minute=None):
@@ -383,8 +399,8 @@ def nday_level(symbol, day, n, side):
     if not row or len(row["days"]) < n:
         return None
     window = row["days"][-n:]
-    highs = [high for _day, high, _low in window]
-    lows = [low for _day, _high, low in window]
+    highs = [item[1] for item in window]
+    lows = [item[2] for item in window]
     return max(highs) if side == "high" else min(lows)
 
 
@@ -845,12 +861,171 @@ def _pull_in_released(direction, frame, level, shared, atr):
     return (adverse >= int(threshold("PULLIN_BARS")) or touched) and rebreak and rvol is not None and rvol >= float(threshold("REBREAK_RVOL"))
 
 
-INSIDE = {"S29A", "FLUSH_REVERSAL", "FADE_REJECT"}
-LEVEL_TRIGGERS = {"LEVEL_BREAK", "NDAY_BREAK", "S29B", "FADE_LEVEL", "S31"}
-ENTRY_TRIGGERS = LEVEL_TRIGGERS | {"TREND_PULLBACK", "OR5"}
+WATCHLIST = {"LEVEL_BREAK", "OR5", "S29A", "S29B", "S31"}
+SIDE_TRIGGERS = {"FLUSH_V", "TREND_PULLBACK"}
 
 
-def evaluate_side(snap, direction, legacy_blockers=()):
+def _day_closes(symbol, day):
+    row = _PROFILES.get((symbol, day.isoformat() if hasattr(day, "isoformat") else day))
+    if not row:
+        return []
+    return [item[3] for item in row["days"] if len(item) >= 4 and item[3] is not None]
+
+
+def _days_down(symbol, day, direction):
+    closes = _day_closes(symbol, day)
+    run = 0
+    for older, newer in zip(closes, closes[1:]):
+        step = direction * (older - newer)
+        run = run + 1 if step > 0 else 0
+    return run
+
+
+def _spy_efficiency(spy, direction):
+    samples = list((spy or {}).get("samples") or [])
+    if len(samples) < 3:
+        return False
+    now = samples[-1][0]
+    span = float(threshold("SPY_EFF_MINUTES")) * 60
+    window = [sample for sample in samples if 0 <= (now - sample[0]).total_seconds() <= span + 30]
+    if len(window) < 3 or (now - window[0][0]).total_seconds() < span - 90:
+        return False
+    prices = [price for _at, price in window]
+    net = prices[-1] - prices[0]
+    path = sum(abs(b - a) for a, b in zip(prices, prices[1:]))
+    if path <= 0:
+        return False
+    return abs(net) / path >= float(threshold("SPY_EFF_MIN")) and direction * net > 0
+
+
+def _spy_d3(day, direction):
+    closes = _day_closes("SPY", day)
+    if len(closes) < 4:
+        return False
+    return direction * (closes[-1] - closes[-4]) > 0
+
+
+def _pace(snap, legacy):
+    if legacy and legacy.get("pace_rvol"):
+        return float(legacy["pace_rvol"])
+    baseline = snap.bars[-1].expected_cumulative_volume if snap.bars else None
+    if baseline and baseline > 0:
+        return sum(bar.volume for bar in snap.bars) / baseline
+    return 0.0
+
+
+def _ema_reclaims(direction, shared):
+    frame = (shared["blended"]["frames"] or {}).get(2)
+    if not frame:
+        return 0
+    count = 0
+    for bar, ema in zip(frame["bars"], frame["ema9"]):
+        tagged = bar.low <= ema if direction == 1 else bar.high >= ema
+        reclaimed = direction * (bar.close - ema) > 0
+        if tagged and reclaimed:
+            count += 1
+    return count
+
+
+def _stack_depth(direction, snap, shared, spy):
+    atr = shared["atr"]
+    flags = []
+    flags.append(bool(atr) and direction * (snap.spot - shared["open"]) / atr >= float(threshold("STACK_MOVE_ATR")))
+    prior = snap.prior_high if direction == 1 else snap.prior_low
+    flags.append(_beyond(direction, snap.spot, prior))
+    flags.append(bool(atr) and (shared["high"] - shared["low"]) / atr >= float(threshold("STACK_BIG_RANGE_ATR")))
+    relative = False
+    if spy and spy.get("open") and spy.get("price") and shared["open"]:
+        name = snap.spot / shared["open"] - 1
+        spy_return = spy["price"] / spy["open"] - 1
+        relative = spy_return > float(threshold("SPY_NON_DUMP")) and direction * (name - spy_return) >= float(threshold("STACK_RS"))
+    flags.append(relative)
+    rvol = shared["rvol"]["rvol"]
+    flags.append(rvol is not None and rvol >= float(threshold("STACK_RVOL")))
+    outer = shared["pos"] >= 0.75 if direction == 1 else shared["pos"] <= 0.25
+    making = (snap.bars[-1].high >= shared["high"] - 1e-9 if direction == 1
+              else snap.bars[-1].low <= shared["low"] + 1e-9)
+    flags.append(bool(outer and making))
+    flags.append(_ema_reclaims(direction, shared) >= 2)
+    return sum(1 for flag in flags if flag)
+
+
+def _named_levels(direction, snap):
+    """Supports the open can flush into. Puts use the mirrored levels above the open."""
+    levels = []
+    prem = snap.premarket_low if direction == 1 else snap.premarket_high
+    prior = snap.prior_low if direction == 1 else snap.prior_high
+    if prem is not None:
+        levels.extend((prem, prem))  # PML and the overnight print we actually store
+    if prior is not None:
+        levels.append(prior)
+    anchor = snap.bars[0].open if snap.bars else snap.spot
+    step = 10 if anchor >= 50 else 5 if anchor >= 20 else 1
+    levels.append((anchor // step) * step)
+    if snap.prior_high and snap.prior_low and snap.prior_close:
+        pivot = (snap.prior_high + snap.prior_low + snap.prior_close) / 3
+        span = snap.prior_high - snap.prior_low
+        if direction == 1:
+            levels.extend((2 * pivot - snap.prior_high, pivot - span, snap.prior_high - 0.625 * span))
+        else:
+            levels.extend((2 * pivot - snap.prior_low, pivot + span, snap.prior_low + 0.625 * span))
+    open_ = snap.bars[0].open if snap.bars else snap.spot
+    kept = []
+    for level in levels:
+        if level is None:
+            continue
+        if direction * (open_ - level) <= 0:
+            continue
+        if all(abs(level - other) > 1e-6 for other in kept):
+            kept.append(level)
+    return kept
+
+
+def _flush_v(direction, snap, shared, spy):
+    """Open-only flush into a named level and a V reclaim. One event per name, side, and day."""
+    minute = shared["minute"]
+    if not (float(threshold("FLUSH_START_MINUTE")) <= minute <= float(threshold("FLUSH_END_MINUTE"))):
+        return False
+    key = (snap.at.astimezone(ET).date().isoformat(), snap.symbol, direction)
+    if key in _FLUSH_SEEN:
+        return False
+    atr = shared["atr"]
+    two = shared["two"]
+    if not atr or len(two) < 2 or _stack_depth(direction, snap, shared, spy) < int(threshold("FLUSH_DEPTH")):
+        return False
+    rvol = shared["rvol"]["rvol"]
+    burst = shared["burst"] or 0
+    if not ((rvol is not None and rvol >= float(threshold("S29A_RVOL"))) or burst >= float(threshold("BURST_MULTIPLE"))):
+        return False
+    if direction * (two[-1].close - (shared["low"] if direction == 1 else shared["high"])) / atr < float(threshold("FLUSH_LEAVE_ATR")):
+        if _days_down(snap.symbol, snap.at.astimezone(ET).date(), direction) < int(threshold("DAYS_DOWN")):
+            return False
+    last = len(two) - 1
+    window = int(threshold("FLUSH_RECLAIM_BARS"))
+    for level in _named_levels(direction, snap):
+        for tag in range(last + 1):
+            bar = two[tag]
+            tagged = bar.low <= level if direction == 1 else bar.high >= level
+            if not tagged:
+                continue
+            if last - tag > window - 1:
+                continue
+            if direction * (two[-1].close - level) <= 0:
+                continue
+            _FLUSH_SEEN.add(key)
+            return True
+    return False
+
+
+def _midday_inside(direction, snap, shared):
+    minute = shared["minute"]
+    if not (float(threshold("MIDDAY_START_MINUTE")) <= minute < float(threshold("MIDDAY_END_MINUTE"))):
+        return False
+    prem = snap.premarket_high if direction == 1 else snap.premarket_low
+    return not _beyond(direction, snap.spot, prem)
+
+
+def evaluate_side(snap, direction, legacy_blockers=(), legacy_metrics=None):
     shared = _build(snap)
     now = snap.at
     spy = TAPE.view("QQQ" if snap.symbol == "SPY" else "SPY", now)
@@ -908,54 +1083,31 @@ def evaluate_side(snap, direction, legacy_blockers=()):
         hourly = _beyond(direction, snap.spot, hourly_level)
     daily_level = beyond_pd or beyond_n5 or hourly
 
+    # Level breaks, ORB5, S29-A/B and S31 are watchlist inputs. FADE2 and N-day
+    # breaks are not triggers. The only side fires are the open flush and a
+    # depth-6 EMA reclaim. Exhausted-approach and tight-room holds are not applied.
+    watch = triggers & WATCHLIST
+    depth = _stack_depth(direction, snap, shared, spy)
+    side = set()
+    if _flush_v(direction, snap, shared, spy):
+        side.add("FLUSH_V")
+    if (_pullback(direction, snap, shared, True) and depth >= int(threshold("TREND_DEPTH"))
+            and not _midday_inside(direction, snap, shared)):
+        side.add("TREND_PULLBACK")
     blockers = []
-    room = _overhead_room(direction, snap, shared)
-    tight = room is not None and room < float(threshold("ROOM_ATR"))
-    sector_ok = _sector_ok(direction, etf)
-    spy_ok = bool(spy and _same_side(direction, spy.get("price"), spy.get("open")))
-    rvol_value = shared["rvol"]["rvol"]
-    aligned = bool(triggers) or beyond_pm or beyond_pd or beyond_n3
-    burst = shared["burst"]
-    burst_hit = burst is not None and burst >= float(threshold("BURST_MULTIPLE")) and aligned
-    if tight and triggers & LEVEL_TRIGGERS:
-        room_ok = sector_ok and spy_ok and rvol_value is not None and rvol_value >= float(threshold("ROOM_RVOL"))
-        if not room_ok:
-            triggers -= LEVEL_TRIGGERS
-            if not triggers:
-                blockers.append("room to next layer")
-
-    if "TREND_PULLBACK" in triggers and not trending:
-        triggers.discard("TREND_PULLBACK")
-    # Inside-range setups (S29-A, flush, VWAP rejection) and OR5 skip the global
-    # outside-range gate. After 11:00 the remaining setups need to be green and
-    # already beyond PMH or PDH; the morning gate still wants PMH, green, and
-    # the upper part of the day's range.
-    gated = triggers - INSIDE - {"OR5", "TREND_PULLBACK"}
-    if gated and shared["minute"] >= float(threshold("AFTER_11_MINUTE")):
-        green = direction * (snap.spot - shared["open"]) > 0
-        if not (green and (beyond_pm or beyond_pd)):
-            triggers -= gated
-            if not triggers:
-                blockers.append("in-range after 11:00")
-    elif gated and not _outside(direction, snap, shared):
-        triggers -= gated
-        if not triggers:
-            blockers.append("outside the range")
-
-    if _chase(direction, snap, shared, spy, catalyst) and triggers & (LEVEL_TRIGGERS | {"OR5"}):
-        blockers.append("exhausted approach")
-
-    need_rvol = float(threshold("S29A_RVOL")) if triggers == {"S29A"} else float(threshold("RVOL_GATE"))
-    rvol_ok = (rvol_value is not None and rvol_value >= need_rvol) or burst_hit
-    if triggers and not rvol_ok:
-        blockers.append("rvol below minimum")
-    if not triggers and "room to next layer" not in blockers and "outside the range" not in blockers and "in-range after 11:00" not in blockers and "exhausted approach" not in blockers:
+    if side and shared["minute"] >= float(threshold("AFTER_11_MINUTE")) and not (beyond_pm or beyond_pd):
+        side.clear()
+        blockers.append("in-range after 11:00")
+    if not side:
         blockers.append("no andre setup")
-
-    parts = _parts(direction, snap, shared, spy, qqq, etf, peer_returns, catalyst, triggers,
-                   beyond_pm, beyond_pd, beyond_n3, daily_level, leader, burst_hit)
+    triggers = side
+    rvol_value = shared["rvol"]["rvol"]
+    burst = shared["burst"]
+    burst_hit = burst is not None and burst >= float(threshold("BURST_MULTIPLE"))
+    parts = _parts(direction, snap, shared, spy, day, legacy_metrics, beyond_pm, beyond_pd, burst_hit)
     raw = sum(parts.values())
-    score = round(max(0.0, min(100.0, raw)), 2)
+    # Additive score. Do not floor at 0: after 13:00 the time term is -2.
+    score = round(min(100.0, raw), 2)
     minimum = float(threshold("MIN_SCORE"))
     if score < minimum:
         blockers.append("score below andre minimum")
@@ -971,6 +1123,8 @@ def evaluate_side(snap, direction, legacy_blockers=()):
         blockers.append("no andre setup")
     metrics = {
         "andre_triggers": ",".join(sorted(triggers)),
+        "andre_watch": ",".join(sorted(watch)),
+        "andre_stack": depth,
         "andre_tier": "A" if score >= top else "B",
         "andre_fast_path": fast,
         "andre_rvol": rvol_value if rvol_value is not None else -1,
@@ -980,7 +1134,7 @@ def evaluate_side(snap, direction, legacy_blockers=()):
         "andre_burst_aligned": int(burst_hit),
         "andre_trending": int(trending),
         "andre_catalyst": int(catalyst),
-        "andre_room_atr": room if room is not None else -1,
+        "andre_room_atr": -1,
         "andre_stretch_atr": _stretch(direction, snap, shared),
         "andre_ema9": shared["blended"]["ema9"] if shared["blended"]["ema9"] is not None else -1,
         "andre_w2": shared["blended"]["weights"][0],
@@ -1016,61 +1170,43 @@ def _sector_ok(direction, etf):
     return same and (past_vwap or past_level)
 
 
-def _parts(direction, snap, shared, spy, qqq, etf, peer_returns, catalyst, triggers,
-           beyond_pm, beyond_pd, beyond_n3, daily_level, leader, burst_hit):
+def _parts(direction, snap, shared, spy, day, legacy, beyond_pm, beyond_pd, burst_hit):
+    """Nia's additive points. Terms that failed verification stay in the dict at 0."""
     rvol = shared["rvol"]["rvol"]
-    if rvol is None:
-        rvol_points = 0.0
-    elif rvol >= float(threshold("RVOL_TIER3")):
-        rvol_points = weight("RVOL_3")
-    elif rvol >= float(threshold("RVOL_TIER2")):
-        rvol_points = weight("RVOL_2")
-    elif rvol >= float(threshold("RVOL_GATE")):
-        rvol_points = weight("RVOL_15")
-    else:
-        rvol_points = 0.0
-    # A mid-range burst adds nothing. An aligned burst does not raise the tier by
-    # itself; it only lets the card fire without waiting (see andre_fast_path).
-    if burst_hit and rvol_points == 0.0 and (rvol is None or rvol < float(threshold("RVOL_GATE"))):
-        rvol_points = weight("RVOL_15")
-    if catalyst:
-        spy_trend = weight("SPY_TREND")
-        spy_level = weight("SPY_LEVEL")
-        qqq_points = weight("QQQ_TREND") + weight("QQQ_LEVEL")
-    else:
-        spy_trend = weight("SPY_TREND") if spy and _same_side(direction, spy.get("price"), spy.get("open")) else 0.0
-        spy_level_flag = False
-        if spy:
-            spy_level_flag = _beyond(direction, spy.get("price"), spy.get("pmh") if direction == 1 else spy.get("pml"))
-            spy_level_flag = spy_level_flag or _beyond(direction, spy.get("price"), spy.get("pdh") if direction == 1 else spy.get("pdl"))
-        spy_level = weight("SPY_LEVEL") if spy_level_flag else 0.0
-        qqq_points = 0.0
-        if qqq and _same_side(direction, qqq.get("price"), qqq.get("open")):
-            qqq_points += weight("QQQ_TREND")
-        if qqq and (_beyond(direction, qqq.get("price"), qqq.get("pmh") if direction == 1 else qqq.get("pml"))
-                    or _beyond(direction, qqq.get("price"), qqq.get("pdh") if direction == 1 else qqq.get("pdl"))):
-            qqq_points += weight("QQQ_LEVEL")
-    peer_hit = False
-    if len(peer_returns) >= int(threshold("PEER_MIN")):
-        share = sum(direction * value > 0 for value in peer_returns) / len(peer_returns)
-        peer_hit = share >= float(threshold("PEER_BREADTH"))
-    stretch = _stretch(direction, snap, shared)
+    local = float(legacy.get("local_rvol_5m") or 0) if legacy else 0.0
+    rvol_points = weight("RVOL_3") if ((rvol or 0) >= 3 or local >= 3) else 0.0
+    pace_points = weight("PACE_2") if _pace(snap, legacy) >= 2 else 0.0
+    prior = snap.prior_high if direction == 1 else snap.prior_low
+    burst_pd = weight("BURST_PD") if burst_hit and _just_crossed(shared["two"], prior, direction) else 0.0
+    gap_points = 0.0
+    if shared["atr"] and snap.prior_close and abs(shared["open"] - snap.prior_close) >= shared["atr"]:
+        gap_points = weight("GAP_1ATR")
+    earnings = weight("EARN_D1") if (snap.symbol, day.isoformat()) in _EARNINGS else 0.0
+    inside = shared["minute"] >= float(threshold("AFTER_11_MINUTE")) and not (beyond_pm or beyond_pd)
     return {
-        "level_pm": weight("LEVEL_PM") if beyond_pm else 0.0,
-        "level_pd": weight("LEVEL_PD") if beyond_pd else 0.0,
-        "level_n3": weight("LEVEL_N3") if beyond_n3 else 0.0,
-        "level_n5": weight("LEVEL_N5") if daily_level else 0.0,
-        "spy_trend": spy_trend,
-        "spy_level": spy_level,
-        "qqq": qqq_points,
-        "sector_etf": weight("SECTOR_ETF") if _sector_ok(direction, etf) else 0.0,
-        "peers": weight("PEERS") if peer_hit else 0.0,
-        "leader": weight("LEADER") if leader else 0.0,
-        "rvol": rvol_points,
-        "entry": weight("ENTRY") if triggers & ENTRY_TRIGGERS else 0.0,
-        "named_setup": weight("NAMED") if triggers else 0.0,
         "time_window": time_points(shared["minute"]),
-        "stretch": -weight("PENALTY_STRETCH") if stretch > float(threshold("STRETCH_ATR")) else 0.0,
+        "inside_after_11": -weight("PENALTY_INSIDE_AFTER11") if inside else 0.0,
+        "spy_eff": weight("SPY_EFF") if _spy_efficiency(spy, direction) else 0.0,
+        "spy_d3": weight("SPY_D3") if _spy_d3(day, direction) else 0.0,
+        "spy_trend": weight("SPY_TREND"),
+        "spy_level": weight("SPY_LEVEL"),
+        "qqq": weight("QQQ_TREND") + weight("QQQ_LEVEL"),
+        "level_pm": weight("LEVEL_PM"),
+        "level_pd": weight("LEVEL_PD"),
+        "level_n3": weight("LEVEL_N3"),
+        "level_n5": weight("LEVEL_N5"),
+        "sector_etf": weight("SECTOR_ETF"),
+        "peers": weight("PEERS"),
+        "leader": weight("LEADER"),
+        "pace": pace_points,
+        "rvol": rvol_points,
+        "burst_pd": burst_pd,
+        "gap": gap_points,
+        "earnings": earnings,
+        "entry": weight("ENTRY"),
+        "named_setup": weight("NAMED"),
+        "chase": -weight("PENALTY_CHASE"),
+        "stretch": -weight("PENALTY_STRETCH"),
         "strike_breadth": 0.0,
         "liquidity": 0.0,
         "contract_response": 0.0,
@@ -1085,8 +1221,7 @@ def _apply_chase_penalty(parts, blocked):
 
 
 def _setup(direction, snap, shared, triggers):
-    order = ("S29A", "S29B", "OR5", "LEVEL_BREAK", "NDAY_BREAK", "TREND_PULLBACK",
-             "FLUSH_REVERSAL", "S31", "FADE_REJECT", "FADE_LEVEL")
+    order = ("FLUSH_V", "TREND_PULLBACK", "S29A", "S29B", "OR5", "LEVEL_BREAK", "S31")
     name = next(item for item in order if item in triggers)
     if name in {"LEVEL_BREAK", "S29B", "S31", "FADE_LEVEL"}:
         trigger = (snap.premarket_high if direction == 1 else snap.premarket_low) or snap.spot
@@ -1111,25 +1246,8 @@ def dominant_vwap(shared):
     return None
 
 
-def evaluate_side_full(snap, direction, legacy_blockers=()):
-    """evaluate_side plus the chase penalty, which depends on the blocker list."""
-    result = evaluate_side(snap, direction, legacy_blockers)
-    chased = "exhausted approach" in result["blockers"]
-    result["parts"] = _apply_chase_penalty(result["parts"], chased)
-    raw = sum(result["parts"].values())
-    result["score"] = round(max(0.0, min(100.0, raw)), 2)
-    result["metrics"]["andre_score_raw"] = round(raw, 2)
-    minimum = float(threshold("MIN_SCORE"))
-    blockers = [blocker for blocker in result["blockers"] if blocker != "score below andre minimum"]
-    if result["score"] < minimum:
-        blockers.append("score below andre minimum")
-    result["blockers"] = tuple(blockers)
-    result["qualifying"] = not blockers and bool(result["metrics"]["andre_triggers"])
-    result["metrics"]["andre_fast_path"] = int(result["qualifying"])
-    result["metrics"]["andre_tier"] = "A" if result["score"] >= float(threshold("TOP_SCORE")) else "B"
-    if result["qualifying"] and result["setup"] is None:
-        result["qualifying"] = False
-    return result
+def evaluate_side_full(snap, direction, legacy_blockers=(), legacy_metrics=None):
+    return evaluate_side(snap, direction, legacy_blockers, legacy_metrics)
 
 
 def apply_mode(results):
@@ -1137,7 +1255,7 @@ def apply_mode(results):
     for candidate in results:
         direction = 1 if candidate.option.side == "CALL" else -1
         spread = candidate.metrics.get("selected_spread_fraction")
-        result = evaluate_side_full(candidate.snapshot, direction, candidate.blockers)
+        result = evaluate_side_full(candidate.snapshot, direction, candidate.blockers, candidate.metrics)
         if spread is not None:
             result["metrics"]["selected_spread_fraction"] = spread
         candidate.parts = result["parts"]

@@ -1,53 +1,68 @@
-"""Untested defaults for LOTTO_ANDRE_WEIGHTS_MODE=1.
+"""Verified additive score for LOTTO_ANDRE_WEIGHTS_MODE=1.
 
-Every value is Ace's [DEF] or the weight table Andre locked on Nov 12.
-Nothing here has been fit on a replay. Nia can replace a value without a
-code change by setting LOTTO_ANDRE_<NAME> (same type as the default).
-Weights live in WEIGHTS. Thresholds live in THRESHOLDS. Time windows live
-in TIME_ENDS (minutes after 09:30) plus the TIME_P* weights.
+This is not a 100-point scale. Nia's hist-validated points sum to at most 38
+before the −2 time penalty and the −4 inside-after-11 penalty. Do not
+renormalize them. Keys kept at 0 are old terms that must not score.
+Override any value with LOTTO_ANDRE_<NAME> (or LOTTO_ANDRE_W_<KEY> for a weight).
+MIN_SCORE=0 is the 20–30 cards/day alternative; it is not the default.
 """
 import os
 
-# Positive buckets sum to 100 before the named-setup bonus. The bonus is
-# +5 and the total is capped at 100. Penalties are subtracted after that.
 WEIGHTS = {
-    "LEVEL_PM": 15,       # beyond PMH (calls) / PML (puts)
-    "LEVEL_PD": 10,       # beyond PDH / PDL
-    "LEVEL_N3": 5,        # holding beyond a 3-day or longer range
-    "LEVEL_N5": 5,        # 5-day range, or an hourly high/low, or the daily level
-    "SPY_TREND": 8,       # SPY trending the same side
-    "SPY_LEVEL": 4,       # SPY beyond its own premarket or prior-day level
-    "QQQ_TREND": 2,       # QQQ trending the same side (with QQQ_LEVEL sums to 3)
-    "QQQ_LEVEL": 1,       # QQQ beyond its own premarket or prior-day level
-    "SECTOR_ETF": 7,      # sector ETF same side and past VWAP or a level
-    "PEERS": 5,           # at least 60% of peers moving the same way
-    "LEADER": 3,          # stock leading its group
-    "RVOL_15": 5,         # time-of-day RVOL in [1.5, 2)
-    "RVOL_2": 10,         # RVOL in [2, 3)
-    "RVOL_3": 15,         # RVOL >= 3
-    "ENTRY": 10,          # level break on volume, or EMA touch-then-reclaim
-    "NAMED": 5,           # one of Ace's named setups is the trigger
-    "TIME_P1": 10,        # 09:30–10:30
-    "TIME_P2": 6,         # 10:30–11:00
-    "TIME_P3": 0,         # 11:00–13:30 lunch. Retune; not a tested edge.
-    "TIME_P4": 6,         # 13:30–15:00 second window
-    "TIME_P5": 0,         # after 15:00
-    "PENALTY_CHASE": 15,  # exhausted approach, no pull-in yet
-    "PENALTY_STRETCH": 10,  # more than 0.5 ATR from the active 9 EMA
+    # Time, minutes after 09:30. See TIME_ENDS.
+    "TIME_P1": 8,          # 09:30–10:00
+    "TIME_P2": 5,          # 10:00–11:00
+    "TIME_P3": 0,          # 11:00–13:00. Not a blocker.
+    "TIME_P4": -2,         # after 13:00, including 13:30–15:00
+    "TIME_P5": -2,         # after 16:00. Same penalty. No afternoon bonus.
+    "PENALTY_INSIDE_AFTER11": 4,  # subtract when after 11:00 and still inside PM/PD
+
+    "SPY_EFF": 8,          # SPY 30-minute efficiency >= 0.5, same side
+    "SPY_D3": 4,           # SPY 3-day trend, same side
+    "SPY_TREND": 0,        # old open comparison. Replaced by SPY_EFF / SPY_D3.
+    "SPY_LEVEL": 0,        # SPY beyond its own PM/PD. Failed history.
+    "SPY_15M": 0,          # verified alternative to D3. Not stacked.
+
+    "QQQ_TREND": 0,
+    "QQQ_LEVEL": 0,
+
+    "LEVEL_PM": 0,
+    "LEVEL_PD": 0,
+    "LEVEL_N3": 0,
+    "LEVEL_N5": 0,
+
+    "SECTOR_ETF": 0,
+    "PEERS": 0,            # optional live sleeve, off
+    "LEADER": 0,
+
+    "PACE_2": 4,           # pace >= 2
+    "RVOL_3": 2,           # cumulative or local RVOL >= 3
+    "BURST_PD": 1,         # burst only when it is a prior-day break
+    "RVOL_15": 0,
+    "RVOL_2": 0,
+
+    "GAP_1ATR": 3,         # |gap| >= 1 ATR
+    "EARN_D1": 3,          # earnings day-1, when a calendar says so
+    "PM_RVOL": 0,
+
+    "ENTRY": 0,
+    "NAMED": 0,
+    "PENALTY_CHASE": 0,    # not applied
+    "PENALTY_STRETCH": 0,  # not applied
 }
 
-# Minutes after 09:30 where each time bucket ends. 13:30 is 240, 15:00 is 330.
+# Minutes after 09:30 where each time bucket ends.
 TIME_ENDS = {
-    "END_1": 60,    # 10:30
-    "END_2": 90,    # 11:00
-    "END_3": 240,   # 13:30
-    "END_4": 330,   # 15:00
+    "END_1": 30,     # 10:00
+    "END_2": 90,     # 11:00
+    "END_3": 210,    # 13:00
+    "END_4": 390,    # 16:00
 }
 
 # Ace [DEF] thresholds. Floats are ATR fractions or returns unless noted.
 THRESHOLDS = {
-    "MIN_SCORE": 70,
-    "TOP_SCORE": 85,
+    "MIN_SCORE": 6,     # T>=6. Not 70. Env LOTTO_ANDRE_MIN_SCORE still overrides.
+    "TOP_SCORE": 8,     # informational. Not an operating cut. Not 85.
     "RVOL_MIN_SESSIONS": 14,
     "RVOL_SESSIONS": 20,
     "RVOL_GATE": 1.5,
@@ -98,6 +113,24 @@ THRESHOLDS = {
     "HOURLY_2M": 30,
     "EXTRA_REQUESTS": 2,
     "TAPE_MAX_AGE": 180,
+    # Flush-and-reclaim (the only open side trigger) and the trend-stack gate.
+    "FLUSH_LEAVE_ATR": 0.15,
+    "FLUSH_RECLAIM_BARS": 3,
+    "FLUSH_START_MINUTE": 2,     # 09:32
+    "FLUSH_END_MINUTE": 30,      # 10:00
+    "FLUSH_DEPTH": 5,
+    "TREND_DEPTH": 6,
+    "STACK_MOVE_ATR": 0.80,
+    "STACK_RS": 0.005,
+    # "Big range" is named in the stack and was not given a cut. 1 ATR is the stand-in.
+    "STACK_BIG_RANGE_ATR": 1.0,
+    "STACK_RVOL": 1.5,
+    "SPY_EFF_MIN": 0.5,
+    "SPY_EFF_MINUTES": 30,
+    "SPY_NON_DUMP": -0.005,
+    "MIDDAY_START_MINUTE": 120,  # 11:30
+    "MIDDAY_END_MINUTE": 180,    # 12:30
+    "DAYS_DOWN": 3,
 }
 
 
