@@ -1,0 +1,191 @@
+ticker,sector,industry,gics_etf,specific_etf,mapped
+AAL,Industrials,Airlines,XLI,XLI,XLI
+AAOI,Technology,Communication Equipment,XLK,XLK,XLK
+AAPL,Technology,Consumer Electronics,XLK,XLK,XLK
+ABBV,Healthcare,Drug Manufacturers - General,XLV,XLV,XLV
+ABNB,Consumer Cyclical,Travel Services,XLY,XLY,XLY
+ACHR,Industrials,Aerospace & Defense,XLI,XLI,XLI
+ADBE,Technology,Software - Application,XLK,XLK,XLK
+AFRM,Financial Services,Credit Services,XLF,XLF,XLF
+AI,Technology,Software - Infrastructure,XLK,XLK,XLK
+ALAB,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+AMAT,Technology,Semiconductor Equipment & Materials,XLK,SMH,XLK;SMH;SOXX
+AMC,Communication Services,Entertainment,XLC,XLC,XLC
+AMD,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+AMZN,Consumer Cyclical,Internet Retail,XLY,XLY,XLY
+ANET,Technology,Computer Hardware,XLK,XLK,XLK
+APLD,Technology,Information Technology Services,XLK,XLK,XLK
+APP,Communication Services,Advertising Agencies,XLC,XLC,XLC
+ARM,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+ASML,Technology,Semiconductor Equipment & Materials,XLK,SMH,XLK;SMH;SOXX
+ASTS,Technology,Communication Equipment,XLK,XLK,XLK
+AVGO,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+AXP,Financial Services,Credit Services,XLF,XLF,XLF
+BA,Industrials,Aerospace & Defense,XLI,XLI,XLI
+BABA,Consumer Cyclical,Internet Retail,XLY,XLY,XLY
+BAC,Financial Services,Banks - Diversified,XLF,XLF,XLF
+BBAI,Technology,Information Technology Services,XLK,XLK,XLK
+BE,Industrials,Electrical Equipment & Parts,XLI,XLI,XLI
+BIDU,Communication Services,Internet Content & Information,XLC,XLC,XLC
+BMNR,Financial Services,Capital Markets,XLF,XLF,XLF
+BSX,Healthcare,Medical Devices,XLV,XLV,XLV
+BTDR,Technology,Software - Application,XLK,XLK,XLK
+BX,Financial Services,Asset Management,XLF,XLF,XLF
+C,Financial Services,Banks - Diversified,XLF,XLF,XLF
+CAT,Industrials,Farm & Heavy Construction Machinery,XLI,XLI,XLI
+CCJ,Energy,Uranium,XLE,XLE,XLE
+CEG,Utilities,Utilities - Independent Power Producers,XLU,XLU,XLU
+CIFR,Technology,Information Technology Services,XLK,XLK,XLK
+CLF,Basic Materials,Steel,XLB,XLB,XLB
+CLSK,Financial Services,Capital Markets,XLF,XLF,XLF
+CMG,Consumer Cyclical,Restaurants,XLY,XLY,XLY
+COHR,Technology,Scientific & Technical Instruments,XLK,XLK,XLK
+COIN,Financial Services,Financial Data & Stock Exchanges,XLF,XLF,XLF
+CORZ,Technology,Software - Infrastructure,XLK,XLK,XLK
+COST,Consumer Defensive,Discount Stores,XLP,XLP,XLP
+CRCL,Financial Services,Capital Markets,XLF,XLF,XLF
+CRDO,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+CRM,Technology,Software - Application,XLK,XLK,XLK
+CRWD,Technology,Software - Infrastructure,XLK,XLK,XLK
+CRWV,Technology,Software - Infrastructure,XLK,XLK,XLK
+CSCO,Technology,Communication Equipment,XLK,XLK,XLK
+CVNA,Consumer Cyclical,Auto & Truck Dealerships,XLY,XLY,XLY
+CVS,Healthcare,Healthcare Plans,XLV,XLV,XLV
+CVX,Energy,Oil & Gas Integrated,XLE,XLE,XLE
+DAL,Industrials,Airlines,XLI,XLI,XLI
+DDOG,Technology,Software - Application,XLK,XLK,XLK
+DE,Industrials,Farm & Heavy Construction Machinery,XLI,XLI,XLI
+DELL,Technology,Computer Hardware,XLK,XLK,XLK
+DIS,Communication Services,Entertainment,XLC,XLC,XLC
+DKNG,Consumer Cyclical,Gambling,XLY,XLY,XLY
+ENPH,Technology,Solar,XLK,XLK,XLK
+EOSE,Industrials,Electrical Equipment & Parts,XLI,XLI,XLI
+F,Consumer Cyclical,Auto Manufacturers,XLY,XLY,XLY
+FCX,Basic Materials,Copper,XLB,XLB,XLB
+FSLR,Technology,Solar,XLK,XLK,XLK
+GEV,Industrials,Specialty Industrial Machinery,XLI,XLI,XLI
+GILD,Healthcare,Drug Manufacturers - General,XLV,XLV,XLV
+GLW,Technology,Electronic Components,XLK,XLK,XLK
+GME,Consumer Cyclical,Specialty Retail,XLY,XLY,XLY
+GOOGL,Communication Services,Internet Content & Information,XLC,XLC,XLC
+GRAB,Technology,Software - Application,XLK,XLK,XLK
+GS,Financial Services,Capital Markets,XLF,XLF,XLF
+HD,Consumer Cyclical,Home Improvement Retail,XLY,XLY,XLY
+HIMS,Healthcare,Drug Manufacturers - Specialty & Generic,XLV,XLV,XLV
+HOOD,Financial Services,Capital Markets,XLF,XLF,XLF
+HPE,Technology,Communication Equipment,XLK,XLK,XLK
+HUT,Financial Services,Capital Markets,XLF,XLF,XLF
+IBM,Technology,Information Technology Services,XLK,XLK,XLK
+INTC,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+IONQ,Technology,Computer Hardware,XLK,XLK,XLK
+IREN,Financial Services,Capital Markets,XLF,XLF,XLF
+ISRG,Healthcare,Medical Instruments & Supplies,XLV,XLV,XLV
+JD,Consumer Cyclical,Internet Retail,XLY,XLY,XLY
+JNJ,Healthcare,Drug Manufacturers - General,XLV,XLV,XLV
+JOBY,Industrials,Airports & Air Services,XLI,XLI,XLI
+JPM,Financial Services,Banks - Diversified,XLF,XLF,XLF
+KLAC,Technology,Semiconductor Equipment & Materials,XLK,SMH,XLK;SMH;SOXX
+KO,Consumer Defensive,Beverages - Non-Alcoholic,XLP,XLP,XLP
+KTOS,Industrials,Aerospace & Defense,XLI,XLI,XLI
+LCID,Consumer Cyclical,Auto Manufacturers,XLY,XLY,XLY
+LITE,Technology,Communication Equipment,XLK,XLK,XLK
+LLY,Healthcare,Drug Manufacturers - General,XLV,XLV,XLV
+LMT,Industrials,Aerospace & Defense,XLI,XLI,XLI
+LOW,Consumer Cyclical,Home Improvement Retail,XLY,XLY,XLY
+LRCX,Technology,Semiconductor Equipment & Materials,XLK,SMH,XLK;SMH;SOXX
+LULU,Consumer Cyclical,Apparel Retail,XLY,XLY,XLY
+LUNR,Industrials,Aerospace & Defense,XLI,XLI,XLI
+LYFT,Technology,Software - Application,XLK,XLK,XLK
+MA,Financial Services,Credit Services,XLF,XLF,XLF
+MARA,Financial Services,Capital Markets,XLF,XLF,XLF
+MCD,Consumer Cyclical,Restaurants,XLY,XLY,XLY
+MCHP,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+MDB,Technology,Software - Infrastructure,XLK,XLK,XLK
+MDT,Healthcare,Medical Devices,XLV,XLV,XLV
+META,Communication Services,Internet Content & Information,XLC,XLC,XLC
+MP,Basic Materials,Other Industrial Metals & Mining,XLB,XLB,XLB
+MRK,Healthcare,Drug Manufacturers - General,XLV,XLV,XLV
+MRNA,Healthcare,Biotechnology,XLV,XLV,XLV
+MRVL,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+MS,Financial Services,Capital Markets,XLF,XLF,XLF
+MSFT,Technology,Software - Infrastructure,XLK,XLK,XLK
+MSTR,Technology,Software - Application,XLK,XLK,XLK
+MU,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+NBIS,Communication Services,Internet Content & Information,XLC,XLC,XLC
+NET,Technology,Software - Infrastructure,XLK,XLK,XLK
+NFLX,Communication Services,Entertainment,XLC,XLC,XLC
+NIO,Consumer Cyclical,Auto Manufacturers,XLY,XLY,XLY
+NKE,Consumer Cyclical,Footwear & Accessories,XLY,XLY,XLY
+NOK,Technology,Communication Equipment,XLK,XLK,XLK
+NOW,Technology,Software - Application,XLK,XLK,XLK
+NRG,Utilities,Utilities - Independent Power Producers,XLU,XLU,XLU
+NU,Financial Services,Banks - Regional,XLF,XLF,XLF
+NVDA,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+NVO,Healthcare,Drug Manufacturers - General,XLV,XLV,XLV
+NVTS,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+OKLO,Utilities,Utilities - Independent Power Producers,XLU,XLU,XLU
+OKTA,Technology,Software - Infrastructure,XLK,XLK,XLK
+ONDS,Technology,Communication Equipment,XLK,XLK,XLK
+OPEN,Real Estate,Real Estate Services,XLRE,XLRE,XLRE
+ORCL,Technology,Software - Infrastructure,XLK,XLK,XLK
+OXY,Energy,Oil & Gas E&P,XLE,XOP,XLE;XOP
+PANW,Technology,Software - Infrastructure,XLK,XLK,XLK
+PBR,Energy,Oil & Gas Integrated,XLE,XLE,XLE
+PDD,Consumer Cyclical,Internet Retail,XLY,XLY,XLY
+PFE,Healthcare,Drug Manufacturers - General,XLV,XLV,XLV
+PINS,Communication Services,Internet Content & Information,XLC,XLC,XLC
+PLTR,Technology,Software - Infrastructure,XLK,XLK,XLK
+PLUG,Industrials,Electrical Equipment & Parts,XLI,XLI,XLI
+PYPL,Financial Services,Credit Services,XLF,XLF,XLF
+QBTS,Technology,Computer Hardware,XLK,XLK,XLK
+QCOM,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+QS,Consumer Cyclical,Auto Parts,XLY,XLY,XLY
+QUBT,Technology,Computer Hardware,XLK,XLK,XLK
+RBLX,Communication Services,Electronic Gaming & Multimedia,XLC,XLC,XLC
+RDDT,Communication Services,Internet Content & Information,XLC,XLC,XLC
+REGN,Healthcare,Biotechnology,XLV,XLV,XLV
+RGTI,Technology,Computer Hardware,XLK,XLK,XLK
+RIOT,Financial Services,Capital Markets,XLF,XLF,XLF
+RIVN,Consumer Cyclical,Auto Manufacturers,XLY,XLY,XLY
+RKLB,Industrials,Aerospace & Defense,XLI,XLI,XLI
+RKT,Financial Services,Mortgage Finance,XLF,XLF,XLF
+S,Technology,Software - Infrastructure,XLK,XLK,XLK
+SBUX,Consumer Cyclical,Restaurants,XLY,XLY,XLY
+SCHW,Financial Services,Capital Markets,XLF,XLF,XLF
+SHOP,Technology,Software - Application,XLK,XLK,XLK
+SKHY,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+SMCI,Technology,Computer Hardware,XLK,XLK,XLK
+SMR,Industrials,Specialty Industrial Machinery,XLI,XLI,XLI
+SNAP,Communication Services,Internet Content & Information,XLC,XLC,XLC
+SNDK,Technology,Computer Hardware,XLK,XLK,XLK
+SNOW,Technology,Software - Application,XLK,XLK,XLK
+SOFI,Financial Services,Credit Services,XLF,XLF,XLF
+SOUN,Technology,Software - Application,XLK,XLK,XLK
+SPCX,Industrials,Aerospace & Defense,XLI,XLI,XLI
+STX,Technology,Computer Hardware,XLK,XLK,XLK
+T,Communication Services,Telecom Services,XLC,XLC,XLC
+TEAM,Technology,Software - Application,XLK,XLK,XLK
+TEM,Healthcare,Health Information Services,XLV,XLV,XLV
+TGT,Consumer Defensive,Discount Stores,XLP,XLP,XLP
+TMUS,Communication Services,Telecom Services,XLC,XLC,XLC
+TSLA,Consumer Cyclical,Auto Manufacturers,XLY,XLY,XLY
+TSM,Technology,Semiconductors,XLK,SMH,XLK;SMH;SOXX
+TTD,Communication Services,Advertising Agencies,XLC,XLC,XLC
+TWLO,Technology,Software - Infrastructure,XLK,XLK,XLK
+U,Technology,Software - Application,XLK,XLK,XLK
+UBER,Technology,Software - Application,XLK,XLK,XLK
+UNH,Healthcare,Healthcare Plans,XLV,XLV,XLV
+UPS,Industrials,Integrated Freight & Logistics,XLI,XLI,XLI
+UPST,Financial Services,Credit Services,XLF,XLF,XLF
+USAR,Basic Materials,Other Industrial Metals & Mining,XLB,XLB,XLB
+UUUU,Energy,Uranium,XLE,XLE,XLE
+V,Financial Services,Credit Services,XLF,XLF,XLF
+VRT,Industrials,Electrical Equipment & Parts,XLI,XLI,XLI
+VST,Utilities,Utilities - Independent Power Producers,XLU,XLU,XLU
+VZ,Communication Services,Telecom Services,XLC,XLC,XLC
+WDC,Technology,Computer Hardware,XLK,XLK,XLK
+WFC,Financial Services,Banks - Diversified,XLF,XLF,XLF
+WMT,Consumer Defensive,Discount Stores,XLP,XLP,XLP
+WULF,Financial Services,Capital Markets,XLF,XLF,XLF
+XOM,Energy,Oil & Gas Integrated,XLE,XLE,XLE
+ZS,Technology,Software - Infrastructure,XLK,XLK,XLK
