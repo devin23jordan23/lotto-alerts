@@ -12,6 +12,30 @@ from lotto.forensics import export_case, export_window_closed
 
 
 class TargetedAuditTests(unittest.TestCase):
+    def test_coil_audit_reads_archived_nightly_report(self):
+        import tempfile
+        from pathlib import Path
+        store = Store(":memory:")
+        self.addCleanup(store.db.close)
+        at = datetime(2026, 9, 29, 13, 50, tzinfo=ET).astimezone(timezone.utc)
+        features = {"setup": {"name": "COILED_CONTINUATION"},
+                    "blockers": ["options activity not replenishing"],
+                    "contract": "AAPL  260930P00330000",
+                    "metrics": {"option_acceleration": 2.74, "local_rvol_5m": 2.44}}
+        store.db.execute("INSERT INTO decisions VALUES (?,?,?,?,?,?)",
+                         ("AAPL", at.isoformat(), "DISCOVERY", "options activity not replenishing",
+                          74.58, json.dumps(features)))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "nightly" / "2026-09-29"
+            root.mkdir(parents=True)
+            with gzip.open(root / "report.json.gz", "wt") as saved:
+                json.dump({"candidate_evaluations": [{"symbol": "AAPL", "at": at.isoformat(),
+                                                      "future_labels": {"stock_return_5m_directional": .02}}]}, saved)
+            result = audit_coil_burst_hypothesis(store, "2026-09-29", directory)
+        self.assertTrue(result["nightly_labels_available"])
+        self.assertEqual(result["independent_symbol_contract_cases"][0]["future"],
+                         {"stock_return_5m_directional": .02})
+
     def test_coil_hypothesis_audit_uses_saved_blockers_and_short_expiry(self):
         import tempfile
         store = Store(":memory:")
