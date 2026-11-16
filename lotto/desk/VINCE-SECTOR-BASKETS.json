@@ -1,0 +1,121 @@
+{
+ "version": "V3B",
+ "generated": "2026-10-27 America/New_York",
+ "baskets": {
+  "MEMORY": [
+   "MU",
+   "SNDK",
+   "WDC",
+   "STX"
+  ],
+  "OPTICAL": [
+   "AAOI",
+   "LITE",
+   "COHR",
+   "GLW",
+   "ANET"
+  ],
+  "DCAI": [
+   "NBIS",
+   "CRWV",
+   "DELL",
+   "SMCI",
+   "ANET",
+   "HPE"
+  ],
+  "AIPOWER": [
+   "BE",
+   "GEV",
+   "VST",
+   "CEG",
+   "OKLO"
+  ],
+  "SEMIS": [
+   "NVDA",
+   "AMD",
+   "AVGO",
+   "TSM",
+   "ARM",
+   "QCOM",
+   "MRVL",
+   "INTC",
+   "AMAT"
+  ],
+  "CYBER": [
+   "PANW",
+   "CRWD",
+   "ZS",
+   "NET",
+   "S",
+   "OKTA"
+  ],
+  "SOFTWARE": [
+   "NOW",
+   "CRM",
+   "DDOG",
+   "PLTR",
+   "SNOW"
+  ],
+  "CRYPTO": [
+   "COIN",
+   "HOOD",
+   "MSTR",
+   "MARA",
+   "RIOT",
+   "IREN"
+  ],
+  "MEGA": [
+   "AAPL",
+   "MSFT",
+   "META",
+   "AMZN",
+   "GOOGL",
+   "TSLA"
+  ],
+  "SLOW_FIN": [
+   "GS",
+   "MS",
+   "BAC"
+  ],
+  "SLOW_IND": [
+   "DE",
+   "CAT",
+   "BA"
+  ],
+  "SLOW_UTIL": [
+   "NRG",
+   "VST",
+   "CEG"
+  ]
+ },
+ "swaps": {
+  "CIEN": "GLW (CIEN has 4 days of bars)",
+  "FTNT": "S (FTNT has 4 days of bars)"
+ },
+ "dual_basket_rule": "ANET (OPTICAL+DCAI) and VST/CEG (AIPOWER + SLOW_UTIL): per card, the basket with the higher basket time-scaled % at bar m (direction-adjusted) is used; no lookahead",
+ "slow_sector_baskets": {
+  "SLOW_FIN": "GS MS BAC (most-carded liquid non-fintech financials; HOOD/COIN/SOFI sit in CRYPTO/FINTECH)",
+  "SLOW_IND": "DE CAT BA",
+  "SLOW_UTIL": "NRG VST CEG",
+  "HOME_BUILDERS": "NONE: no home builder (DHI/LEN/PHM/NVR/TOL) has bars or cards in our data; only ITB/XHB ETFs exist and they are outside the 15"
+ },
+ "slow_weight": 0.5,
+ "slow_weight_note": "0.5 fixed by instruction, not fit: 0.5 vs 1.0 differ <0.5 pt on fit",
+ "members_excluded_from_own_basket_stats": true,
+ "points": {
+  "SPY_ALIGN_TURN_3M|ret3.5[0.05,0.12)": 17,
+  "SPY_ALIGN_RALLY_DAY|share[0.6,0.75)": 15,
+  "SPY_ALIGN_RALLY_DAY|share[0.75,0.9)": 34,
+  "BASKET_PCT_TS|bts[1,1.5)": 14,
+  "BASKET_RANK|rank leader[0.99+)": 29,
+  "BASKET_RVOL|rv[1.5,2.5)": 17
+ },
+ "weight_in_PR": "0 until validated: V3B test win 45.4/44.4/42.0 vs V3 46.7/47.7/44.0 at matched cards, so the basket rows do not beat V3",
+ "cards_with_basket": "7,315 of 12,282 (59.6%)",
+ "files": [
+  "VINCE-SECTOR-POINTS-V3B.csv",
+  "VINCE-SECTOR-BASKET-FEATURES.csv",
+  "VINCE-SECTOR-BASKETS-TIERS.csv",
+  "VINCE-SECTOR-BASKETS-EVAL.csv"
+ ]
+}

@@ -106,7 +106,9 @@ class Engine:
                 # best.option was required to get here, so the card is still that contract.
                 awaiting_confirmation = False
                 best.metrics["gap_bar_confirmation"] = 1
-            if awaiting_confirmation and not opening_fast_lane:
+            # Mode 1 triggers set andre_fast_path and fire on the signal bar.
+            andre_fast = bool(best.metrics.get("andre_fast_path"))
+            if awaiting_confirmation and not opening_fast_lane and not andre_fast:
                 self.store.decision(snap, "IGNITION", "confirming persistence", best)
                 continue
             if awaiting_confirmation and opening_fast_lane:

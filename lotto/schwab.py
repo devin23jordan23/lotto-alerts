@@ -18,6 +18,7 @@ from .models import Bar, ET, Option, Snapshot
 from .discovery import Discovery
 from .coverage import ChainCoverage
 from .resilience import flag
+from .weekly import chain_to_date
 
 LOG = logging.getLogger(__name__)
 BASE = "https://api.schwabapi.com/marketdata/v1"
@@ -252,6 +253,7 @@ class Schwab:
                 total += profiles[historic_day][minute]
                 observations[minute + 1].append(total)
         baseline = {minute: median(values) for minute, values in observations.items() if len(values) >= 10}
+        captured_daily = daily
         if symbol == "SPX":
             # Schwab index candles have zero volume; use traded SPY volume only
             # for volume-based signals while retaining SPX prices and ATR.
@@ -259,6 +261,13 @@ class Schwab:
         if not baseline:
             LOG.warning("%s has fewer than ten usable historical sessions; no alerts until baseline is available", symbol)
         self.baselines[key] = baseline
+        if flag("LOTTO_ANDRE_WEIGHTS_MODE") == 1:
+            # Same candles this call already fetched. Mode 0 does not touch the profile cache.
+            from .andre import copy_volume_profile, remember_baseline
+            if symbol == "SPX":
+                copy_volume_profile("SPY", "SPX", day, captured_daily)
+            else:
+                remember_baseline(symbol, day, profiles, observations, captured_daily)
         return baseline
 
     def bars(self, symbol: str, now: datetime, with_baseline=True) -> tuple[Bar, ...]:
@@ -336,6 +345,35 @@ class Schwab:
                                              number(raw.get("vega"))))
         return tuple(result)
 
+    def _refresh_andre_tape(self, now, began):
+        """At most a couple of price-history calls for sector ETFs the deep poll did not already cover."""
+        from .andre import TAPE, refresh_symbols
+        from .andre_config import threshold
+        if time.monotonic() - began >= 50:
+            return
+        budget = int(threshold("EXTRA_REQUESTS"))
+        spent = 0
+        day = now.astimezone(ET).date()
+        for symbol in refresh_symbols():
+            if spent >= budget or time.monotonic() - began >= 50:
+                break
+            if TAPE.bar_fresh(symbol, now):
+                continue
+            cold = (symbol, day) not in self.baselines
+            cost = 2 if cold else 1
+            if spent + cost > budget:
+                continue
+            try:
+                bars = self.bars(symbol, datetime.now(timezone.utc))
+            except Exception as exc:
+                LOG.warning("Andre tape %s unavailable (%s)", symbol, type(exc).__name__)
+                spent += cost
+                continue
+            spent += cost
+            TAPE.note_bars(symbol, bars, getattr(self, "levels", {}).get((symbol, day), {}),
+                           self.atrs.get((symbol, day)) if hasattr(self, "atrs") else None,
+                           datetime.now(timezone.utc))
+
     def poll(self, symbols: list[str], tracked: dict, max_dte: int) -> list[Snapshot]:
         now = datetime.now(timezone.utc)
         if not hasattr(self, "coverage"):
@@ -347,6 +385,10 @@ class Schwab:
             return []
         benchmarks = {benchmark_for(s) for s in symbols} | {"SPY", "QQQ", "SMH"}
         requested = sorted(set(symbols) | benchmarks)
+        if flag("LOTTO_ANDRE_WEIGHTS_MODE") == 1:
+            from .andre import TAPE, extra_quote_symbols
+            TAPE.universe = tuple(symbols)
+            requested = sorted(set(requested) | extra_quote_symbols(symbols))
         quotes = self.get("/quotes", {"symbols": ",".join(api_symbol(s) for s in requested)})
         parsed = {}
         for symbol in requested:
@@ -362,6 +404,10 @@ class Schwab:
             }
         if "SPX" in parsed:
             parsed["SPX"]["volume"] = parsed.get("SPY", {}).get("volume")
+        if flag("LOTTO_ANDRE_WEIGHTS_MODE") == 1:
+            from .andre import TAPE
+            for symbol, quote in parsed.items():
+                TAPE.note_quote(symbol, quote)
         selected = self.discovery.update(parsed, datetime.now(timezone.utc), set(symbols), tracked,
                                          self.coverage.priorities(now))
         result = []
@@ -377,7 +423,7 @@ class Schwab:
                 data = self.get("/chains", {"symbol":api_symbol(symbol), "contractType":"ALL", "strategy":"SINGLE",
                                             "includeUnderlyingQuote":"true", "strikeCount":80,
                                             "fromDate":now.astimezone(ET).date().isoformat(),
-                                            "toDate":(now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()})
+                                            "toDate":chain_to_date(now.astimezone(ET).date(), max_dte).isoformat()})
                 if data.get("isDelayed") is True:
                     raise ValueError("delayed option chain")
                 self.coverage.observe(symbol, datetime.now(timezone.utc), self.parse_chain(data, allow_spx=symbol == "SPX"),
@@ -396,10 +442,15 @@ class Schwab:
             self.last_polled[symbol] = time.monotonic()
             try:
                 bars = self.bars(symbol, datetime.now(timezone.utc))
+                if flag("LOTTO_ANDRE_WEIGHTS_MODE") == 1:
+                    from .andre import TAPE
+                    TAPE.note_bars(symbol, bars, getattr(self, "levels", {}).get((symbol, now.astimezone(ET).date()), {}),
+                                   self.atrs.get((symbol, now.astimezone(ET).date())) if hasattr(self, "atrs") else None,
+                                   datetime.now(timezone.utc))
                 data = self.get("/chains", {"symbol": api_symbol(symbol), "contractType": "ALL", "strategy": "SINGLE",
                                             "includeUnderlyingQuote": "true", "strikeCount": 80,
                                             "fromDate": now.astimezone(ET).date().isoformat(),
-                                            "toDate": (now.astimezone(ET).date() + timedelta(days=max_dte)).isoformat()})
+                                            "toDate": chain_to_date(now.astimezone(ET).date(), max_dte).isoformat()})
                 options = list(self.parse_chain(data, allow_spx=symbol == "SPX"))
                 if data.get("isDelayed") is not True:
                     self.coverage.observe(symbol, datetime.now(timezone.utc), options,
@@ -445,6 +496,8 @@ class Schwab:
                                        **getattr(self,"levels",{}).get((symbol,now.astimezone(ET).date()),{})))
             except Exception as exc:
                 LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)
+        if flag("LOTTO_ANDRE_WEIGHTS_MODE") == 1:
+            self._refresh_andre_tape(datetime.now(timezone.utc), began)
         LOG.info("Discovery: %d/%d fresh quotes, %d promoted, %d deep chains; universe chains %d/%d fresh within %d min (%d this cycle)",
                  len(self.discovery.observations), len(symbols), len(selected), len(result),
                  self.coverage.count_fresh(symbols, datetime.now(timezone.utc)), len(symbols),
