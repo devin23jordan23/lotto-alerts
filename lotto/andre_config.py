@@ -4,7 +4,8 @@ This is not a 100-point scale. Nia's hist-validated points sum to at most 38
 before the −2 time penalty and the −4 inside-after-11 penalty. Do not
 renormalize them. Keys kept at 0 are old terms that must not score.
 Override any value with LOTTO_ANDRE_<NAME> (or LOTTO_ANDRE_W_<KEY> for a weight).
-MIN_SCORE=0 is the 20–30 cards/day alternative; it is not the default.
+MIN_SCORE=0 is the wide book. 6 keeps the Nov 11 winners and runs about 26 cards a day.
+10 is the as-of line that stays under 20 a day. Neither is the default; 9 is.
 """
 import os
 
@@ -17,8 +18,8 @@ WEIGHTS = {
     "TIME_P5": -2,         # after 16:00. Same penalty. No afternoon bonus.
     "PENALTY_INSIDE_AFTER11": 4,  # subtract when after 11:00 and still inside PM/PD
 
-    "SPY_EFF": 8,          # SPY 30-minute efficiency >= 0.5, same side
-    "SPY_D3": 4,           # SPY 3-day trend, same side
+    "SPY_EFF": 8,          # SPY 30-minute efficiency >= 0.5, same side, through the last completed minute
+    "SPY_D3": 0,           # was +4. No as-of edge; research D3 was look-ahead. Kept at 0.
     "SPY_TREND": 0,        # old open comparison. Replaced by SPY_EFF / SPY_D3.
     "SPY_LEVEL": 0,        # SPY beyond its own PM/PD. Failed history.
     "SPY_15M": 0,          # verified alternative to D3. Not stacked.
@@ -44,6 +45,15 @@ WEIGHTS = {
     "GAP_1ATR": 3,         # |gap| >= 1 ATR
     "EARN_D1": 3,          # earnings day-1, when a calendar says so
     "PM_RVOL": 0,
+    "FLUSH_PTS_TIME": 0,       # flush cards do not take scanner time points
+    "FLUSH_PTS_DEPTH6": 1,     # stack depth >= 6
+    "FLUSH_PTS_FAST_WICK": 1,
+    "FLUSH_PTS_REAL_LEVEL": 1, # PDL/PDH/PML/PMH/ONL/ONH, not a pivot or round number
+    "FLUSH_PTS_SPY15": 1,      # SPY 15m > 0.3 ATR, same side. No D3.
+    "FLUSH_PTS_SPY_D3": 0,
+    "FLUSH_PTS_PACE": 1,
+    "FLUSH_PTS_RVOL": 1,
+    "FLUSH_PTS_GAP": 1,
 
     "ENTRY": 0,
     "NAMED": 0,
@@ -61,8 +71,10 @@ TIME_ENDS = {
 
 # Ace [DEF] thresholds. Floats are ATR fractions or returns unless noted.
 THRESHOLDS = {
-    "MIN_SCORE": 6,     # T>=6. Not 70. Env LOTTO_ANDRE_MIN_SCORE still overrides.
-    "TOP_SCORE": 8,     # informational. Not an operating cut. Not 85.
+    "MIN_SCORE": 9,     # scanner fire line for the combined under-20 book.
+                        # Alternatives, not defaults: 6 keeps MSFT 525P and MU 800C (~26/day);
+                        # 10 is the as-of-D3 line that stays under 20/day. Env LOTTO_ANDRE_MIN_SCORE.
+    "TOP_SCORE": 8,     # informational label only. It now sits below the fire line. Not an operating cut.
     "RVOL_MIN_SESSIONS": 14,
     "RVOL_SESSIONS": 20,
     "RVOL_GATE": 1.5,
@@ -119,7 +131,19 @@ THRESHOLDS = {
     "FLUSH_START_MINUTE": 2,     # 09:32
     "FLUSH_END_MINUTE": 30,      # 10:00
     "FLUSH_DEPTH": 5,
-    "TREND_DEPTH": 6,
+    "FLUSH_MIN_STACK_DEPTH": 5,
+    "TREND_DEPTH": 5,            # kept so older env names still resolve
+    "TREND_EMA_MIN_DEPTH": 5,    # was 6
+    "FLUSH_MIN_SCORE": 5,        # out of 7. Flush does not use the scanner score.
+    "FLUSH_MAX_PER_DAY": 8,      # first 8 qualifying flush cards by entry time
+    "FLUSH_WICK_MIN": 0.5,
+    "FLUSH_SIT_MAX_BARS": 4,
+    "FLUSH_SIT_BAND_ATR": 0.15,
+    "FLUSH_SPY15_MIN_ATR": 0.3,
+    "FLUSH_RVOL_MIN": 2.0,
+    "FLUSH_BURST_MIN": 3.0,
+    "FLUSH_PACE_MIN": 2.0,
+    "FLUSH_GAP_MIN_ATR": 1.0,
     "STACK_MOVE_ATR": 0.80,
     "STACK_RS": 0.005,
     # "Big range" is named in the stack and was not given a cut. 1 ATR is the stand-in.

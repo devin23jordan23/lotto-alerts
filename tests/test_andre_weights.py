@@ -2,11 +2,12 @@
 import os
 import unittest
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from lotto.andre import (
-    TAPE, aggregate, apply_mode, blended_ema, burst_multiple, ema_weights,
+    TAPE, _FLUSH_BOOK, aggregate, apply_mode, blended_ema, burst_multiple, ema_weights,
     evaluate_side_full, remember_levels, remember_rvol, reset_state, rvol_now, time_points,
 )
 from lotto.andre_config import WEIGHTS, threshold
@@ -79,9 +80,12 @@ class FlagOffTests(unittest.TestCase):
         listed = (WEIGHTS["TIME_P1"] + WEIGHTS["TIME_P2"] + WEIGHTS["SPY_EFF"] + WEIGHTS["SPY_D3"]
                   + WEIGHTS["PACE_2"] + WEIGHTS["RVOL_3"] + WEIGHTS["BURST_PD"] + WEIGHTS["GAP_1ATR"]
                   + WEIGHTS["EARN_D1"])
-        self.assertEqual(listed, 38)
-        self.assertEqual(listed - WEIGHTS["TIME_P2"], 33)
-        self.assertEqual(threshold("MIN_SCORE"), 6)
+        self.assertEqual(listed - WEIGHTS["TIME_P2"] - WEIGHTS["SPY_D3"], 29)
+        self.assertEqual(WEIGHTS["SPY_D3"], 0)
+        self.assertEqual(threshold("MIN_SCORE"), 9)
+        self.assertEqual(threshold("TREND_EMA_MIN_DEPTH"), 5)
+        self.assertEqual(threshold("FLUSH_MIN_SCORE"), 5)
+        self.assertEqual(threshold("FLUSH_MAX_PER_DAY"), 8)
         self.assertEqual(threshold("TOP_SCORE"), 8)
         self.assertEqual(WEIGHTS["TIME_P4"], -2)
         self.assertEqual(WEIGHTS["LEVEL_PM"], 0)
@@ -178,7 +182,8 @@ class TriggerTests(unittest.TestCase):
         self.assertEqual(result["parts"]["pace"], 0)
         self.assertEqual(result["parts"]["spy_trend"], 0)
         self.assertEqual(result["score"], 6)
-        self.assertEqual(threshold("MIN_SCORE"), 6)
+        self.assertEqual(threshold("MIN_SCORE"), 9)
+        self.assertFalse(result["qualifying"])
 
         afternoon = datetime(2026, 11, 11, 13, 30, tzinfo=ET)
         late = _snap(_bars([100, 100.2], start=afternoon), symbol="ZZZ", premarket_high=90,
@@ -201,13 +206,22 @@ class TriggerTests(unittest.TestCase):
     def test_only_the_open_flush_and_a_deep_trend_reclaim_can_fire(self):
         # Tight flush into PDL, reclaim inside three 2-minute bars, depth >= 5, 09:32-10:00.
         closes = [100, 100, 100, 100, 97.8, 97.8, 99, 99, 102, 102]
-        snap = _snap(_bars(closes), symbol="ZZZ", premarket_high=90, prior_low=98, prior_high=101,
-                     prior_atr=2, prior_close=100.4)
-        TAPE.seed("SPY", price=100, open=100, at=snap.at)
+        bars = list(_bars(closes))
+        volume = sum(bar.volume for bar in bars)
+        bars[-1] = replace(bars[-1], expected_cumulative_volume=volume / 3)
+        snap = _snap(tuple(bars), symbol="ZZZ", premarket_high=90, prior_low=98, prior_high=101,
+                     prior_atr=2, prior_close=90)
+        end = snap.bars[-1].end
+        TAPE.seed("SPY", price=101, open=100, atr=2, at=end, samples=deque([
+            (end - timedelta(minutes=16), 100.0), (end, 101.0)]))
         fired = self._score(snap, rvol=2)
         self.assertIn("FLUSH_V", fired["metrics"]["andre_triggers"])
         self.assertEqual(fired["metrics"]["andre_fast_path"], 1)
-        self.assertGreaterEqual(fired["score"], 6)
+        self.assertEqual(fired["parts"].get("time_window", 0), 0)
+        self.assertEqual(fired["parts"].get("flush_time", 0), 0)
+        self.assertEqual(fired["parts"].get("flush_d3", 0), 0)
+        self.assertGreaterEqual(fired["score"], 5)
+        self.assertLessEqual(fired["score"], 7)
 
         reset_state()
         late_start = datetime(2026, 11, 11, 11, 0, tzinfo=ET)
@@ -302,6 +316,42 @@ class TriggerTests(unittest.TestCase):
         result = self._score(snap, rvol=0.8)
         self.assertNotIn("TREND_PULLBACK", result["metrics"]["andre_triggers"])
         self.assertEqual(result["metrics"]["andre_fast_path"], 0)
+
+    def test_spy_terms_stop_at_the_last_completed_minute(self):
+        closes = [100 + index * 0.05 for index in range(40)]
+        snap = _snap(_bars(closes), symbol="ZZZ", premarket_high=90, prior_high=120, prior_atr=2, prior_close=100)
+        end = snap.bars[-1].end
+        steady = [(end - timedelta(minutes=30 - index), 100 + index * 0.2) for index in range(31)]
+        future = (end + timedelta(seconds=20), 80.0)
+        TAPE.seed("SPY", price=106, open=100, atr=2, at=end, samples=deque(steady + [future]))
+        remember_levels("SPY", snap.at.astimezone(ET).date(),
+                        [(100, 90, 99), (101, 91, 100), (102, 92, 101), (110, 93, 109)])
+        result = self._score(snap, rvol=1)
+        self.assertEqual(result["parts"]["spy_eff"], WEIGHTS["SPY_EFF"])
+        self.assertEqual(result["parts"]["spy_d3"], 0)
+        chop = []
+        for index in range(31):
+            chop.append((end - timedelta(minutes=30 - index), 100 if index % 2 == 0 else 110))
+        TAPE.seed("SPY", price=110, open=100, atr=2, at=end, samples=deque(chop + [(end + timedelta(seconds=30), 140)]))
+        chopped = self._score(snap, rvol=1)
+        self.assertEqual(chopped["parts"]["spy_eff"], 0)
+
+    def test_flush_cap_stops_at_eight_cards(self):
+        day = "2026-11-11"
+        for index in range(8):
+            _FLUSH_BOOK.append((day, datetime(2026, 11, 11, 9, 32, tzinfo=ET), f"N{index}", 1))
+        closes = [100, 100, 100, 100, 97.8, 97.8, 99, 99, 102, 102]
+        bars = list(_bars(closes))
+        volume = sum(bar.volume for bar in bars)
+        bars[-1] = replace(bars[-1], expected_cumulative_volume=volume / 3)
+        snap = _snap(tuple(bars), symbol="LATE", premarket_high=90, prior_low=98, prior_high=101,
+                     prior_atr=2, prior_close=90)
+        end = snap.bars[-1].end
+        TAPE.seed("SPY", price=101, open=100, atr=2, at=end, samples=deque([
+            (end - timedelta(minutes=16), 100.0), (end, 101.0)]))
+        blocked = self._score(snap, rvol=2)
+        self.assertGreaterEqual(blocked["metrics"]["andre_flush_score"], 5)
+        self.assertNotIn("FLUSH_V", blocked["metrics"]["andre_triggers"])
 
     def test_fast_path_does_not_wait_for_a_second_bar(self):
         frames = list(demo_frames())

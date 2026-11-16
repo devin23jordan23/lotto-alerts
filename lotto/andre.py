@@ -120,6 +120,7 @@ TAPE = _Tape()
 _PROFILES = {}
 _ROTATE = {"i": 0}
 _FLUSH_SEEN = set()
+_FLUSH_BOOK = []  # (day, at, symbol, direction) for flush cards that cleared the flush score
 _EARNINGS = set()
 
 
@@ -128,6 +129,7 @@ def reset_state():
     _PROFILES.clear()
     _ROTATE["i"] = 0
     _FLUSH_SEEN.clear()
+    _FLUSH_BOOK.clear()
     _EARNINGS.clear()
 
 
@@ -881,8 +883,18 @@ def _days_down(symbol, day, direction):
     return run
 
 
-def _spy_efficiency(spy, direction):
+def _completed_minute(snap):
+    """End of the last finished 1-minute bar. Quotes after this are the unfinished minute."""
+    return snap.bars[-1].end if snap.bars else snap.at
+
+
+def _samples_through(spy, cutoff):
     samples = list((spy or {}).get("samples") or [])
+    return [sample for sample in samples if sample[0] <= cutoff]
+
+
+def _spy_efficiency(spy, direction, cutoff):
+    samples = _samples_through(spy, cutoff)
     if len(samples) < 3:
         return False
     now = samples[-1][0]
@@ -896,6 +908,20 @@ def _spy_efficiency(spy, direction):
     if path <= 0:
         return False
     return abs(net) / path >= float(threshold("SPY_EFF_MIN")) and direction * net > 0
+
+
+def _spy_15m(spy, direction, cutoff):
+    """Same-side SPY move over 15 minutes, using only samples at or before cutoff."""
+    samples = _samples_through(spy, cutoff)
+    atr = (spy or {}).get("atr")
+    if len(samples) < 2 or not atr:
+        return False
+    now_at, now_price = samples[-1]
+    span = 15 * 60 - 30
+    prior = [sample for sample in samples if (now_at - sample[0]).total_seconds() >= span]
+    if not prior:
+        return False
+    return direction * (now_price - prior[-1][1]) / atr > float(threshold("FLUSH_SPY15_MIN_ATR"))
 
 
 def _spy_d3(day, direction):
@@ -985,21 +1011,21 @@ def _flush_v(direction, snap, shared, spy):
     """Open-only flush into a named level and a V reclaim. One event per name, side, and day."""
     minute = shared["minute"]
     if not (float(threshold("FLUSH_START_MINUTE")) <= minute <= float(threshold("FLUSH_END_MINUTE"))):
-        return False
+        return None
     key = (snap.at.astimezone(ET).date().isoformat(), snap.symbol, direction)
     if key in _FLUSH_SEEN:
-        return False
+        return None
     atr = shared["atr"]
     two = shared["two"]
-    if not atr or len(two) < 2 or _stack_depth(direction, snap, shared, spy) < int(threshold("FLUSH_DEPTH")):
-        return False
+    if not atr or len(two) < 2 or _stack_depth(direction, snap, shared, spy) < int(threshold("FLUSH_MIN_STACK_DEPTH")):
+        return None
     rvol = shared["rvol"]["rvol"]
     burst = shared["burst"] or 0
     if not ((rvol is not None and rvol >= float(threshold("S29A_RVOL"))) or burst >= float(threshold("BURST_MULTIPLE"))):
-        return False
+        return None
     if direction * (two[-1].close - (shared["low"] if direction == 1 else shared["high"])) / atr < float(threshold("FLUSH_LEAVE_ATR")):
         if _days_down(snap.symbol, snap.at.astimezone(ET).date(), direction) < int(threshold("DAYS_DOWN")):
-            return False
+            return None
     last = len(two) - 1
     window = int(threshold("FLUSH_RECLAIM_BARS"))
     for level in _named_levels(direction, snap):
@@ -1013,8 +1039,8 @@ def _flush_v(direction, snap, shared, spy):
             if direction * (two[-1].close - level) <= 0:
                 continue
             _FLUSH_SEEN.add(key)
-            return True
-    return False
+            return level
+    return None
 
 
 def _midday_inside(direction, snap, shared):
@@ -1088,29 +1114,45 @@ def evaluate_side(snap, direction, legacy_blockers=(), legacy_metrics=None):
     # depth-6 EMA reclaim. Exhausted-approach and tight-room holds are not applied.
     watch = triggers & WATCHLIST
     depth = _stack_depth(direction, snap, shared, spy)
-    side = set()
-    if _flush_v(direction, snap, shared, spy):
-        side.add("FLUSH_V")
-    if (_pullback(direction, snap, shared, True) and depth >= int(threshold("TREND_DEPTH"))
-            and not _midday_inside(direction, snap, shared)):
-        side.add("TREND_PULLBACK")
-    blockers = []
-    if side and shared["minute"] >= float(threshold("AFTER_11_MINUTE")) and not (beyond_pm or beyond_pd):
-        side.clear()
-        blockers.append("in-range after 11:00")
-    if not side:
-        blockers.append("no andre setup")
-    triggers = side
+    cutoff = _completed_minute(snap)
+    flush_level = _flush_v(direction, snap, shared, spy)
+    trend_reclaim = (_pullback(direction, snap, shared, True) and depth >= int(threshold("TREND_EMA_MIN_DEPTH"))
+                     and not _midday_inside(direction, snap, shared))
     rvol_value = shared["rvol"]["rvol"]
     burst = shared["burst"]
     burst_hit = burst is not None and burst >= float(threshold("BURST_MULTIPLE"))
-    parts = _parts(direction, snap, shared, spy, day, legacy_metrics, beyond_pm, beyond_pd, burst_hit)
-    raw = sum(parts.values())
-    # Additive score. Do not floor at 0: after 13:00 the time term is -2.
-    score = round(min(100.0, raw), 2)
-    minimum = float(threshold("MIN_SCORE"))
-    if score < minimum:
+    scanner_parts = _parts(direction, snap, shared, spy, day, legacy_metrics, beyond_pm, beyond_pd, burst_hit)
+    scanner_score = round(min(100.0, sum(scanner_parts.values())), 2)
+    flush_parts = {}
+    flush_score = 0.0
+    if flush_level is not None:
+        flush_parts = _flush_parts(direction, snap, shared, spy, day, legacy_metrics, flush_level, depth)
+        flush_score = round(sum(flush_parts.values()), 2)
+    day_key = day.isoformat()
+    flush_ok = (flush_level is not None and flush_score >= float(threshold("FLUSH_MIN_SCORE"))
+                and _flush_room(day_key, snap.at))
+    if trend_reclaim and shared["minute"] >= float(threshold("AFTER_11_MINUTE")) and not (beyond_pm or beyond_pd):
+        trend_reclaim = False
+    trend_ok = trend_reclaim and scanner_score >= float(threshold("MIN_SCORE"))
+    side = set()
+    if flush_ok:
+        side.add("FLUSH_V")
+        _book_flush(day_key, snap.at, snap.symbol, direction)
+    if trend_ok:
+        side.add("TREND_PULLBACK")
+    blockers = []
+    if trend_reclaim and not trend_ok and not flush_ok:
         blockers.append("score below andre minimum")
+    if not side and "score below andre minimum" not in blockers:
+        blockers.append("no andre setup")
+    if shared["minute"] >= float(threshold("AFTER_11_MINUTE")) and not (beyond_pm or beyond_pd) and not side:
+        if "in-range after 11:00" not in blockers:
+            blockers.append("in-range after 11:00")
+    triggers = side
+    if flush_ok:
+        parts, score = flush_parts, flush_score
+    else:
+        parts, score = scanner_parts, scanner_score
     for blocker in legacy_blockers:
         if blocker.startswith("dead zone") or blocker.startswith("volume burst on") or blocker.startswith("move already spent"):
             blockers.append(blocker)
@@ -1121,12 +1163,17 @@ def evaluate_side(snap, direction, legacy_blockers=(), legacy_metrics=None):
     if qualifying and setup is None:
         qualifying = False
         blockers.append("no andre setup")
+    rvol_value = shared["rvol"]["rvol"]
+    burst = shared["burst"]
+    burst_hit = burst is not None and burst >= float(threshold("BURST_MULTIPLE"))
+    raw = score
     metrics = {
         "andre_triggers": ",".join(sorted(triggers)),
         "andre_watch": ",".join(sorted(watch)),
         "andre_stack": depth,
         "andre_tier": "A" if score >= top else "B",
         "andre_fast_path": fast,
+        "andre_flush_score": flush_score if flush_level is not None else -1,
         "andre_rvol": rvol_value if rvol_value is not None else -1,
         "andre_rvol_sessions": shared["rvol"]["sessions"],
         "andre_rvol_status": shared["rvol"]["status"],
@@ -1151,6 +1198,71 @@ def evaluate_side(snap, direction, legacy_blockers=(), legacy_metrics=None):
         "parts": parts, "metrics": metrics, "score": score, "blockers": tuple(blockers),
         "qualifying": qualifying, "setup": setup, "reasons": reasons,
     }
+
+
+def _real_flush_level(level, snap):
+    named = [snap.prior_low, snap.prior_high, snap.premarket_low, snap.premarket_high]
+    return any(other is not None and abs(level - other) <= 1e-6 for other in named)
+
+
+def _fast_wick(direction, snap, shared):
+    """Undercut wick at least half the bar, and no more than four bars sitting on the extreme."""
+    bars = snap.bars
+    atr = shared["atr"]
+    if len(bars) < 3 or not atr:
+        return False
+    prior = bars[:-1]
+    if direction == 1:
+        extreme = min(bar.low for bar in prior)
+        bar = min(prior, key=lambda item: item.low)
+        span = bar.high - bar.low
+        wick = (min(bar.open, bar.close) - bar.low) / span if span else 0
+        near = sum(1 for item in prior if item.low - extreme <= float(threshold("FLUSH_SIT_BAND_ATR")) * atr)
+    else:
+        extreme = max(bar.high for bar in prior)
+        bar = max(prior, key=lambda item: item.high)
+        span = bar.high - bar.low
+        wick = (bar.high - max(bar.open, bar.close)) / span if span else 0
+        near = sum(1 for item in prior if extreme - item.high <= float(threshold("FLUSH_SIT_BAND_ATR")) * atr)
+    return wick >= float(threshold("FLUSH_WICK_MIN")) and near <= int(threshold("FLUSH_SIT_MAX_BARS"))
+
+
+def _flush_room(day, at):
+    booked = [item for item in _FLUSH_BOOK if item[0] == day and item[1] <= at]
+    return len(booked) < int(threshold("FLUSH_MAX_PER_DAY"))
+
+
+def _book_flush(day, at, symbol, direction):
+    key = (day, symbol, direction)
+    if any(item[0] == day and (item[2], item[3]) == (symbol, direction) for item in _FLUSH_BOOK):
+        return
+    _FLUSH_BOOK.append((day, at, symbol, direction))
+
+
+def _flush_parts(direction, snap, shared, spy, day, legacy, level, depth):
+    """Seven 1-point terms. No scanner time points and no D3."""
+    cutoff = _completed_minute(snap)
+    rvol = shared["rvol"]["rvol"]
+    burst = shared["burst"] or 0
+    pace = _pace(snap, legacy)
+    gap = 0.0
+    if shared["atr"] and snap.prior_close:
+        gap = abs(shared["open"] - snap.prior_close) / shared["atr"]
+    return {
+        "flush_depth6": weight("FLUSH_PTS_DEPTH6") if depth >= 6 else 0.0,
+        "flush_wick": weight("FLUSH_PTS_FAST_WICK") if _fast_wick(direction, snap, shared) else 0.0,
+        "flush_level": weight("FLUSH_PTS_REAL_LEVEL") if _real_flush_level(level, snap) else 0.0,
+        "flush_spy15": weight("FLUSH_PTS_SPY15") if _spy_15m(spy, direction, cutoff) else 0.0,
+        "flush_d3": weight("FLUSH_PTS_SPY_D3"),
+        "flush_pace": weight("FLUSH_PTS_PACE") if pace >= float(threshold("FLUSH_PACE_MIN")) else 0.0,
+        "flush_rvol": weight("FLUSH_PTS_RVOL") if ((rvol or 0) >= float(threshold("FLUSH_RVOL_MIN")) or burst >= float(threshold("FLUSH_BURST_MIN"))) else 0.0,
+        "flush_gap": weight("FLUSH_PTS_GAP") if gap >= float(threshold("FLUSH_GAP_MIN_ATR")) else 0.0,
+        "flush_time": weight("FLUSH_PTS_TIME"),
+    }
+    ema = shared["blended"]["ema9"]
+    if ema is None or not shared["atr"]:
+        return 0.0
+    return direction * (snap.spot - ema) / shared["atr"]
 
 
 def _stretch(direction, snap, shared):
@@ -1186,7 +1298,7 @@ def _parts(direction, snap, shared, spy, day, legacy, beyond_pm, beyond_pd, burs
     return {
         "time_window": time_points(shared["minute"]),
         "inside_after_11": -weight("PENALTY_INSIDE_AFTER11") if inside else 0.0,
-        "spy_eff": weight("SPY_EFF") if _spy_efficiency(spy, direction) else 0.0,
+        "spy_eff": weight("SPY_EFF") if _spy_efficiency(spy, direction, _completed_minute(snap)) else 0.0,
         "spy_d3": weight("SPY_D3") if _spy_d3(day, direction) else 0.0,
         "spy_trend": weight("SPY_TREND"),
         "spy_level": weight("SPY_LEVEL"),
