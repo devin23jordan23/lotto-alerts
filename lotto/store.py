@@ -33,7 +33,15 @@ class Store:
                 at TEXT, entry_ask REAL, payload TEXT, snapshot TEXT, delivery TEXT,
                 max_return REAL, min_return REAL, latest_return REAL, last_quote TEXT,
                 closed INTEGER DEFAULT 0, phase TEXT NOT NULL DEFAULT 'LEGACY',
-                parent_id TEXT, thesis_id TEXT);
+                parent_id TEXT, thesis_id TEXT, session_extreme REAL);
+            CREATE TABLE IF NOT EXISTS finalb_shadow (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL, ticker TEXT NOT NULL, side TEXT NOT NULL,
+                live_decision TEXT NOT NULL, live_block_reasons TEXT NOT NULL,
+                finalb_decision TEXT NOT NULL, finalb_block_reasons TEXT NOT NULL,
+                live_score REAL, finalb_score REAL, rule_flags TEXT NOT NULL,
+                cooldown_state TEXT NOT NULL, contract TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS finalb_shadow_ts ON finalb_shadow(ts);
             CREATE TABLE IF NOT EXISTS milestones (
                 alert_id TEXT, percent INTEGER, at TEXT, PRIMARY KEY(alert_id, percent));
             CREATE INDEX IF NOT EXISTS alerts_day ON alerts(day, symbol);
@@ -71,6 +79,8 @@ class Store:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN parent_id TEXT")
             if "thesis_id" not in columns:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN thesis_id TEXT")
+            if "session_extreme" not in columns:
+                self.db.execute("ALTER TABLE alerts ADD COLUMN session_extreme REAL")
 
     def record(self, snap: Snapshot) -> None:
         with self.db:
@@ -204,8 +214,51 @@ class Store:
     def already_alerted(self, day: str, contract: str) -> bool:
         return self.db.execute("SELECT 1 FROM alerts WHERE day=? AND contract=?", (day, contract)).fetchone() is not None
 
+    def record_finalb_shadow(self, rows):
+        if not rows:
+            return
+        with self.db:
+            self.db.executemany("""INSERT INTO finalb_shadow
+                (ts, ticker, side, live_decision, live_block_reasons, finalb_decision,
+                 finalb_block_reasons, live_score, finalb_score, rule_flags, cooldown_state, contract)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(r["ts"], r["ticker"], r["side"], r["live_decision"], r["live_block_reasons"],
+                  r["finalb_decision"], r["finalb_block_reasons"], r["live_score"], r["finalb_score"],
+                  r["rule_flags"], r["cooldown_state"], r["contract"]) for r in rows])
+
+    def record_finalb_discovery(self, report):
+        """One RANK row per scored name. Discovery is not a card, so side is RANK."""
+        import json
+        top_live = set(report["top_live"])
+        top_finalb = set(report["top_finalb"])
+        at = report["at"].isoformat()
+        rows = []
+        for item in report["rows"]:
+            rows.append({
+                "ts": at,
+                "ticker": item["symbol"],
+                "side": "RANK",
+                "live_decision": f"rank {item['live_rank']}",
+                "live_block_reasons": "[]",
+                "finalb_decision": f"rank {item['finalb_rank']}",
+                "finalb_block_reasons": "[]",
+                "live_score": item["live_score"],
+                "finalb_score": item["finalb_score"],
+                "rule_flags": json.dumps({
+                    "kind": "discovery",
+                    "live_rank": item["live_rank"],
+                    "finalb_rank": item["finalb_rank"],
+                    "rank_delta": item["delta"],
+                    "in_live_top": item["symbol"] in top_live,
+                    "in_finalb_top": item["symbol"] in top_finalb,
+                }),
+                "cooldown_state": "{}",
+                "contract": "",
+            })
+        self.record_finalb_shadow(rows)
+
     def queue(self, candidate: Candidate, payload: dict, dry_run: bool,
-              phase: str, parent_id: str | None = None) -> str:
+              phase: str, parent_id: str | None = None, session_extreme: float | None = None) -> str:
         if phase not in {"POTENTIAL", "ACTIVE"}:
             raise ValueError("Alert phase must be POTENTIAL or ACTIVE")
         snap, option = candidate.snapshot, candidate.option
@@ -215,14 +268,15 @@ class Store:
         with self.db:
             self.db.execute("""INSERT INTO alerts
                 (id, day, symbol, side, contract, at, entry_ask, payload, snapshot, delivery,
-                 max_return, min_return, latest_return, last_quote, phase, parent_id, thesis_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 max_return, min_return, latest_return, last_quote, phase, parent_id, thesis_id,
+                 session_extreme)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ident, snap.day, snap.symbol, option.side, option.symbol, snap.at.isoformat(),
                  option.ask, json.dumps(payload), json.dumps(snap.to_dict()),
                  "dry_run" if dry_run else "internal" if phase == "POTENTIAL" else "pending",
                  option.bid / option.ask - 1, option.bid / option.ask - 1,
                  option.bid / option.ask - 1, option.quote_time.isoformat(),
-                 phase, parent_id, thesis_id))
+                 phase, parent_id, thesis_id, session_extreme))
         return ident
 
     def track(self, snap: Snapshot, settings) -> list[dict]:

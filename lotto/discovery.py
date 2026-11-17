@@ -1,8 +1,12 @@
 """Cheap whole-universe observations; bounded, sticky option-chain promotion."""
+import logging
 from collections import defaultdict
 from datetime import timedelta
 from math import isfinite
+from .finalb import alt_discovery_score
 from .resilience import gap_bridge_seconds, gap_is_bridgeable, note_feed_time
+
+LOG = logging.getLogger(__name__)
 
 
 class Discovery:
@@ -21,7 +25,7 @@ class Discovery:
         self.day = None
         self.observations = []
 
-    def update(self, quotes, now, universe, tracked=(), flow_priorities=None):
+    def update(self, quotes, now, universe, tracked=(), flow_priorities=None, priority_mode=0):
         day = now.date()
         if self.day != day:
             self.history.clear()
@@ -31,7 +35,10 @@ class Discovery:
             self.explored.clear()
             self.day = day
         ranks = {}
+        alt_scores = {}
         self.observations = []
+        if priority_mode < 1:
+            self.finalb_shadow_report = None
         bridge = gap_bridge_seconds()
         if bridge:
             # Record this batch before any return is measured so the first poll after a hole can
@@ -68,6 +75,16 @@ class Discovery:
             intraday_range = (high-low)/opening if high and low else 0
             score = (100*(abs(ret5 or 0)*3 + excursion + intraday_range*.5)
                      + min(3, acceleration or 0) + (flow_priorities or {}).get(symbol, 0))
+            # Mode 2 stays shadow-only: this rank is not card-tested, so it never
+            # replaces `score` or changes which names are scanned.
+            alt = None
+            if priority_mode >= 1:
+                try:
+                    alt = alt_discovery_score(
+                        price, ret5, history, now, high, low, excursion, intraday_range,
+                        acceleration, (flow_priorities or {}).get(symbol, 0))
+                except Exception:
+                    LOG.exception("FINAL-B discovery score failed for %s", symbol)
             record = {**q, "symbol":symbol, "observed_at":now, "return_5m":ret5,
                       "volume_5m":delta, "volume_acceleration":acceleration, "priority":score}
             if not history or at > history[-1]["at"]:
@@ -76,6 +93,8 @@ class Discovery:
             self.history[symbol] = [v for v in history if now-v["at"] <= keep]
             if symbol in universe:
                 ranks[symbol] = score
+                if alt is not None:
+                    alt_scores[symbol] = alt
                 self.observations.append(record)
         # Keep windows intact long enough for 20-minute option persistence research.
         # Reserve a quarter of chain slots for names the price ranking has not
@@ -148,7 +167,41 @@ class Discovery:
         selected = sorted(set(selected) | set(tracked))
         for row in self.observations:
             row["promoted"] = row["symbol"] in selected
+        if priority_mode >= 1:
+            try:
+                self.finalb_shadow_report = self._finalb_rank_report(ranks, alt_scores, now)
+            except Exception:
+                LOG.exception("FINAL-B discovery shadow failed")
+                self.finalb_shadow_report = None
         return selected
+
+    def _finalb_rank_report(self, live, alt, now):
+        def order(scores):
+            return sorted(scores, key=lambda symbol: (-scores[symbol], symbol))
+        live_order = order(live)
+        alt_order = order(alt) if alt else []
+        live_pos = {symbol: index for index, symbol in enumerate(live_order)}
+        alt_pos = {symbol: index for index, symbol in enumerate(alt_order)}
+        rows = []
+        for symbol in live_order:
+            if symbol not in alt_pos:
+                continue
+            rows.append({
+                "symbol": symbol,
+                "live_rank": live_pos[symbol],
+                "finalb_rank": alt_pos[symbol],
+                "delta": live_pos[symbol] - alt_pos[symbol],
+                "live_score": live[symbol],
+                "finalb_score": alt[symbol],
+            })
+        report = {
+            "at": now,
+            "top_live": live_order[:self.capacity],
+            "top_finalb": alt_order[:self.capacity],
+            "rows": rows,
+        }
+        LOG.info("FINAL-B discovery shadow top live %s finalb %s", report["top_live"], report["top_finalb"])
+        return report
 
     def return_5m(self, symbol, now):
         history = self.history.get(symbol, [])

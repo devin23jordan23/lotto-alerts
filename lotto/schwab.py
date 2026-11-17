@@ -336,7 +336,7 @@ class Schwab:
                                              number(raw.get("vega"))))
         return tuple(result)
 
-    def poll(self, symbols: list[str], tracked: dict, max_dte: int) -> list[Snapshot]:
+    def poll(self, symbols: list[str], tracked: dict, max_dte: int, settings=None) -> list[Snapshot]:
         now = datetime.now(timezone.utc)
         if not hasattr(self, "coverage"):
             self.coverage = ChainCoverage()
@@ -362,8 +362,9 @@ class Schwab:
             }
         if "SPX" in parsed:
             parsed["SPX"]["volume"] = parsed.get("SPY", {}).get("volume")
+        priority_mode = settings.discovery_priority_mode if settings is not None else 0
         selected = self.discovery.update(parsed, datetime.now(timezone.utc), set(symbols), tracked,
-                                         self.coverage.priorities(now))
+                                         self.coverage.priorities(now), priority_mode)
         result = []
         began = time.monotonic()
         sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "26")))
@@ -423,6 +424,15 @@ class Schwab:
                 benchmark = benchmark_for(symbol)
                 # Benchmark 5-minute return (SMH/SPY/QQQ). Discovery bridges it across a feed gap.
                 context, context_time = self.discovery.return_5m(benchmark, at)
+                # SPY and QQQ are already in this cycle's quote batch (benchmarks | {SPY, QQQ, SMH}).
+                # Reading discovery history adds no Schwab request. Attach only when after-14 is on
+                # so mode 0 snapshots stay byte-identical.
+                tape = {}
+                if settings is not None and settings.after14_mode >= 1:
+                    spy_return, spy_time = self.discovery.return_5m("SPY", at)
+                    qqq_return, qqq_time = self.discovery.return_5m("QQQ", at)
+                    tape = {"spy_return_5m": spy_return, "spy_return_time": spy_time,
+                            "qqq_return_5m": qqq_return, "qqq_return_time": qqq_time}
                 market = "QQQ" if symbol == "SPY" else "SPY"
                 market_return, market_time = self.discovery.return_5m(market, at)
                 peers = []
@@ -442,6 +452,7 @@ class Schwab:
                                        market_return_5m=market_return, market_time=market_time, market_label=market,
                                        peer_return_5m=peer_return, peer_time=min((p[2] for p in peers), default=None),
                                        peer_leaders=leaders,
+                                       **tape,
                                        **getattr(self,"levels",{}).get((symbol,now.astimezone(ET).date()),{})))
             except Exception as exc:
                 LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)

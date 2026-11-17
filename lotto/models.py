@@ -83,6 +83,11 @@ class Snapshot:
     premarket_high: float | None = None
     premarket_low: float | None = None
     volume_source: str | None = None  # SPX uses SPY share volume; never index volume.
+    # FINAL-B after-14 tape. Omitted from to_dict while unset so mode 0 payloads stay identical.
+    spy_return_5m: float | None = None
+    spy_return_time: datetime | None = None
+    qqq_return_5m: float | None = None
+    qqq_return_time: datetime | None = None
 
     @property
     def day(self) -> str:
@@ -97,7 +102,11 @@ class Snapshot:
             if isinstance(value, (tuple, list)):
                 return [convert(v) for v in value]
             return value
-        return convert(asdict(self))
+        payload = convert(asdict(self))
+        for key in ("spy_return_5m", "spy_return_time", "qqq_return_5m", "qqq_return_time"):
+            if payload.get(key) is None:
+                payload.pop(key, None)
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict) -> "Snapshot":
@@ -106,7 +115,8 @@ class Snapshot:
         bar_keys = {field.name for field in fields(Bar)}
         option_keys = {field.name for field in fields(Option)}
         snapshot_keys = {field.name for field in fields(cls)}
-        for key in ("at", "spot_time", "context_time", "session_end", "market_time", "peer_time"):
+        for key in ("at", "spot_time", "context_time", "session_end", "market_time", "peer_time",
+                    "spy_return_time", "qqq_return_time"):
             if data.get(key) is not None:
                 data[key] = timestamp(data[key])
         data["bars"] = tuple(Bar(**{key: value for key, value in
