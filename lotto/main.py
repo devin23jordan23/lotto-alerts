@@ -200,8 +200,15 @@ def main():
         try:
             today = datetime.now(ET).date().isoformat()
             tracked = store.active_options(today)
-            frame = client.poll(sorted(set(symbols) | set(tracked)), tracked, engine.settings.max_dte)
+            frame = client.poll(sorted(set(symbols) | set(tracked)), tracked, engine.settings.max_dte,
+                                engine.settings)
             store.record_discovery(client.discovery.observations)
+            report = getattr(client.discovery, "finalb_shadow_report", None)
+            if report:
+                try:
+                    store.record_finalb_discovery(report)
+                except Exception:
+                    LOG.exception("FINAL-B discovery shadow log failed")
             store.record_chain_coverage(client.coverage.rows)
             # Poll latency cannot turn an old candidate into a current alert.
             now = datetime.now(timezone.utc)

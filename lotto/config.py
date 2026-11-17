@@ -56,6 +56,19 @@ class Settings:
     spent_start_minute: int = 90
     spent_min_range_atr: float = 1.061      # session high-low already spent
     spent_min_off_extreme_atr: float = .035 # not printing a fresh extreme on the card side
+    # FINAL-B. Mode: 0 off (byte-identical to the live path), 1 shadow (compute and log,
+    # change nothing posted), 2 on. Env: LOTTO_<FIELD>. Discovery stays shadow-only at mode 2.
+    level_side_rule_mode: int = 0
+    level_break_override_mode: int = 0
+    level_break_min_local_rvol: float = 1.5
+    cooldown_mode: int = 0
+    extreme_rearm_min_minutes: int = 5
+    extreme_rearm_atr: float = 0.05
+    after14_mode: int = 0
+    chase_block_mode: int = 0
+    ext_penalty_mode: int = 0
+    ext_penalty_points: int = 15
+    discovery_priority_mode: int = 0
     # Operational only. The loader casts with type(default)(raw); bool("0") is True.
     day_export: int = 0
     day_export_hour: int = 16
@@ -80,6 +93,16 @@ class Settings:
             raise ValueError("Invalid contract limits")
         if any(getattr(self, n) not in (0, 1, 2) for n in ("dead_zone_mode", "burst_flat_mode", "spent_mode")):
             raise ValueError("Dead-market block modes must be 0, 1 or 2")
+        finalb_modes = ("level_side_rule_mode", "level_break_override_mode", "cooldown_mode",
+                        "after14_mode", "chase_block_mode", "ext_penalty_mode", "discovery_priority_mode")
+        if any(type(getattr(self, name)) is not int or getattr(self, name) not in (0, 1, 2) for name in finalb_modes):
+            raise ValueError("FINAL-B modes must be 0, 1 or 2")
+        if self.level_break_min_local_rvol <= 0 or self.extreme_rearm_atr <= 0:
+            raise ValueError("Invalid FINAL-B threshold")
+        if type(self.extreme_rearm_min_minutes) is not int or self.extreme_rearm_min_minutes <= 0:
+            raise ValueError("extreme_rearm_min_minutes must be a positive integer")
+        if type(self.ext_penalty_points) is not int or self.ext_penalty_points < 0:
+            raise ValueError("ext_penalty_points must be a non-negative integer")
         if not 0 <= self.max_dte <= 1:
             raise ValueError("Invalid maximum expiration")
         if (not self.max_ask <= self.max_scaled_ask or self.premium_atr_fraction <= 0

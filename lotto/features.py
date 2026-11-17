@@ -3,14 +3,18 @@
 Phase one scores observable evidence; strike migration remains a diagnostic,
 not a demand for increasingly distant strikes. Chains do not reveal buy intent.
 """
+import logging
 from dataclasses import dataclass
 from datetime import timedelta
 from math import isfinite, log
 
 from .config import Settings
 from .models import ET, Option, Snapshot
+from .finalb import apply_mode2_checks, finalb_card_active, finalb_enabled, finalb_overlay, mode2_card
 from .patterns import Setup, dead_market_metrics, detect_setup, path_features
 from .resilience import gap_bridge_seconds, gap_is_bridgeable
+
+LOG = logging.getLogger(__name__)
 
 
 def clamp(value: float) -> float:
@@ -30,6 +34,10 @@ class Candidate:
     state: str = "DISCOVERY"
     setup: Setup | None = None
     blockers: tuple[str, ...] = ()
+    # Populated only when a FINAL-B mode is on. Not written into decision JSON.
+    live_score: float | None = None
+    live_blockers: tuple[str, ...] | None = None
+    finalb: dict | None = None
 
 
 def quote_ok(option: Option, snap: Snapshot, settings: Settings) -> bool:
@@ -408,6 +416,33 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
             "volume burst on a flat stock": not (settings.burst_flat_mode == 2 and burst_flat),
             "move already spent, off the extreme": not (settings.spent_mode == 2 and spent),
         }
+        # FINAL-B. Mode 0 leaves checks, score, and blockers exactly as above.
+        live_score = score
+        live_blockers = tuple(k for k, v in checks.items() if not v)
+        shadow = None
+        if finalb_enabled(settings):
+            saved_checks = dict(checks)
+            try:
+                hard = None
+                if mode2_card(settings):
+                    hard = finalb_overlay(snap, side, live_score, live_blockers, metrics, option, setup, settings, min_mode=2)
+                if finalb_card_active(settings) or settings.cooldown_mode >= 1:
+                    shadow = finalb_overlay(snap, side, live_score, live_blockers, metrics, option, setup, settings, min_mode=1)
+                if hard is not None:
+                    apply_mode2_checks(checks, hard, settings)
+                    score = hard["score"]
+                    if settings.ext_penalty_mode == 2 and hard["flags"].get("ext_penalty"):
+                        parts["extension_penalty"] = -float(settings.ext_penalty_points)
+                        if hard["early_broad_flow"] is not None:
+                            metrics["early_broad_flow"] = hard["early_broad_flow"]
+                            metrics["opening_expansion"] = hard["opening_expansion"]
+            except Exception:
+                LOG.exception("FINAL-B evaluation failed for %s; live candidate unchanged", snap.symbol)
+                score = live_score
+                shadow = None
+                checks.clear()
+                checks.update(saved_checks)
+                parts.pop("extension_penalty", None)
         blockers = tuple(k for k,v in checks.items() if not v)
         qualifying = not blockers
         context_reason = (f"{snap.context_label} supportive" if context > 0
@@ -425,5 +460,10 @@ def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings) -> l
             reasons.append("Options activity sustained 20m")
         if peer_valid and peer > 0:
             reasons.append("Peers: " + ", ".join(snap.peer_leaders))
-        results.append(Candidate(snap, option, score, parts, metrics, reasons, qualifying, setup=setup, blockers=blockers))
+        candidate = Candidate(snap, option, score, parts, metrics, reasons, qualifying, setup=setup, blockers=blockers)
+        if shadow is not None:
+            candidate.live_score = live_score
+            candidate.live_blockers = live_blockers
+            candidate.finalb = shadow
+        results.append(candidate)
     return results
