@@ -21,6 +21,7 @@ from .day_export import maybe_day_export
 from .health import check
 from .audit import audit_store, diagnose_symbols, audit_coil_burst_hypothesis
 from .forensics import export_case, export_window_closed
+from .space import maybe_space_cleanup
 from .resilience import flag
 from .operations import HealthMonitor
 
@@ -220,10 +221,10 @@ def main():
                 deliver_pending(store, webhook)
             with store.db:
                 # Expire intraday trackers after the session even if no further quotes arrive.
-                store.db.execute("UPDATE alerts SET closed=1 WHERE day < ?", (today,))
+                store.db.execute("UPDATE alerts SET closed=1 WHERE day < ? AND closed=0", (today,))
                 session = client.session(now)
                 if session and now >= session[1]:
-                    store.db.execute("UPDATE alerts SET closed=1 WHERE day=?", (today,))
+                    store.db.execute("UPDATE alerts SET closed=1 WHERE day=? AND closed=0", (today,))
             # Released candidates stay on disk; retaining every name's full chains
             # in RAM all day can exhaust a small Railway worker.
             engine.history = {k: v for k, v in engine.history.items()
@@ -258,6 +259,8 @@ def main():
                     LOG.warning("Operational outage notice unavailable (%s)",type(notice_exc).__name__)
         # Flag 0 returns before any database or network work. Failures stay off the scan loop.
         maybe_day_export(engine.settings, database, datetime.now(timezone.utc))
+        # Flag 0 returns at once. Runs after startup and each evening, never in market hours.
+        maybe_space_cleanup(engine.settings, data_dir, datetime.now(timezone.utc))
         if args.once:
             break
         retry_seconds = flag("LOTTO_FAILED_CYCLE_RETRY_SECONDS")
