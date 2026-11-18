@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from lotto.config import Settings
+from lotto.config import Settings, recorded_settings
 from lotto.demo import demo_frames
 from lotto.discovery import Discovery
 from lotto.engine import Engine
@@ -26,10 +26,11 @@ from lotto.finalb import (
     fresh_box_break,
     fresh_extreme_break,
     level_side_passes,
+    rearm_atr_variant,
     session_extreme,
 )
 from lotto.main import env_settings
-from lotto.models import ET, Bar, Snapshot
+from lotto.models import ET, Bar, Option, Snapshot
 from lotto.patterns import Setup
 from lotto.store import Store
 from scripts.finalb_shadow_report import session_rows
@@ -92,6 +93,10 @@ class FinalBConfigTests(unittest.TestCase):
         self.assertEqual(settings.level_break_min_local_rvol, 1.5)
         self.assertEqual((settings.extreme_rearm_min_minutes, settings.ext_penalty_points), (5, 15))
         self.assertAlmostEqual(settings.extreme_rearm_atr, 0.05)
+        self.assertEqual(settings.rearm_atr_mode, 0)
+        self.assertIs(type(settings.rearm_atr_mode), int)
+        self.assertNotIn("rearm_atr_mode", recorded_settings(settings))
+        self.assertNotIn("rearm_atr_mode", recorded_settings(Settings(rearm_atr_mode=1)))
         env = {f"LOTTO_{name.upper()}": "1" for name in MODES}
         env["LOTTO_LEVEL_BREAK_MIN_LOCAL_RVOL"] = "1.5"
         env["LOTTO_EXTREME_REARM_MIN_MINUTES"] = "5"
@@ -112,6 +117,16 @@ class FinalBConfigTests(unittest.TestCase):
             Settings(level_break_min_local_rvol=0)
         with self.assertRaises(ValueError):
             Settings(ext_penalty_points=-1)
+        with self.assertRaises(ValueError):
+            Settings(rearm_atr_mode=2)
+        with self.assertRaises(ValueError):
+            Settings(rearm_atr_mode=True)
+        with patch.dict(os.environ, {"LOTTO_REARM_ATR_MODE": "1"}):
+            loaded = env_settings()
+        self.assertEqual(loaded.rearm_atr_mode, 1)
+        self.assertIs(type(loaded.rearm_atr_mode), int)
+        with patch.dict(os.environ, {"LOTTO_REARM_ATR_MODE": "2"}), self.assertRaises(ValueError):
+            env_settings()
 
 
 class LevelSideTests(unittest.TestCase):
@@ -453,6 +468,38 @@ class ShadowSafetyTests(unittest.TestCase):
         self.assertEqual([item["payload"] for item in alerts], [item["payload"] for item in clean_alerts])
         self.assertEqual(decision_rows(store), decision_rows(clean))
 
+    def test_rearm_atr_flag_does_not_change_live_or_other_shadow_rows(self):
+        plain_store, _, plain_alerts = run_demo(Settings())
+        flagged_store, _, flagged_alerts = run_demo(Settings(rearm_atr_mode=1))
+        self.assertEqual([item["payload"] for item in flagged_alerts], [item["payload"] for item in plain_alerts])
+        self.assertEqual(decision_rows(flagged_store), decision_rows(plain_store))
+        self.assertEqual(flagged_store.summary(), plain_store.summary())
+        self.assertEqual(flagged_store.db.execute("SELECT COUNT(*) FROM finalb_shadow").fetchone()[0], 0)
+        self.assertEqual(_features(flagged_store), _features(plain_store))
+        base_store, base_engine, base_alerts = run_demo(Settings(**MODES))
+        both_store, both_engine, both_alerts = run_demo(Settings(**MODES, rearm_atr_mode=1))
+        self.assertEqual([item["payload"] for item in both_alerts], [item["payload"] for item in base_alerts])
+        self.assertEqual(decision_rows(both_store), decision_rows(base_store))
+        self.assertEqual(both_store.summary(), base_store.summary())
+        self.assertEqual(both_engine.rearmed, base_engine.rearmed)
+        self.assertEqual(both_engine.cool_since, base_engine.cool_since)
+        self.assertEqual(_shadow_body(both_store), _shadow_body(base_store))
+        self.assertEqual(_features(both_store), _features(base_store))
+        self.assertTrue(all(row[0] is None and row[1] is None for row in base_store.db.execute(
+            "SELECT rearm_atr_010, rearm_atr_015 FROM finalb_shadow")))
+        filled = both_store.db.execute(
+            "SELECT ts, rule_flags, cooldown_state, rearm_atr_010, rearm_atr_015 FROM finalb_shadow "
+            "WHERE rearm_atr_010 IS NOT NULL").fetchall()
+        self.assertGreater(len(filled), 0)
+        for row in filled:
+            self.assertIn(row["rearm_atr_010"], (0, 1))
+            self.assertIn(row["rearm_atr_015"], (0, 1))
+            self.assertEqual(json.loads(row["rule_flags"])["extreme_rearm"], 1)
+            state = json.loads(row["cooldown_state"])
+            elapsed = datetime.fromisoformat(row["ts"]) - datetime.fromisoformat(state["finalb_last_at"])
+            self.assertGreaterEqual(elapsed, timedelta(minutes=5))
+            self.assertLess(elapsed, timedelta(minutes=10))
+
 
 class ShadowReportTests(unittest.TestCase):
     def test_csv_export_keeps_one_session(self):
@@ -484,7 +531,212 @@ class ShadowReportTests(unittest.TestCase):
             written = list(csv.DictReader(handle))
         self.assertEqual(written[0]["ticker"], "NVDA")
         self.assertEqual(written[0]["contract"], "NVDA-C")
+        self.assertEqual(written[0]["rearm_atr_010"], "")
+        self.assertEqual(written[0]["rearm_atr_015"], "")
         self.assertEqual(session_extreme(snap_from(flat_bars(3), spot=101), "CALL"), 101)
+
+
+SHADOW_BODY = (
+    "ts", "ticker", "side", "live_decision", "live_block_reasons", "finalb_decision",
+    "finalb_block_reasons", "live_score", "finalb_score", "rule_flags", "cooldown_state", "contract",
+)
+
+
+def _shadow_body(store):
+    columns = ", ".join(SHADOW_BODY)
+    return [tuple(row) for row in store.db.execute(f"SELECT {columns} FROM finalb_shadow ORDER BY id")]
+
+
+def _features(store):
+    return [row[0] for row in store.db.execute(
+        "SELECT features FROM candidate_evaluations ORDER BY symbol, at, contract")]
+
+
+def _qualifying(snap, history, settings):
+    return [Candidate(snap, snap.options[0], 90.0, {"price_structure": 20.0},
+                      {"opening_expansion": 0, "local_rvol_5m": 1.0},
+                      ["Stock and options aligned"], True,
+                      setup=Setup("CONTINUATION", snap.spot, snap.spot - 1))]
+
+
+def flat_session(minute, price=100.0, high=None, atr=2.0):
+    """minute=1 is the 09:31 bar. The last bar may print a new high; spot follows it."""
+    start = datetime(2026, 11, 17, 9, 30, tzinfo=ET)
+    bars = []
+    for i in range(minute):
+        end = start + timedelta(minutes=i + 1)
+        bars.append(Bar(end, price, price, price, price, 1000, 10000))
+    if high is not None:
+        last = bars[-1]
+        bars[-1] = Bar(last.end, price, max(high, price), price, price, 1000, 10000)
+    at = bars[-1].end
+    spot = high if high is not None else price
+    option = Option("TEST-C", at.date(), "CALL", 100, 1.0, 1.10, 200, 100, 0.30, 0.05, at)
+    return Snapshot("TEST", at, spot, at, price, tuple(bars), (option,),
+                    context_return_5m=0.0, context_time=at, context_label="SMH",
+                    session_end=at.replace(hour=16, minute=0), prior_atr=atr)
+
+
+def run_rearm(high, rearm_mode, cooldown_mode):
+    snaps = [flat_session(22), flat_session(23), flat_session(28, high=high), flat_session(29, high=high)]
+    store = Store(":memory:")
+    engine = Engine(store, Settings(cooldown_mode=cooldown_mode, rearm_atr_mode=rearm_mode))
+    alerts = []
+    with patch("lotto.engine.candidates", side_effect=_qualifying):
+        for snap in snaps:
+            alerts.extend(engine.process([snap]))
+    return store, engine, alerts
+
+
+class RearmAtrShadowTests(unittest.TestCase):
+    def _last(self, snap, minutes, extreme, side="CALL"):
+        return {"at": snap.at - timedelta(minutes=minutes), "side": side, "extreme": extreme, "phase": "ACTIVE"}
+
+    def test_threshold_math_for_both_gates(self):
+        settings = Settings(rearm_atr_mode=1)
+        off = Settings()
+        bars = flat_bars(10, price=100)
+        # ATR 2. 0.05 ATR = 0.10 price, 0.10 ATR = 0.20, 0.15 ATR = 0.30.
+        at_010 = snap_from(bars, spot=100.20, prior_atr=2)
+        at_015 = snap_from(bars, spot=100.30, prior_atr=2)
+        between = snap_from(bars, spot=100.12, prior_atr=2)
+        under = snap_from(bars, spot=100.09, prior_atr=2)
+        last = self._last(at_010, 6, 100)
+        self.assertEqual(rearm_atr_variant(at_010.at, last, "CALL", at_010, settings), (1, 0))
+        self.assertEqual(rearm_atr_variant(at_015.at, self._last(at_015, 6, 100), "CALL", at_015, settings), (1, 1))
+        self.assertEqual(rearm_atr_variant(between.at, self._last(between, 6, 100), "CALL", between, settings), (0, 0))
+        self.assertIsNone(rearm_atr_variant(under.at, self._last(under, 6, 100), "CALL", under, settings))
+        self.assertIsNone(rearm_atr_variant(at_015.at, self._last(at_015, 6, 100), "CALL", at_015, off))
+        # The cooldown decision itself does not consult the flag.
+        armed = Settings(rearm_atr_mode=1, extreme_rearm_atr=0.05)
+        plain = Settings(extreme_rearm_atr=0.05)
+        self.assertEqual(
+            finalb_cooldown_blocks(at_010.at, last, "CALL", False, at_010, armed),
+            finalb_cooldown_blocks(at_010.at, last, "CALL", False, at_010, plain))
+        blocked, rearm = finalb_cooldown_blocks(between.at, self._last(between, 6, 100), "CALL", False, between, plain)
+        self.assertFalse(blocked)
+        self.assertTrue(rearm)
+
+    def test_puts_and_the_bar_extreme_not_only_the_spot(self):
+        settings = Settings(rearm_atr_mode=1)
+        start = datetime(2026, 11, 17, 9, 30, tzinfo=ET)
+        bars = []
+        for i in range(10):
+            end = start + timedelta(minutes=i + 1)
+            bars.append(Bar(end, 100, 100.05, 99.95, 100, 1000, 10000))
+        last_end = bars[-1].end
+        bars[-1] = Bar(last_end, 100, 100.05, 99.70, 99.70, 1000, 10000)
+        put = snap_from(tuple(bars), spot=99.70, prior_atr=2)
+        prior = {"at": put.at - timedelta(minutes=6), "side": "PUT", "extreme": 100.0, "phase": "ACTIVE"}
+        # New LOD 99.70 is 0.30 through 100, which is 0.15 ATR.
+        self.assertEqual(rearm_atr_variant(put.at, prior, "PUT", put, settings), (1, 1))
+        bars[-1] = Bar(last_end, 100, 100.05, 99.80, 99.80, 1000, 10000)
+        put_010 = snap_from(tuple(bars), spot=99.80, prior_atr=2)
+        self.assertEqual(rearm_atr_variant(put_010.at, {**prior, "at": put_010.at - timedelta(minutes=6)},
+                                           "PUT", put_010, settings), (1, 0))
+        # Spot pulled back; the completed bar's high is the new HOD.
+        call_bars = list(flat_bars(10, price=100))
+        call_bars[-1] = Bar(call_bars[-1].end, 100, 100.30, 99.95, 100.05, 1000, 10000)
+        call = snap_from(tuple(call_bars), spot=100.05, prior_atr=2)
+        call_prior = {"at": call.at - timedelta(minutes=6), "side": "CALL", "extreme": 100.0, "phase": "ACTIVE"}
+        self.assertEqual(session_extreme(call, "CALL"), 100.30)
+        self.assertEqual(rearm_atr_variant(call.at, call_prior, "CALL", call, settings), (1, 1))
+        # A live spot beyond the last bar is the extreme the scanner already uses.
+        lifted = snap_from(flat_bars(10, price=100), spot=100.30, prior_atr=2)
+        self.assertGreater(lifted.spot, max(bar.high for bar in lifted.bars))
+        self.assertEqual(rearm_atr_variant(lifted.at, {**call_prior, "at": lifted.at - timedelta(minutes=6)},
+                                           "CALL", lifted, settings), (1, 1))
+
+    def test_window_missing_atr_and_other_side_are_not_logged(self):
+        settings = Settings(rearm_atr_mode=1)
+        bars = flat_bars(10, price=100)
+        snap = snap_from(bars, spot=100.40, prior_atr=2)
+        last = {"at": snap.at - timedelta(minutes=6), "side": "CALL", "extreme": 100.0, "phase": "ACTIVE"}
+        self.assertIsNone(rearm_atr_variant(snap.at, {**last, "at": snap.at - timedelta(minutes=4)}, "CALL", snap, settings))
+        later = {**last, "at": snap.at - timedelta(minutes=11)}
+        self.assertIsNone(rearm_atr_variant(snap.at, later, "CALL", snap, settings))
+        blocked, rearm = finalb_cooldown_blocks(snap.at, later, "CALL", False, snap, settings)
+        self.assertFalse(blocked)
+        self.assertTrue(rearm)
+        self.assertIsNone(rearm_atr_variant(snap.at, last, "PUT", snap, settings))
+        self.assertIsNone(rearm_atr_variant(snap.at, None, "CALL", snap, settings))
+        missing = snap_from(bars, spot=100.40, prior_atr=None)
+        self.assertIsNone(rearm_atr_variant(missing.at, last, "CALL", missing, settings))
+
+    def test_engine_logs_both_columns_on_the_rearm_row_only(self):
+        # 0.20 price / ATR 2 = 0.10 ATR. 0.30 = 0.15. 0.12 clears the live 0.05 gate only.
+        for high, expected in ((100.20, (1, 0)), (100.30, (1, 1)), (100.12, (0, 0))):
+            quiet, _, quiet_alerts = run_rearm(high, 0, 1)
+            logged, _, logged_alerts = run_rearm(high, 1, 1)
+            self.assertEqual([item["payload"] for item in logged_alerts], [item["payload"] for item in quiet_alerts])
+            self.assertEqual(len(logged_alerts), 1)
+            self.assertEqual(decision_rows(logged), decision_rows(quiet))
+            self.assertEqual(logged.summary(), quiet.summary())
+            self.assertEqual(_shadow_body(logged), _shadow_body(quiet))
+            self.assertTrue(all(row[0] is None and row[1] is None for row in quiet.db.execute(
+                "SELECT rearm_atr_010, rearm_atr_015 FROM finalb_shadow")))
+            measured = logged.db.execute(
+                "SELECT ts, rearm_atr_010, rearm_atr_015 FROM finalb_shadow "
+                "WHERE rearm_atr_010 IS NOT NULL ORDER BY id").fetchall()
+            self.assertEqual(len(measured), 1)
+            self.assertEqual((measured[0]["rearm_atr_010"], measured[0]["rearm_atr_015"]), expected)
+            self.assertEqual(measured[0]["ts"], flat_session(29, high=high).at.isoformat())
+            flags = json.loads(logged.db.execute(
+                "SELECT rule_flags FROM finalb_shadow WHERE ts=?", (measured[0]["ts"],)).fetchone()[0])
+            self.assertEqual(flags["extreme_rearm"], 1)
+        # Below the existing 0.05 gate there is no re-arm to grade, and no extra row.
+        small, _, small_alerts = run_rearm(100.09, 1, 1)
+        self.assertEqual(len(small_alerts), 1)
+        self.assertEqual(small.db.execute(
+            "SELECT COUNT(*) FROM finalb_shadow WHERE rearm_atr_010 IS NOT NULL").fetchone()[0], 0)
+        fired = small.db.execute(
+            "SELECT finalb_decision FROM finalb_shadow WHERE ts=?",
+            (flat_session(29, high=100.09).at.isoformat(),)).fetchone()
+        self.assertEqual(fired["finalb_decision"], "block")
+
+    def test_live_cooldown_and_mode_two_are_unchanged(self):
+        live, _, live_alerts = run_rearm(100.30, 0, 0)
+        flagged, _, flagged_alerts = run_rearm(100.30, 1, 0)
+        self.assertEqual(len(live_alerts), 1)
+        self.assertEqual([item["payload"] for item in flagged_alerts], [item["payload"] for item in live_alerts])
+        self.assertEqual(decision_rows(flagged), decision_rows(live))
+        self.assertEqual(flagged.db.execute("SELECT COUNT(*) FROM finalb_shadow").fetchone()[0], 0)
+        hard, _, hard_alerts = run_rearm(100.30, 0, 2)
+        hard_flag, _, hard_flag_alerts = run_rearm(100.30, 1, 2)
+        self.assertEqual(len(hard_alerts), 2)
+        self.assertEqual([item["payload"] for item in hard_flag_alerts], [item["payload"] for item in hard_alerts])
+        self.assertEqual(decision_rows(hard_flag), decision_rows(hard))
+        self.assertEqual(
+            [row[0] for row in hard_flag.db.execute("SELECT session_extreme FROM alerts ORDER BY at")],
+            [row[0] for row in hard.db.execute("SELECT session_extreme FROM alerts ORDER BY at")])
+        self.assertTrue(all(row[0] is not None for row in hard.db.execute("SELECT session_extreme FROM alerts")))
+        self.assertEqual(_shadow_body(hard_flag), _shadow_body(hard))
+
+    def test_existing_shadow_table_gains_null_columns(self):
+        path = Path("finalb-migrate.sqlite3")
+        self.addCleanup(path.unlink, missing_ok=True)
+        db = sqlite3.connect(path)
+        db.execute("""CREATE TABLE finalb_shadow (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL, ticker TEXT NOT NULL, side TEXT NOT NULL,
+            live_decision TEXT NOT NULL, live_block_reasons TEXT NOT NULL,
+            finalb_decision TEXT NOT NULL, finalb_block_reasons TEXT NOT NULL,
+            live_score REAL, finalb_score REAL, rule_flags TEXT NOT NULL,
+            cooldown_state TEXT NOT NULL, contract TEXT NOT NULL)""")
+        db.execute("""INSERT INTO finalb_shadow
+            (ts, ticker, side, live_decision, live_block_reasons, finalb_decision,
+             finalb_block_reasons, live_score, finalb_score, rule_flags, cooldown_state, contract)
+            VALUES ('2026-11-18T10:00:00-05:00','AMD','CALL','pass','[]','pass','[]',90,90,'{}','{}','AMD-C')""")
+        db.commit()
+        db.close()
+        store = Store(str(path))
+        row = store.db.execute("SELECT ticker, rearm_atr_010, rearm_atr_015 FROM finalb_shadow").fetchone()
+        self.assertEqual(row["ticker"], "AMD")
+        self.assertIsNone(row["rearm_atr_010"])
+        self.assertIsNone(row["rearm_atr_015"])
+        names = {item[1] for item in store.db.execute("PRAGMA table_info(finalb_shadow)")}
+        self.assertIn("rearm_atr_010", names)
+        self.assertIn("rearm_atr_015", names)
 
 
 if __name__ == "__main__":

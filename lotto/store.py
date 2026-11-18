@@ -40,7 +40,8 @@ class Store:
                 live_decision TEXT NOT NULL, live_block_reasons TEXT NOT NULL,
                 finalb_decision TEXT NOT NULL, finalb_block_reasons TEXT NOT NULL,
                 live_score REAL, finalb_score REAL, rule_flags TEXT NOT NULL,
-                cooldown_state TEXT NOT NULL, contract TEXT NOT NULL);
+                cooldown_state TEXT NOT NULL, contract TEXT NOT NULL,
+                rearm_atr_010 INTEGER, rearm_atr_015 INTEGER);
             CREATE INDEX IF NOT EXISTS finalb_shadow_ts ON finalb_shadow(ts);
             CREATE TABLE IF NOT EXISTS milestones (
                 alert_id TEXT, percent INTEGER, at TEXT, PRIMARY KEY(alert_id, percent));
@@ -72,6 +73,7 @@ class Store:
         # Railway volumes retain older databases. Do not recast historical alerts
         # as active trades when the phase distinction did not exist yet.
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(alerts)")}
+        shadow_columns = {row[1] for row in self.db.execute("PRAGMA table_info(finalb_shadow)")}
         with self.db:
             if "phase" not in columns:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN phase TEXT NOT NULL DEFAULT 'LEGACY'")
@@ -81,6 +83,11 @@ class Store:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN thesis_id TEXT")
             if "session_extreme" not in columns:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN session_extreme REAL")
+            # Nullable. Existing rows and flag-off writes stay NULL; no second row per candidate.
+            if "rearm_atr_010" not in shadow_columns:
+                self.db.execute("ALTER TABLE finalb_shadow ADD COLUMN rearm_atr_010 INTEGER")
+            if "rearm_atr_015" not in shadow_columns:
+                self.db.execute("ALTER TABLE finalb_shadow ADD COLUMN rearm_atr_015 INTEGER")
 
     def record(self, snap: Snapshot) -> None:
         with self.db:
@@ -220,11 +227,13 @@ class Store:
         with self.db:
             self.db.executemany("""INSERT INTO finalb_shadow
                 (ts, ticker, side, live_decision, live_block_reasons, finalb_decision,
-                 finalb_block_reasons, live_score, finalb_score, rule_flags, cooldown_state, contract)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 finalb_block_reasons, live_score, finalb_score, rule_flags, cooldown_state, contract,
+                 rearm_atr_010, rearm_atr_015)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [(r["ts"], r["ticker"], r["side"], r["live_decision"], r["live_block_reasons"],
                   r["finalb_decision"], r["finalb_block_reasons"], r["live_score"], r["finalb_score"],
-                  r["rule_flags"], r["cooldown_state"], r["contract"]) for r in rows])
+                  r["rule_flags"], r["cooldown_state"], r["contract"],
+                  r.get("rearm_atr_010"), r.get("rearm_atr_015")) for r in rows])
 
     def record_finalb_discovery(self, report):
         """One RANK row per scored name. Discovery is not a card, so side is RANK."""

@@ -18,7 +18,13 @@ COLUMNS = (
     "id", "ts", "ticker", "side", "live_decision", "live_block_reasons",
     "finalb_decision", "finalb_block_reasons", "live_score", "finalb_score",
     "rule_flags", "cooldown_state", "contract",
+    # NULL unless LOTTO_REARM_ATR_MODE=1 and this row is an in-cooldown re-arm.
+    "rearm_atr_010", "rearm_atr_015",
 )
+
+
+def _cell(row, column):
+    return row[column] if column in row.keys() else None
 
 
 def session_rows(db_path, day):
@@ -52,7 +58,7 @@ def main():
         writer = csv.DictWriter(handle, fieldnames=COLUMNS)
         writer.writeheader()
         for row in rows:
-            writer.writerow({column: row[column] for column in COLUMNS})
+            writer.writerow({column: _cell(row, column) for column in COLUMNS})
     print(f"wrote {len(rows)} rows to {out}")
 
 
