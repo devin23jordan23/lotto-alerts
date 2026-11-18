@@ -76,6 +76,8 @@ class Settings:
     day_export_backfill_days: int = 5
     # 0 uploads to Google Drive. 1 uploads to S3. Integer for the same cast reason.
     day_export_target: int = 0
+    # Operational only. 1 archives old nightly/forensic files to the export bucket, then frees them.
+    space_cleanup: int = 0
 
     def __post_init__(self):
         if any(not isfinite(value) for value in vars(self).values()):
@@ -121,8 +123,10 @@ class Settings:
             raise ValueError("Invalid day export backfill")
         if type(self.day_export_target) is not int or self.day_export_target not in (0, 1):
             raise ValueError("day_export_target must be 0 or 1")
+        if type(self.space_cleanup) is not int or self.space_cleanup not in (0, 1):
+            raise ValueError("space_cleanup must be 0 or 1")
 
 
 def recorded_settings(settings: Settings) -> dict:
     """Strategy thresholds stored on candidate rows. Export flags stay operational."""
-    return {key: value for key, value in asdict(settings).items() if not key.startswith("day_export")}
+    return {key: value for key, value in asdict(settings).items() if not key.startswith(("day_export", "space_cleanup"))}
