@@ -425,14 +425,62 @@ def mode2_card(settings) -> bool:
     return any(getattr(settings, name) == 2 for name in CARD_MODES)
 
 
-def extreme_extended(snap, side: str, previous, settings) -> bool:
+def extreme_beyond(snap, side: str, previous, multiple: float) -> bool:
+    """True when the new HOD (calls) or LOD (puts) is at least `multiple` prior-ATR past previous.
+
+    `previous` is the session extreme stored on the prior card. ATR is snap.prior_atr,
+    the same 14-day mean the scanner already uses. A live spot beyond the last
+    completed bar counts, via session_extreme.
+    """
     atr = _atr(snap)
     current = session_extreme(snap, side)
     if atr is None or current is None or previous is None or not isfinite(previous):
         return False
     if side == "CALL":
-        return current >= previous + settings.extreme_rearm_atr * atr
-    return current <= previous - settings.extreme_rearm_atr * atr
+        return current >= previous + multiple * atr
+    if side == "PUT":
+        return current <= previous - multiple * atr
+    return False
+
+
+def extreme_extended(snap, side: str, previous, settings) -> bool:
+    return extreme_beyond(snap, side, previous, settings.extreme_rearm_atr)
+
+
+# Logged together when LOTTO_REARM_ATR_MODE=1. Not a cooldown threshold.
+REARM_ATR_GATES = (0.10, 0.15)
+
+
+def rearm_atr_variant(at, last, side: str, snap, settings):
+    """(clears 0.10, clears 0.15) for one in-cooldown new-HOD/LOD re-arm, else None.
+
+    The current re-arm (extreme_rearm_atr, default 0.05, and the 5-minute floor)
+    still decides whether FINAL-B would fire. This only answers whether that same
+    re-arm also cleared 0.10 and 0.15 ATR past the prior card's extreme. Outside
+    the 10-minute cooldown the re-arm is not what lets the card through, so the
+    result is None. Mode 0 is None.
+    """
+    if settings.rearm_atr_mode != 1 or not last:
+        return None
+    if _last_value(last, "side") != side:
+        return None
+    last_at = _last_value(last, "at")
+    if last_at is None:
+        return None
+    if not isinstance(last_at, datetime):
+        last_at = datetime.fromisoformat(last_at)
+    elapsed = at - last_at
+    if elapsed < timedelta(minutes=settings.extreme_rearm_min_minutes):
+        return None
+    if elapsed >= timedelta(minutes=FINALB_COOLDOWN_MINUTES):
+        return None
+    previous = _last_value(last, "extreme", "session_extreme")
+    if not extreme_extended(snap, side, previous, settings):
+        return None
+    return (
+        int(extreme_beyond(snap, side, previous, REARM_ATR_GATES[0])),
+        int(extreme_beyond(snap, side, previous, REARM_ATR_GATES[1])),
+    )
 
 
 def _last_value(last, *names):

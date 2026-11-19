@@ -69,6 +69,11 @@ class Settings:
     ext_penalty_mode: int = 0
     ext_penalty_points: int = 15
     discovery_priority_mode: int = 0
+    # Shadow study of the FINAL-B re-arm only. 0 off. 1 logs both a 0.10 ATR and a
+    # 0.15 ATR gate on a new HOD/LOD inside the 10-minute cooldown. No mode 2:
+    # this never changes a live card, a Discord post, the 30-minute cooldown, or
+    # any other FINAL-B mode. Env: LOTTO_REARM_ATR_MODE.
+    rearm_atr_mode: int = 0
     # Operational only. The loader casts with type(default)(raw); bool("0") is True.
     day_export: int = 0
     day_export_hour: int = 16
@@ -129,6 +134,8 @@ class Settings:
             raise ValueError("day_export_target must be 0 or 1")
         if type(self.space_cleanup) is not int or self.space_cleanup not in (0, 1):
             raise ValueError("space_cleanup must be 0 or 1")
+        if type(self.rearm_atr_mode) is not int or self.rearm_atr_mode not in (0, 1):
+            raise ValueError("rearm_atr_mode must be 0 or 1")
         if type(self.db_prune_keep_days) is not int or self.db_prune_keep_days < 0:
             raise ValueError("db_prune_keep_days must be a non-negative integer")
         if type(self.db_prune_allow_pre_export) is not int or self.db_prune_allow_pre_export not in (0, 1):
@@ -138,4 +145,4 @@ class Settings:
 def recorded_settings(settings: Settings) -> dict:
     """Strategy thresholds stored on candidate rows. Export flags stay operational."""
     return {key: value for key, value in asdict(settings).items()
-            if not key.startswith(("day_export", "space_cleanup", "db_prune"))}
+            if key != "rearm_atr_mode" and not key.startswith(("day_export", "space_cleanup", "db_prune"))}

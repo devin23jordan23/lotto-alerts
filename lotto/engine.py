@@ -12,6 +12,7 @@ from .finalb import (
     finalb_overlay,
     live_cooldown_blocks,
     promotion_bypasses,
+    rearm_atr_variant,
     session_extreme,
 )
 from .models import ET, Snapshot
@@ -256,6 +257,12 @@ class Engine:
         ready, gate_reason, best_cooldown = self._shadow_gate(snap, key, best, evaluated)
         last = self.store.last_alert(*key)
         fb_last = prior_fb
+        # Two ATR gates on this re-arm only. Absent unless the flag is on and this
+        # fire is a new HOD/LOD inside the 10-minute cooldown. Never feeds the gate.
+        variant = None
+        if (ready and best is not None and best_cooldown is not None and best_cooldown[1]
+                and cfg.rearm_atr_mode == 1):
+            variant = rearm_atr_variant(snap.at, fb_last, best.option.side, snap, cfg)
         picked = best.option.symbol if best is not None else ""
         rows = []
         for candidate in evaluated:
@@ -274,7 +281,7 @@ class Engine:
             flags["cooldown"] = int(bool(cooldown.get("finalb_cooldown_blocks")))
             flags["extreme_rearm"] = int(bool(cooldown.get("extreme_rearm")))
             flags["finalb_picked_contract"] = picked
-            rows.append({
+            row = {
                 "ts": snap.at.isoformat(),
                 "ticker": snap.symbol,
                 "side": side,
@@ -287,7 +294,10 @@ class Engine:
                 "rule_flags": json.dumps(flags),
                 "cooldown_state": json.dumps(cooldown),
                 "contract": candidate.option.symbol,
-            })
+            }
+            if candidate is best and variant is not None:
+                row["rearm_atr_010"], row["rearm_atr_015"] = variant
+            rows.append(row)
         self.store.record_finalb_shadow(rows)
         if live_fired and not ready:
             blocked = best.option.side if best is not None else (evaluated[0].option.side if evaluated else "")
