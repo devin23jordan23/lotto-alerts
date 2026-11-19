@@ -10,7 +10,8 @@ A local file is deleted only after a HEAD of the uploaded object confirms its
 size and, when the ETag is a plain MD5, its MD5. The PUT also carries the
 file's SHA-256 as ``x-amz-content-sha256`` so the bucket rejects corrupt bodies.
 It never touches the database, Schwab tokens, or today's files, and never runs
-SQL of any kind.
+SQL of any kind. The same thread can run the live-database prune afterwards
+(``db_prune``); that is a separate step and stays off unless its own flag is set.
 """
 import logging
 import os
@@ -200,11 +201,22 @@ def _market_hours(local: datetime) -> bool:
     return local.weekday() < 5 and (9, 30) <= (local.hour, local.minute) < (16, 0)
 
 
+def _prune_keep(settings) -> int:
+    value = getattr(settings, "db_prune_keep_days", 0)
+    return value if type(value) is int and value > 0 else 0
+
+
 def maybe_space_cleanup(settings, data_dir, now, *, runner=run_space_cleanup, retry_seconds=1800,
                         nightly_hour=16, nightly_minute=40):
-    """Start a background cleanup at startup and once per evening; flag 0 does nothing."""
+    """Start file cleanup, then db prune, at startup and once per evening.
+
+    Either flag at its default returns before that step. With both off, this
+    returns before a thread, the disk, or the database. Market hours never start it.
+    """
     try:
-        if getattr(settings, "space_cleanup", 0) != 1:
+        cleanup = getattr(settings, "space_cleanup", 0) == 1
+        prune_keep = _prune_keep(settings)
+        if not cleanup and not prune_keep:
             return None
         if now.tzinfo is None:
             raise ValueError("space cleanup clock requires a timezone")
@@ -222,21 +234,32 @@ def maybe_space_cleanup(settings, data_dir, now, *, runner=run_space_cleanup, re
             if _STATE["startup_done"] and not (evening and _STATE["nightly_day"] != today.isoformat()):
                 return None
             mark_nightly = evening
+            allow_pre = getattr(settings, "db_prune_allow_pre_export", 0) == 1
 
             def target():
-                failed = True
-                try:
-                    result = runner(data_dir, today)
-                    failed = bool(result and result.get("failed"))
-                except Exception as exc:
-                    LOG.warning("Space cleanup unavailable (%s)", type(exc).__name__)
+                failed = False
+                if cleanup:
+                    failed = True
+                    try:
+                        result = runner(data_dir, today)
+                        failed = bool(result and result.get("failed"))
+                    except Exception as exc:
+                        LOG.warning("Space cleanup unavailable (%s)", type(exc).__name__)
+                if prune_keep:
+                    try:
+                        from .db_prune import run_db_prune
+                        run_db_prune(Path(data_dir) / "live.sqlite3", today, keep=prune_keep,
+                                     allow_pre_export=allow_pre)
+                    except Exception as exc:
+                        LOG.warning("DB prune unavailable (%s)", type(exc).__name__)
                 with _LOCK:
                     _STATE["startup_done"] = True
                     if mark_nightly and not failed:
                         _STATE["nightly_day"] = today.isoformat()
                     _STATE["retry_at"] = time.monotonic() + retry_seconds if failed else 0.0
 
-            thread = threading.Thread(target=target, name="lotto-space-cleanup", daemon=True)
+            name = "lotto-space-cleanup" if cleanup else "lotto-db-prune"
+            thread = threading.Thread(target=target, name=name, daemon=True)
             _STATE["thread"] = thread
             thread.start()
             return thread

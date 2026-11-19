@@ -212,6 +212,10 @@ promotion occurs.
   each finished weekday session. `LOTTO_DAY_EXPORT_TARGET=0` uses Google Drive.
   `1` uses the Railway bucket `lotto-day-export`; the reference-variable mapping
   is in [.env.example](.env.example).
+- `LOTTO_DB_PRUNE_KEEP_DAYS=0` leaves `live.sqlite3` unchanged. `N` keeps today
+  plus N weekdays and prunes older high-churn rows only after that day's export
+  is verified in the bucket. It does not VACUUM. `LOTTO_DB_PRUNE_ALLOW_PRE_EXPORT=1`
+  also allows days older than the oldest export object.
 
 The worker logs a startup preflight. It reads quotes, a sample chain, session
 hours, database integrity and webhook metadata. It sends no test message.
