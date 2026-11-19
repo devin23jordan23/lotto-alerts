@@ -259,7 +259,8 @@ def main():
                     LOG.warning("Operational outage notice unavailable (%s)",type(notice_exc).__name__)
         # Flag 0 returns before any database or network work. Failures stay off the scan loop.
         maybe_day_export(engine.settings, database, datetime.now(timezone.utc))
-        # Flag 0 returns at once. Runs after startup and each evening, never in market hours.
+        # Both flags 0 return at once. Outside market hours, once after startup and once each
+        # evening: file cleanup first, then the live-database prune on that same thread.
         maybe_space_cleanup(engine.settings, data_dir, datetime.now(timezone.utc))
         if args.once:
             break
