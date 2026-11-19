@@ -78,6 +78,10 @@ class Settings:
     day_export_target: int = 0
     # Operational only. 1 archives old nightly/forensic files to the export bucket, then frees them.
     space_cleanup: int = 0
+    # 0 leaves live.sqlite3 unchanged. N keeps today plus N weekdays and prunes older high-churn rows.
+    db_prune_keep_days: int = 0
+    # 1 also prunes days older than the oldest day-export object (archived before exports existed).
+    db_prune_allow_pre_export: int = 0
 
     def __post_init__(self):
         if any(not isfinite(value) for value in vars(self).values()):
@@ -125,8 +129,13 @@ class Settings:
             raise ValueError("day_export_target must be 0 or 1")
         if type(self.space_cleanup) is not int or self.space_cleanup not in (0, 1):
             raise ValueError("space_cleanup must be 0 or 1")
+        if type(self.db_prune_keep_days) is not int or self.db_prune_keep_days < 0:
+            raise ValueError("db_prune_keep_days must be a non-negative integer")
+        if type(self.db_prune_allow_pre_export) is not int or self.db_prune_allow_pre_export not in (0, 1):
+            raise ValueError("db_prune_allow_pre_export must be 0 or 1")
 
 
 def recorded_settings(settings: Settings) -> dict:
     """Strategy thresholds stored on candidate rows. Export flags stay operational."""
-    return {key: value for key, value in asdict(settings).items() if not key.startswith(("day_export", "space_cleanup"))}
+    return {key: value for key, value in asdict(settings).items()
+            if not key.startswith(("day_export", "space_cleanup", "db_prune"))}
