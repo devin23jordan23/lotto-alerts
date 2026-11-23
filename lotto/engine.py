@@ -1,7 +1,7 @@
 import json
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .config import Settings
 from .discord import alert_payload
@@ -17,6 +17,7 @@ from .finalb import (
     rearm_atr_variant,
     session_extreme,
 )
+from .latency import break_bar_close
 from .patterns import detect_setup
 from .scanner_fixes import (
     BENCH,
@@ -61,6 +62,10 @@ class Engine:
         # when it is at most 90 seconds old.
         self.bench = {}
         self._lane_alerts = []
+        self.option_seeds = defaultdict(list)
+        self.first_qual_wall = {}
+        self.planned_hot = None
+        self._eval_at = {}
 
     def process(self, snapshots: list[Snapshot]) -> list[dict]:
         ready = []
@@ -68,6 +73,7 @@ class Engine:
         self._cycle_shadow = []
         self._lane_alerts = []
         for snap in snapshots:
+            self._eval_at[(snap.day, snap.symbol)] = datetime.now(timezone.utc)
             if snap.symbol in {"SPY", "QQQ"} and snap.bars:
                 self.bench[snap.symbol] = snap
             note_feed_time(snap.at)
@@ -88,7 +94,7 @@ class Engine:
             if problems:
                 if not snap.problems(cfg.max_quote_age_seconds, min_bars=1):
                     history.append(snap)  # Capture opening options history before price setup warmup.
-                self.store.decision(snap, "DISCOVERY", "; ".join(problems))
+                self._decide(snap, "DISCOVERY", "; ".join(problems))
                 self._clear_confirmation(key)
                 self._shadow_clear(key)
                 self.cool_since.pop(key, None)
@@ -99,9 +105,14 @@ class Engine:
             self.last_bar[key] = snap.bars[-1].end
             gap_seconds = (snap.at - history[-1].at).total_seconds() if history else 0.0
             bench = self._bench_view(snap)
+            seed_gap = cfg.oh_seed_max_gap_s if cfg.oh_seed_mode == 2 else 0
+            history_for_eval = self._history_for(snap, history) if seed_gap else history
             token = BENCH.set(bench)
             try:
-                evaluated = candidates(snap, history, cfg)
+                if seed_gap:
+                    evaluated = candidates(snap, history_for_eval, cfg, seed_gap=seed_gap)
+                else:
+                    evaluated = candidates(snap, history_for_eval, cfg)
             finally:
                 BENCH.reset(token)
             self.store.record_candidates(snap, evaluated, cfg)
@@ -126,8 +137,10 @@ class Engine:
                         self._lane_alerts.extend(self._stock_first(snap, bench))
                     except Exception:
                         LOG.exception("stock-first lane failed for %s; live path unchanged", snap.symbol)
-                self.store.decision(snap, "COOLING" if self.store.last_alert(*key) else "DISCOVERY",
-                                    "; ".join(best.blockers) if best else "options history, liquidity, or neighboring-strike activity unavailable", best)
+                seeded = self._would_qualify_seeded(snap, history) if not evaluated else None
+                self._decide(snap, "COOLING" if self.store.last_alert(*key) else "DISCOVERY",
+                             "; ".join(best.blockers) if best else "options history, liquidity, or neighboring-strike activity unavailable",
+                             best, {"would_qualify_seeded": seeded} if seeded is not None else None)
                 self._note_shadow(snap, evaluated, key, False)
                 continue
             self.cool_since.pop(key, None)
@@ -138,15 +151,19 @@ class Engine:
             for other in list(self.qualified_since):
                 if other[:2] == key and other != score_key:
                     self.qualified_since.pop(other, None)
+                    self.first_qual_wall.pop(other, None)
             if score_key in self.last_evaluation and snap.at - self.last_evaluation[score_key] > timedelta(seconds=150):
                 self.qualified_since.pop(score_key, None)
+                self.first_qual_wall.pop(score_key, None)
             self.last_evaluation[score_key] = snap.at
             prior_scores = self.scores[score_key]
             old = [s for s in prior_scores if snap.at - s[0] >= timedelta(minutes=3)]
             best.score_change = best.score - old[-1][1] if old else 0
             prior_scores.append((snap.at, best.score))
             self.scores[score_key] = [s for s in prior_scores if snap.at - s[0] <= timedelta(minutes=10)]
-            self.qualified_since.setdefault(score_key, snap.bars[-1].end)
+            if score_key not in self.qualified_since:
+                self.qualified_since[score_key] = snap.bars[-1].end
+                self.first_qual_wall[score_key] = self._eval_at.get(key, snap.at)
             local = snap.at.astimezone(ET)
             opening_fast_lane = (local.hour == 9 and 33 <= local.minute < 60
                                  and best.setup is not None and best.setup.name == "OPENING_DRIVE"
@@ -163,19 +180,19 @@ class Engine:
                 awaiting_confirmation = False
                 best.metrics["gap_bar_confirmation"] = 1
             if awaiting_confirmation and not opening_fast_lane:
-                self.store.decision(snap, "IGNITION", "confirming persistence", best)
+                self._decide(snap, "IGNITION", "confirming persistence", best)
                 self._note_shadow(snap, evaluated, key, False)
                 continue
             if awaiting_confirmation and opening_fast_lane:
                 best.metrics["opening_fast_lane"] = 1
             # Flat strong scores can persist; materially deteriorating scores cannot alert.
             if best.score_change < -5:
-                self.store.decision(snap, "COOLING", "score deteriorating", best)
+                self._decide(snap, "COOLING", "score deteriorating", best)
                 self._note_shadow(snap, evaluated, key, False)
                 continue
             close = snap.session_end or snap.at.astimezone(ET).replace(hour=16, minute=0, second=0, microsecond=0)
             if close - snap.at <= timedelta(minutes=cfg.entry_cutoff_minutes):
-                self.store.decision(snap, "RUNNER", "entry cutoff; tracking only", best)
+                self._decide(snap, "RUNNER", "entry cutoff; tracking only", best)
                 self._note_shadow(snap, evaluated, key, False)
                 continue
             phase = "POTENTIAL" if best.setup.building else "ACTIVE"
@@ -190,12 +207,12 @@ class Engine:
                     blocked, _rearmed = finalb_cooldown_blocks(
                         snap.at, last, best.option.side, key in self.rearmed, snap, cfg)
                     if blocked:
-                        self.store.decision(snap, "RUNNER", "cooldown or fresh reset required", best)
+                        self._decide(snap, "RUNNER", "cooldown or fresh reset required", best)
                         self._note_shadow(snap, evaluated, key, False)
                         continue
                 elif not promotion and (snap.at - datetime.fromisoformat(last["at"]) < timedelta(minutes=cfg.ticker_cooldown_minutes)
                         or (key not in self.rearmed and last["side"] == best.option.side)):
-                    self.store.decision(snap, "RUNNER", "cooldown or fresh reset required", best)
+                    self._decide(snap, "RUNNER", "cooldown or fresh reset required", best)
                     self._note_shadow(snap, evaluated, key, False)
                     continue
             else:
@@ -212,16 +229,18 @@ class Engine:
             if ((cfg.max_alerts_per_cycle and len(alerts) >= cfg.max_alerts_per_cycle)
                     or (cfg.max_alerts_per_day and self.store.count(snap.day) >= cfg.max_alerts_per_day)
                     or (cfg.max_alerts_per_ticker and self.store.count(snap.day, snap.symbol) >= cfg.max_alerts_per_ticker)):
-                self.store.decision(snap, candidate.state, "alert budget/ranking suppressed", candidate)
+                self._decide(snap, candidate.state, "alert budget/ranking suppressed", candidate)
                 continue
             phase = "POTENTIAL" if candidate.setup.building else "ACTIVE"
             last = self.store.last_alert(snap.day, snap.symbol)
             parent_id = (last["id"] if candidate.state == "ACTIVATION" and last else None)
             payload = alert_payload(candidate, phase, parent_id)
             extreme = session_extreme(snap, candidate.option.side) if cfg.cooldown_mode == 2 else None
-            ident = self.store.queue(candidate, payload, self.dry_run, phase, parent_id, session_extreme=extreme)
+            ident = self.store.queue(candidate, payload, self.dry_run, phase, parent_id, session_extreme=extreme,
+                                     latency=self._card_latency(candidate))
+            self._note_l2(candidate)
             self.rearmed.discard((snap.day, snap.symbol))
-            self.store.decision(snap, candidate.state, f"{phase.lower()} alert {ident}", candidate)
+            self._decide(snap, candidate.state, f"{phase.lower()} alert {ident}", candidate)
             fired.add((snap.day, snap.symbol))
             alerts.append({"id": ident, "phase": phase, "parent_id": parent_id, "payload": payload})
         self._flush_shadow(fired)
@@ -231,6 +250,91 @@ class Engine:
         for score_key in list(self.qualified_since):
             if score_key[:2] == key:
                 self.qualified_since.pop(score_key, None)
+                self.first_qual_wall.pop(score_key, None)
+
+    def _decide(self, snap, state, reason, candidate=None, extra=None):
+        note = None
+        if self.settings.latency_log == 1 or extra:
+            note = {}
+            if self.settings.latency_log == 1:
+                started = self._eval_at.get((snap.day, snap.symbol))
+                if started is not None:
+                    note["eval_start"] = started.isoformat()
+                if snap.bars:
+                    note["snapshot_bar_close"] = snap.bars[-1].end.isoformat()
+            if extra:
+                note.update(extra)
+        self.store.decision(snap, state, reason, candidate, note)
+
+    def _history_for(self, snap, history):
+        seeds = [seed for seed in self.option_seeds.get(snap.symbol, ()) if seed.at < snap.at]
+        if not seeds:
+            return history
+        return sorted([*history, *seeds], key=lambda item: item.at)
+
+    def _would_qualify_seeded(self, snap, history):
+        if self.settings.oh_seed_mode != 1:
+            return None
+        seeds = [seed for seed in self.option_seeds.get(snap.symbol, ()) if seed.at < snap.at]
+        if not seeds:
+            return 0
+        trial = candidates(snap, sorted([*history, *seeds], key=lambda item: item.at), self.settings,
+                           seed_gap=self.settings.oh_seed_max_gap_s)
+        return int(any(item.qualifying for item in trial))
+
+    def remember_seed(self, symbol, at, options, spot):
+        """Keep a few sweep chains in memory. They are not written to the database."""
+        if self.settings.oh_seed_mode < 1 or not options or not spot or spot <= 0:
+            return
+        seed = Snapshot(symbol, at, spot, at, spot, (), tuple(options), source="sweep-seed")
+        ring = self.option_seeds[symbol]
+        ring.append(seed)
+        if len(ring) > 6:
+            del ring[:-6]
+
+    def _card_latency(self, candidate):
+        if self.settings.latency_log != 1:
+            return None
+        snap = candidate.snapshot
+        side = candidate.option.side
+        score_key = (snap.day, snap.symbol, side, candidate.option.expiry.isoformat())
+        started = self._eval_at.get((snap.day, snap.symbol))
+        first = self.first_qual_wall.get(score_key)
+        qual = self.qualified_since.get(score_key)
+        trigger = candidate.setup.trigger if candidate.setup else None
+        broken = break_bar_close(snap.bars, trigger, side)
+        return {
+            "break_bar_close": broken.isoformat() if broken else None,
+            "qual_bar_close": qual.isoformat() if qual else None,
+            "first_qual_at": first.isoformat() if first else None,
+            "eval_start": started.isoformat() if started else None,
+            "snapshot_bar_close": snap.bars[-1].end.isoformat() if snap.bars else None,
+            "card_created": datetime.now(timezone.utc).isoformat(),
+            "setup_trigger": trigger,
+        }
+
+    def _note_l2(self, candidate):
+        if self.settings.bar_close_eval_mode != 1 or not candidate.snapshot.bars:
+            return
+        snap = candidate.snapshot
+        bar = snap.bars[-1].end
+        would = bar + timedelta(seconds=self.settings.bar_close_delay_s)
+        hot = self.planned_hot or []
+        try:
+            rank = hot.index(snap.symbol) + 1
+        except ValueError:
+            rank = None
+        self.store.record_shadow_card({
+            "ts": would.isoformat(),
+            "mode": "L2",
+            "ticker": snap.symbol,
+            "side": candidate.option.side,
+            "setup": candidate.setup.name if candidate.setup else "",
+            "contract": candidate.option.symbol,
+            "live_at": snap.at.isoformat(),
+            "hot_rank": rank,
+            "would_eval_at": would.isoformat(),
+        })
 
     def _note_shadow(self, snap, evaluated, key, live_pre_ready):
         if not finalb_enabled(self.settings):
@@ -558,7 +662,7 @@ class Engine:
             extreme = session_extreme(snap, side) if cfg.cooldown_mode == 2 else None
             ident = self.store.queue(candidate, payload, self.dry_run, "ACTIVE", session_extreme=extreme)
             self.rearmed.discard((snap.day, snap.symbol))
-            self.store.decision(snap, "IGNITION", f"active alert {ident}", candidate)
+            self._decide(snap, "IGNITION", f"active alert {ident}", candidate)
             posted.append({"id": ident, "phase": "ACTIVE", "parent_id": None, "payload": payload})
         return posted
 

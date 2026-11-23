@@ -78,6 +78,12 @@ class Store:
                 cap_blocked INTEGER, cooldown_blocked INTEGER, no_contract INTEGER,
                 fix_flags TEXT);
             CREATE INDEX IF NOT EXISTS stock_first_shadow_ts ON stock_first_shadow(ts);
+            CREATE TABLE IF NOT EXISTS l2_shadow (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL, mode TEXT NOT NULL, ticker TEXT NOT NULL,
+                side TEXT, setup TEXT, contract TEXT, live_at TEXT,
+                hot_rank INTEGER, would_eval_at TEXT);
+            CREATE INDEX IF NOT EXISTS l2_shadow_ts ON l2_shadow(ts);
             CREATE TABLE IF NOT EXISTS candidate_evaluations (
                 day TEXT, symbol TEXT, at TEXT, contract TEXT, strategy TEXT,
                 qualifying INTEGER, score REAL, features TEXT,
@@ -92,6 +98,7 @@ class Store:
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(alerts)")}
         shadow_columns = {row[1] for row in self.db.execute("PRAGMA table_info(finalb_shadow)")}
         health_columns = {row[1] for row in self.db.execute("PRAGMA table_info(health_incidents)")}
+        alert_columns = columns
         with self.db:
             if "phase" not in columns:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN phase TEXT NOT NULL DEFAULT 'LEGACY'")
@@ -114,6 +121,13 @@ class Store:
                 self.db.execute("ALTER TABLE finalb_shadow ADD COLUMN rearm_in_window INTEGER")
             if "last_notified_at" not in health_columns:
                 self.db.execute("ALTER TABLE health_incidents ADD COLUMN last_notified_at TEXT")
+            for name, kind in (
+                ("break_bar_close", "TEXT"), ("qual_bar_close", "TEXT"), ("first_qual_at", "TEXT"),
+                ("eval_start", "TEXT"), ("snapshot_bar_close", "TEXT"), ("card_created", "TEXT"),
+                ("delivered_at", "TEXT"), ("setup_trigger", "REAL"), ("delivery_attempts", "INTEGER"),
+            ):
+                if name not in alert_columns:
+                    self.db.execute(f"ALTER TABLE alerts ADD COLUMN {name} {kind}")
 
     def record(self, snap: Snapshot) -> None:
         with self.db:
@@ -137,17 +151,21 @@ class Store:
                   int(r["promoted"]), r["contracts"], r["spot"], r["flow_side"], r["flow_cluster"])
                  for r in rows])
 
-    def decision(self, snap: Snapshot, state: str, reason: str, candidate: Candidate | None = None):
+    def decision(self, snap: Snapshot, state: str, reason: str, candidate: Candidate | None = None, latency=None):
+        features = {"strategy": STRATEGY_VERSION, "parts": candidate.parts, "metrics": candidate.metrics,
+                    "score_change": candidate.score_change,
+                    "setup": asdict(candidate.setup) if candidate.setup else None,
+                    "side": candidate.option.side, "contract": candidate.option.symbol,
+                    "spot": snap.spot, "entry_ask": candidate.option.ask,
+                    "blockers": candidate.blockers} if candidate else {}
+        if latency:
+            for key in ("eval_start", "snapshot_bar_close", "would_qualify_seeded"):
+                if key in latency and latency[key] is not None:
+                    features[key] = latency[key]
         with self.db:
             self.db.execute("INSERT INTO decisions VALUES (?, ?, ?, ?, ?, ?)",
                             (snap.symbol, snap.at.isoformat(), state, reason,
-                             candidate.score if candidate else None,
-                             json.dumps({"strategy": STRATEGY_VERSION, "parts": candidate.parts, "metrics": candidate.metrics,
-                                         "score_change": candidate.score_change,
-                                         "setup": asdict(candidate.setup) if candidate.setup else None,
-                                         "side": candidate.option.side, "contract": candidate.option.symbol,
-                                         "spot": snap.spot, "entry_ask": candidate.option.ask,
-                                         "blockers": candidate.blockers} if candidate else {})))
+                             candidate.score if candidate else None, json.dumps(features)))
 
     def record_candidates(self, snap, candidates, settings):
         """Preserve both directions/expiries, including groups that lose ranking."""
@@ -319,8 +337,17 @@ class Store:
             })
         self.record_finalb_shadow(rows)
 
+    def record_shadow_card(self, row):
+        with self.db:
+            self.db.execute("""INSERT INTO l2_shadow
+                (ts, mode, ticker, side, setup, contract, live_at, hot_rank, would_eval_at)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (row["ts"], row["mode"], row["ticker"], row.get("side"), row.get("setup"),
+                 row.get("contract"), row.get("live_at"), row.get("hot_rank"), row.get("would_eval_at")))
+
     def queue(self, candidate: Candidate, payload: dict, dry_run: bool,
-              phase: str, parent_id: str | None = None, session_extreme: float | None = None) -> str:
+              phase: str, parent_id: str | None = None, session_extreme: float | None = None,
+              latency=None) -> str:
         if phase not in {"POTENTIAL", "ACTIVE"}:
             raise ValueError("Alert phase must be POTENTIAL or ACTIVE")
         snap, option = candidate.snapshot, candidate.option
@@ -339,6 +366,12 @@ class Store:
                  option.bid / option.ask - 1, option.bid / option.ask - 1,
                  option.bid / option.ask - 1, option.quote_time.isoformat(),
                  phase, parent_id, thesis_id, session_extreme))
+            if latency:
+                self.db.execute("""UPDATE alerts SET break_bar_close=?, qual_bar_close=?, first_qual_at=?,
+                    eval_start=?, snapshot_bar_close=?, card_created=?, setup_trigger=? WHERE id=?""",
+                    (latency.get("break_bar_close"), latency.get("qual_bar_close"), latency.get("first_qual_at"),
+                     latency.get("eval_start"), latency.get("snapshot_bar_close"), latency.get("card_created"),
+                     latency.get("setup_trigger"), ident))
         return ident
 
     def track(self, snap: Snapshot, settings) -> list[dict]:

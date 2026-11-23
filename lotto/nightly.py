@@ -11,6 +11,7 @@ from pathlib import Path
 from .config import Settings, STRATEGY_VERSION
 from .features import quote_ok
 from .models import ET
+from .latency import latency_report
 from .research import price_replay
 from .scanner_fixes import scanner_fix_lines
 from .schwab import epoch
@@ -401,6 +402,8 @@ def run_nightly(store, day, directory, symbols=(), client=None):
                           "Future labels never enter the feature calculation. No automatic live threshold changes.",
                           "Small, selected daily cohorts do not establish predictive accuracy."],
         "scanner_fix_lines":scanner_fix_lines(store, day),
+        "latency":latency_report([dict(r) for r in store.db.execute(
+            "SELECT at, break_bar_close, eval_start, card_created, delivered_at FROM alerts WHERE day=?", (day,))]),
         "decision_reasons":dict(Counter(r["reason"] for r in rows)),
         "candidate_evaluations":evaluations,
         "all_expiry_side_evaluations":candidate_rows,

@@ -94,6 +94,15 @@ class Settings:
     # Ops. 1 and 2 both enable the direct-refresh fallback, the 10-minute repeat
     # notice, and the 20-minute self-restart. Schwab reads the same env var.
     token_fallback_mode: int = 0
+    # Latency (SCANNER-LATENCY-1124). Defaults stay off. 1 logs, 2 is live for the
+    # bar-close cycle and the options-history seed. Persistence is not changed.
+    latency_log: int = 0
+    bar_close_eval_mode: int = 0
+    bar_close_delay_s: int = 3
+    hot_max: int = 12
+    schwab_rps: float = 1.8
+    oh_seed_mode: int = 0
+    oh_seed_max_gap_s: int = 200
     # Operational only. The loader casts with type(default)(raw); bool("0") is True.
     day_export: int = 0
     day_export_hour: int = 16
@@ -170,6 +179,20 @@ class Settings:
                 and 0 < self.fast_run_straight <= 1 and self.mkt_gate_th5 > 0
                 and self.mkt_gate_th10 > 0 and self.mkt_gate_th15 > 0):
             raise ValueError("Invalid scanner-fix threshold")
+        if type(self.latency_log) is not int or self.latency_log not in (0, 1):
+            raise ValueError("latency_log must be 0 or 1")
+        if type(self.bar_close_eval_mode) is not int or self.bar_close_eval_mode not in (0, 1, 2):
+            raise ValueError("bar_close_eval_mode must be 0, 1 or 2")
+        if type(self.oh_seed_mode) is not int or self.oh_seed_mode not in (0, 1, 2):
+            raise ValueError("oh_seed_mode must be 0, 1 or 2")
+        if type(self.bar_close_delay_s) is not int or not 0 <= self.bar_close_delay_s < 60:
+            raise ValueError("bar_close_delay_s must be a whole number of seconds under 60")
+        if type(self.hot_max) is not int or self.hot_max <= 0:
+            raise ValueError("hot_max must be a positive integer")
+        if type(self.oh_seed_max_gap_s) is not int or self.oh_seed_max_gap_s < 150:
+            raise ValueError("oh_seed_max_gap_s must be at least 150")
+        if not 0 < self.schwab_rps <= (1 / 0.55) + 1e-9:
+            raise ValueError("schwab_rps cannot exceed today's request rate")
         if type(self.db_prune_keep_days) is not int or self.db_prune_keep_days < 0:
             raise ValueError("db_prune_keep_days must be a non-negative integer")
         if type(self.db_prune_allow_pre_export) is not int or self.db_prune_allow_pre_export not in (0, 1):
@@ -187,6 +210,9 @@ _UNRECORDED_FLAGS = {
     "fast_run_mode",
     "fast_run_mkt",
     "token_fallback_mode",
+    "latency_log",
+    "bar_close_eval_mode",
+    "oh_seed_mode",
 }
 
 

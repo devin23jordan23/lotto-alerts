@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import os
+import threading
 import time
 from collections import defaultdict
 from dataclasses import replace
@@ -17,6 +18,7 @@ from urllib.request import Request, urlopen
 from .models import Bar, ET, Option, Snapshot
 from .discovery import Discovery
 from .coverage import ChainCoverage
+from .latency import fetch_plan, request_gap
 from .resilience import flag
 
 LOG = logging.getLogger(__name__)
@@ -63,6 +65,10 @@ class Schwab:
         self.broker_expiry = 0.0  # real expiry (monotonic); used only by LOTTO_TOKEN_RESILIENCE_MODE=1
         self._fallback_token = ""
         self._fallback_until = 0.0
+        self._gap_lock = threading.Lock()
+        self._request_gap = 0.55
+        self.request_count = 0
+        self.fetch_trace = []
         self.token_path = Path(data_dir) / "schwab_tokens.json"
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
         if bool(self.broker_url) != bool(self.broker_key):
@@ -217,8 +223,10 @@ class Schwab:
 
     def get(self, path: str, params: dict) -> dict:
         for attempt in range(2):
-            time.sleep(max(0, .55 - (time.monotonic() - self.last_request)))
-            self.last_request = time.monotonic()
+            with self._gap_lock:
+                time.sleep(max(0, self._request_gap - (time.monotonic() - self.last_request)))
+                self.last_request = time.monotonic()
+                self.request_count += 1
             request = Request(f"{BASE}{path}?{urlencode(params)}", headers={"Authorization": f"Bearer {self.token()}", "Accept": "application/json"})
             try:
                 with urlopen(request, timeout=15) as response:
@@ -383,7 +391,8 @@ class Schwab:
                                              number(raw.get("vega"))))
         return tuple(result)
 
-    def poll(self, symbols: list[str], tracked: dict, max_dte: int, settings=None) -> list[Snapshot]:
+    def poll(self, symbols: list[str], tracked: dict, max_dte: int, settings=None,
+             hot=None, on_snapshot=None, on_seed=None) -> list[Snapshot]:
         now = datetime.now(timezone.utc)
         if not hasattr(self, "coverage"):
             self.coverage = ChainCoverage()
@@ -412,36 +421,20 @@ class Schwab:
         priority_mode = settings.discovery_priority_mode if settings is not None else 0
         selected = self.discovery.update(parsed, datetime.now(timezone.utc), set(symbols), tracked,
                                          self.coverage.priorities(now), priority_mode)
+        mode = settings.bar_close_eval_mode if settings is not None else 0
+        cap = settings.hot_max if settings is not None else 12
+        self._request_gap = request_gap(mode, settings.schwab_rps if settings is not None else 1.8)
+        self.fetch_trace = ["quotes"]
+        plan = fetch_plan(selected, hot or [], mode, cap)
+        hot_first = plan[1:plan.index("sweep")] if mode == 2 else []
         result = []
         began = time.monotonic()
-        sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "26")))
-        sweep_targets = self.coverage.due(symbols, now, selected, sweep_limit)
-        for symbol in sweep_targets:
-            if time.monotonic()-began >= 27:
-                LOG.warning("Universe chain sweep time budget reached; remaining names resume next cycle")
-                break
-            self.coverage.attempt(symbol, datetime.now(timezone.utc))
-            try:
-                data = self.get("/chains", {"symbol":api_symbol(symbol), "contractType":"ALL", "strategy":"SINGLE",
-                                            "includeUnderlyingQuote":"true", "strikeCount":80,
-                                            "fromDate":now.astimezone(ET).date().isoformat(),
-                                            "toDate":(now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()})
-                if data.get("isDelayed") is True:
-                    raise ValueError("delayed option chain")
-                self.coverage.observe(symbol, datetime.now(timezone.utc), self.parse_chain(data, allow_spx=symbol == "SPX"),
-                                      parsed.get(symbol, {}).get("price"))
-            except Exception as exc:
-                LOG.warning("Universe chain sweep %s unavailable (%s)", symbol, type(exc).__name__)
-        # Continue unfinished cold-start work first; a slow baseline must not starve later names.
-        selected.sort(key=lambda s: (s not in tracked, s not in self.discovery.always_deep,
-                                     getattr(self, "last_polled", {}).get(s, 0)))
-        for symbol in selected:
-            if time.monotonic()-began >= 54:
-                LOG.warning("Deep chain time budget reached; remaining candidates resume next cycle")
-                break
+
+        def consume(symbol):
             if not hasattr(self, "last_polled"):
                 self.last_polled = {}
             self.last_polled[symbol] = time.monotonic()
+            self.fetch_trace.append(f"deep:{symbol}")
             try:
                 bars = self.bars(symbol, datetime.now(timezone.utc))
                 data = self.get("/chains", {"symbol": api_symbol(symbol), "contractType": "ALL", "strategy": "SINGLE",
@@ -462,18 +455,14 @@ class Schwab:
                     extra = self.get("/quotes", {"symbols": ",".join(o.symbol for o in missing)})
                     for option in missing:
                         item = extra.get(option.symbol, {})
-                        q = item.get("quote", {})
-                        qt, bid, ask = epoch(q.get("quoteTime")), number(q.get("bidPrice")), number(q.get("askPrice"))
+                        quote = item.get("quote", {})
+                        qt, bid, ask = epoch(quote.get("quoteTime")), number(quote.get("bidPrice")), number(quote.get("askPrice"))
                         if qt and bid is not None and ask is not None and item.get("realtime") is not False:
                             options.append(replace(option, quote_time=qt, bid=bid, ask=ask,
-                                                   volume=int(number(q.get("totalVolume")) or option.volume)))
+                                                   volume=int(number(quote.get("totalVolume")) or option.volume)))
                 at = datetime.now(timezone.utc)
                 benchmark = benchmark_for(symbol)
-                # Benchmark 5-minute return (SMH/SPY/QQQ). Discovery bridges it across a feed gap.
                 context, context_time = self.discovery.return_5m(benchmark, at)
-                # SPY and QQQ are already in this cycle's quote batch (benchmarks | {SPY, QQQ, SMH}).
-                # Reading discovery history adds no Schwab request. Attach only when after-14 is on
-                # so mode 0 snapshots stay byte-identical.
                 tape = {}
                 if settings is not None and settings.after14_mode >= 1:
                     spy_return, spy_time = self.discovery.return_5m("SPY", at)
@@ -483,15 +472,14 @@ class Schwab:
                 market = "QQQ" if symbol == "SPY" else "SPY"
                 market_return, market_time = self.discovery.return_5m(market, at)
                 peers = []
-                # Genuine peers only; exclude the target and sector ETF itself.
                 for peer in symbols:
                     if peer != symbol and peer in SECTORS and SECTORS.get(peer) == SECTORS.get(symbol) and symbol in SECTORS:
                         value, timestamp = self.discovery.return_5m(peer, at)
                         if value is not None:
                             peers.append((peer, value, timestamp))
                 peer_return = median(p[1] for p in peers) if len(peers) >= 2 else None
-                leaders = tuple(p[0] for p in sorted(peers, key=lambda p:abs(p[1]), reverse=True)[:3]
-                                if peer_return is not None and p[1]*peer_return > 0)
+                leaders = tuple(p[0] for p in sorted(peers, key=lambda p: abs(p[1]), reverse=True)[:3]
+                                if peer_return is not None and p[1] * peer_return > 0)
                 result.append(Snapshot(symbol, at, spot, spot_time, previous, bars, tuple(options),
                                        context, context_time, benchmark, "schwab", session[1],
                                        volume_source="SPY" if symbol == "SPX" else symbol,
@@ -500,9 +488,52 @@ class Schwab:
                                        peer_return_5m=peer_return, peer_time=min((p[2] for p in peers), default=None),
                                        peer_leaders=leaders,
                                        **tape,
-                                       **getattr(self,"levels",{}).get((symbol,now.astimezone(ET).date()),{})))
+                                       **getattr(self, "levels", {}).get((symbol, now.astimezone(ET).date()), {})))
+                return True
             except Exception as exc:
                 LOG.warning("%s skipped (%s)", symbol, type(exc).__name__)
+                return False
+
+        hot_done = set()
+        for symbol in hot_first:
+            if time.monotonic() - began >= 54:
+                LOG.warning("Deep chain time budget reached; remaining candidates resume next cycle")
+                break
+            if consume(symbol) and on_snapshot is not None:
+                on_snapshot(result[-1])
+            hot_done.add(symbol)
+        self.fetch_trace.append("sweep")
+        sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "26")))
+        sweep_targets = self.coverage.due(symbols, now, selected, sweep_limit)
+        for symbol in sweep_targets:
+            if time.monotonic()-began >= 27:
+                LOG.warning("Universe chain sweep time budget reached; remaining names resume next cycle")
+                break
+            self.coverage.attempt(symbol, datetime.now(timezone.utc))
+            try:
+                data = self.get("/chains", {"symbol":api_symbol(symbol), "contractType":"ALL", "strategy":"SINGLE",
+                                            "includeUnderlyingQuote":"true", "strikeCount":80,
+                                            "fromDate":now.astimezone(ET).date().isoformat(),
+                                            "toDate":(now.astimezone(ET).date()+timedelta(days=max_dte)).isoformat()})
+                if data.get("isDelayed") is True:
+                    raise ValueError("delayed option chain")
+                chain = self.parse_chain(data, allow_spx=symbol == "SPX")
+                price = parsed.get(symbol, {}).get("price")
+                self.coverage.observe(symbol, datetime.now(timezone.utc), chain, price)
+                if on_seed is not None and settings is not None and settings.oh_seed_mode >= 1:
+                    on_seed(symbol, datetime.now(timezone.utc), chain, price)
+            except Exception as exc:
+                LOG.warning("Universe chain sweep %s unavailable (%s)", symbol, type(exc).__name__)
+        # Continue unfinished cold-start work first; a slow baseline must not starve later names.
+        selected.sort(key=lambda s: (s not in tracked, s not in self.discovery.always_deep,
+                                     getattr(self, "last_polled", {}).get(s, 0)))
+        for symbol in selected:
+            if symbol in hot_done:
+                continue
+            if time.monotonic()-began >= 54:
+                LOG.warning("Deep chain time budget reached; remaining candidates resume next cycle")
+                break
+            consume(symbol)
         LOG.info("Discovery: %d/%d fresh quotes, %d promoted, %d deep chains; universe chains %d/%d fresh within %d min (%d this cycle)",
                  len(self.discovery.observations), len(symbols), len(selected), len(result),
                  self.coverage.count_fresh(symbols, datetime.now(timezone.utc)), len(symbols),

@@ -108,7 +108,7 @@ def _schema_rows(conn):
 def _time_column(names, table=None):
     # New shadow tables are stamped `ts`. Recognize that only for them so the
     # existing finalb_shadow export, which also uses `ts`, stays a full copy.
-    if table in {"fix_shadow", "stock_first_shadow"} and "ts" in names:
+    if table in {"fix_shadow", "stock_first_shadow", "l2_shadow"} and "ts" in names:
         return "ts"
     for name in _TIME_COLUMNS:
         if name in names:

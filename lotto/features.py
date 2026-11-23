@@ -143,7 +143,7 @@ def _widths(snap):
     return (5, 2, 1) if early_bars is not None and len(early_bars) < 5 else (5, 2)
 
 
-def _gap_free_window(snap, history, width):
+def _gap_free_window(snap, history, width, seed_gap=0):
     """One width, with the flag-0 endpoint rule. A hole at this width is a miss, not a void of the others."""
     endpoints = []
     for minutes in (width, 2*width):
@@ -156,27 +156,34 @@ def _gap_free_window(snap, history, width):
         return None
     five, ten = endpoints
     window = sorted([s for s in history if ten.at <= s.at < snap.at] + [snap], key=lambda s: s.at)
-    if any((b.at - a.at).total_seconds() > 150 for a, b in zip(window, window[1:])):
+    if any(_gap_blocks(a, b, seed_gap) for a, b in zip(window, window[1:])):
         return None
     return five, ten, window, width
 
 
-def observation_window(snap, history):
+def _gap_blocks(earlier, later, seed_gap):
+    gap = (later.at - earlier.at).total_seconds()
+    if gap <= 150:
+        return False
+    return not (seed_gap and gap <= seed_gap and (earlier.source == "sweep-seed" or later.source == "sweep-seed"))
+
+
+def observation_window(snap, history, seed_gap=0):
     # Windows use real timestamps, never poll counts. Missing windows do not become zeros.
     bridge = gap_bridge_seconds()
     if not bridge:
-        return _observation_window(snap, history, 0)
+        return _observation_window(snap, history, 0, seed_gap)
     # Flag on only. The unbridged search commits to the first width whose endpoints exist and then
     # voids that result if it contains a hole, so a clean 2-minute window would lose to a 5-minute
     # window that merely straddles a short gap. A gap-free window at any width wins first.
     for width in _widths(snap):
-        found = _gap_free_window(snap, history, width)
+        found = _gap_free_window(snap, history, width, seed_gap)
         if found is not None:
             return found
-    return _observation_window(snap, history, bridge)
+    return _observation_window(snap, history, bridge, seed_gap)
 
 
-def _observation_window(snap, history, bridge):
+def _observation_window(snap, history, bridge, seed_gap=0):
     endpoints, window_minutes = [], 5
     early_bars = getattr(snap, "bars", None)
     for width in ((5, 2, 1) if early_bars is not None and len(early_bars) < 5 else (5, 2)):
@@ -196,7 +203,7 @@ def _observation_window(snap, history, bridge):
         return None
     five, ten = endpoints
     window = sorted([s for s in history if ten.at <= s.at < snap.at] + [snap],key=lambda s:s.at)
-    long_gaps = [(a, b) for a, b in zip(window, window[1:]) if (b.at - a.at).total_seconds() > 150]
+    long_gaps = [(a, b) for a, b in zip(window, window[1:]) if _gap_blocks(a, b, seed_gap)]
     # Unbridged (flag 0 path): any gap over 150 s voids the window. Bridged: one gap up to the bridge
     # limit is kept as missing time; flows stay per real second, the pre-gap sample is never re-dated.
     if long_gaps and not (bridge and len(long_gaps) == 1
@@ -249,8 +256,8 @@ def opening_expansion(snap: Snapshot, setup: Setup | None, metrics: dict,
             and acceleration >= 1.5 and strike_count >= 4)
 
 
-def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings, bench=None) -> list[Candidate]:
-    observed = observation_window(snap, history)
+def candidates(snap: Snapshot, history: list[Snapshot], settings: Settings, bench=None, seed_gap=0) -> list[Candidate]:
+    observed = observation_window(snap, history, seed_gap)
     if observed is None:
         return []
     five, ten, window, window_minutes = observed
