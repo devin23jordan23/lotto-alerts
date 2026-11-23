@@ -12,6 +12,7 @@ from .config import Settings, STRATEGY_VERSION
 from .features import quote_ok
 from .models import ET
 from .research import price_replay
+from .scanner_fixes import scanner_fix_lines
 from .schwab import epoch
 from .store import read_snapshot
 
@@ -399,6 +400,7 @@ def run_nightly(store, day, directory, symbols=(), client=None):
                           "Potential watches never count as active ideas; linked active alerts start a new measurement window.",
                           "Future labels never enter the feature calculation. No automatic live threshold changes.",
                           "Small, selected daily cohorts do not establish predictive accuracy."],
+        "scanner_fix_lines":scanner_fix_lines(store, day),
         "decision_reasons":dict(Counter(r["reason"] for r in rows)),
         "candidate_evaluations":evaluations,
         "all_expiry_side_evaluations":candidate_rows,

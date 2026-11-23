@@ -36,6 +36,8 @@ _TABLES = (
     ("chain_coverage", "day", "day", False),
     ("candidate_evaluations", "day", "day", False),
     ("finalb_shadow", "ts", "ts", True),
+    ("fix_shadow", "ts", "ts", False),
+    ("stock_first_shadow", "ts", "ts", False),
 )
 _NAMES = tuple(table for table, _, _, _ in _TABLES)
 

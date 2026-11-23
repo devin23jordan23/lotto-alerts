@@ -61,6 +61,8 @@ class Schwab:
         self.broker_token = ""
         self.broker_deadline = 0.0
         self.broker_expiry = 0.0  # real expiry (monotonic); used only by LOTTO_TOKEN_RESILIENCE_MODE=1
+        self._fallback_token = ""
+        self._fallback_until = 0.0
         self.token_path = Path(data_dir) / "schwab_tokens.json"
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
         if bool(self.broker_url) != bool(self.broker_key):
@@ -84,7 +86,20 @@ class Schwab:
             if force:
                 self.broker_token = ""
                 self.broker_deadline = 0.0
+                self._fallback_token = ""
             return self.token_from_broker()
+        return self._refresh_access_token(force)
+
+    def _direct_refresh_ready(self) -> bool:
+        if not self.client_id or not self.secret or not self.token_path.exists():
+            return False
+        try:
+            payload = json.loads(self.token_path.read_text())
+        except (OSError, ValueError):
+            return False
+        return bool(payload.get("refresh_token"))
+
+    def _refresh_access_token(self, force=False):
         tokens = json.loads(self.token_path.read_text()) if self.token_path.exists() else {"refresh_token": self.seed}
         if not force and tokens.get("access_token") and time.time() < tokens.get("expires_at", 0) - 120:
             return tokens["access_token"]
@@ -106,9 +121,41 @@ class Schwab:
         temporary.replace(self.token_path)
         return fresh["access_token"]
 
+    def _remember_fallback(self, token):
+        self._fallback_token = token
+        try:
+            fresh = json.loads(self.token_path.read_text())
+            self._fallback_until = float(fresh.get("expires_at", time.time() + 180))
+        except (OSError, ValueError, TypeError):
+            self._fallback_until = time.time() + 180
+
     def token_from_broker(self):
-        if flag("LOTTO_TOKEN_RESILIENCE_MODE") == 1:
-            return self.resilient_broker_token()
+        # A direct-login token already in hand: one broker attempt, then reuse it.
+        # This avoids a retry storm on every quote while the broker stays down.
+        if (flag("LOTTO_TOKEN_FALLBACK_MODE") in (1, 2) and self._fallback_token
+                and time.time() < self._fallback_until - 120):
+            try:
+                token = self._broker_fetch_once()
+            except Exception:
+                return self._fallback_token
+            self._fallback_token = ""
+            return token
+        try:
+            if flag("LOTTO_TOKEN_RESILIENCE_MODE") == 1:
+                token = self.resilient_broker_token()
+            else:
+                token = self._broker_fetch_once()
+        except Exception:
+            if flag("LOTTO_TOKEN_FALLBACK_MODE") not in (1, 2) or not self._direct_refresh_ready():
+                raise
+            LOG.warning("token fallback used")
+            token = self._refresh_access_token(force=False)
+            self._remember_fallback(token)
+            return token
+        self._fallback_token = ""
+        return token
+
+    def _broker_fetch_once(self):
         if self.broker_token and time.monotonic() < self.broker_deadline:
             return self.broker_token
         request = Request(self.broker_url, headers={

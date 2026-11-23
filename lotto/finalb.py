@@ -483,6 +483,37 @@ def rearm_atr_variant(at, last, side: str, snap, settings):
     )
 
 
+def rearm_atr_measure(at, last, side: str, snap):
+    """(dist, elapsed minutes, in_window) for any same-side FINAL-B re-fire.
+
+    ``rearm_atr_variant`` stays the source of truth inside the 5-10 minute
+    window and still returns None outside it. This measure fills the shadow
+    columns for every later re-fire too. ``in_window`` is 1 only for that
+    original 5-10 minute gap, so the old meaning can be recovered.
+    Distance is the side-signed move of the session extreme past the prior
+    card, in prior ATR. Positive means the extreme extended.
+    """
+    if not last or _last_value(last, "side") != side:
+        return None
+    last_at = _last_value(last, "at")
+    if last_at is None:
+        return None
+    if not isinstance(last_at, datetime):
+        last_at = datetime.fromisoformat(last_at)
+    elapsed = (at - last_at).total_seconds() / 60
+    if elapsed < 0:
+        return None
+    previous = _last_value(last, "extreme", "session_extreme")
+    atr = _atr(snap)
+    current = session_extreme(snap, side)
+    if atr is None or current is None or previous is None or not isfinite(previous):
+        return None
+    sign = 1 if side == "CALL" else -1 if side == "PUT" else None
+    if sign is None:
+        return None
+    return sign * (current - previous) / atr, elapsed, int(5 <= elapsed < FINALB_COOLDOWN_MINUTES)
+
+
 def _last_value(last, *names):
     if isinstance(last, dict):
         for name in names:

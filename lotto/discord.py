@@ -23,7 +23,8 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
     peers = next((reason for reason in candidate.reasons if reason.startswith("Peers: ")), None)
     score_context = " · ".join(part for part in (context, peers) if part)
     displayed_score = round(candidate.score)
-    title = ("👀 POTENTIAL TRADE WATCH" if phase == "POTENTIAL"
+    title = ("STOCK-FIRST IDEA (options history thin)" if candidate.metrics.get("quality_tier") == "STOCK_FIRST"
+             else "👀 POTENTIAL TRADE WATCH" if phase == "POTENTIAL"
              else "⚡ RISKY OPENING DRIVE · ACTIVE TRADE IDEA" if candidate.metrics.get("opening_fast_lane")
                   and candidate.setup and candidate.setup.name == "OPENING_DRIVE"
              else "⚡ RISKY OPENING BREAK · ACTIVE TRADE IDEA" if candidate.metrics.get("opening_fast_lane")

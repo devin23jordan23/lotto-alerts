@@ -18,8 +18,9 @@ COLUMNS = (
     "id", "ts", "ticker", "side", "live_decision", "live_block_reasons",
     "finalb_decision", "finalb_block_reasons", "live_score", "finalb_score",
     "rule_flags", "cooldown_state", "contract",
-    # NULL unless LOTTO_REARM_ATR_MODE=1 and this row is an in-cooldown re-arm.
-    "rearm_atr_010", "rearm_atr_015",
+    # NULL unless LOTTO_REARM_ATR_MODE=1 and this row is a same-side FINAL-B re-fire.
+    # rearm_in_window is 1 only for the original 5-10 minute gap.
+    "rearm_atr_010", "rearm_atr_015", "rearm_atr_dist", "rearm_elapsed_min", "rearm_in_window",
 )
 
 

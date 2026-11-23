@@ -488,17 +488,22 @@ class ShadowSafetyTests(unittest.TestCase):
         self.assertTrue(all(row[0] is None and row[1] is None for row in base_store.db.execute(
             "SELECT rearm_atr_010, rearm_atr_015 FROM finalb_shadow")))
         filled = both_store.db.execute(
-            "SELECT ts, rule_flags, cooldown_state, rearm_atr_010, rearm_atr_015 FROM finalb_shadow "
-            "WHERE rearm_atr_010 IS NOT NULL").fetchall()
+            "SELECT ts, rule_flags, cooldown_state, rearm_atr_010, rearm_atr_015, rearm_in_window "
+            "FROM finalb_shadow WHERE rearm_atr_010 IS NOT NULL").fetchall()
         self.assertGreater(len(filled), 0)
+        in_window = [row for row in filled if row["rearm_in_window"] == 1]
+        self.assertGreater(len(in_window), 0)
         for row in filled:
             self.assertIn(row["rearm_atr_010"], (0, 1))
             self.assertIn(row["rearm_atr_015"], (0, 1))
-            self.assertEqual(json.loads(row["rule_flags"])["extreme_rearm"], 1)
             state = json.loads(row["cooldown_state"])
             elapsed = datetime.fromisoformat(row["ts"]) - datetime.fromisoformat(state["finalb_last_at"])
-            self.assertGreaterEqual(elapsed, timedelta(minutes=5))
-            self.assertLess(elapsed, timedelta(minutes=10))
+            if row["rearm_in_window"] == 1:
+                self.assertEqual(json.loads(row["rule_flags"])["extreme_rearm"], 1)
+                self.assertGreaterEqual(elapsed, timedelta(minutes=5))
+                self.assertLess(elapsed, timedelta(minutes=10))
+            else:
+                self.assertTrue(elapsed >= timedelta(minutes=10) or elapsed < timedelta(minutes=5))
 
 
 class ShadowReportTests(unittest.TestCase):
@@ -552,7 +557,7 @@ def _features(store):
         "SELECT features FROM candidate_evaluations ORDER BY symbol, at, contract")]
 
 
-def _qualifying(snap, history, settings):
+def _qualifying(snap, history, settings, bench=None):
     return [Candidate(snap, snap.options[0], 90.0, {"price_structure": 20.0},
                       {"opening_expansion": 0, "local_rvol_5m": 1.0},
                       ["Stock and options aligned"], True,

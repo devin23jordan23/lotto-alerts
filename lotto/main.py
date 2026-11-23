@@ -257,6 +257,7 @@ def main():
                         LOG.info("Operational outage notice delivered")
                 except Exception as notice_exc:
                     LOG.warning("Operational outage notice unavailable (%s)",type(notice_exc).__name__)
+                health_monitor.exit_if_token_outage(datetime.now(timezone.utc), reason)
         # Flag 0 returns before any database or network work. Failures stay off the scan loop.
         maybe_day_export(engine.settings, database, datetime.now(timezone.utc))
         # Both flags 0 return at once. Outside market hours, once after startup and once each

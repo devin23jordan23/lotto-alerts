@@ -1,10 +1,11 @@
+import json
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
 
 from .config import Settings
 from .discord import alert_payload
-from .features import candidates
+from .features import Candidate, candidates, contract_ok, stock_features
 from .finalb import (
     COOLDOWN_REASON,
     finalb_cooldown_blocks,
@@ -12,8 +13,19 @@ from .finalb import (
     finalb_overlay,
     live_cooldown_blocks,
     promotion_bypasses,
+    rearm_atr_measure,
     rearm_atr_variant,
     session_extreme,
+)
+from .patterns import detect_setup
+from .scanner_fixes import (
+    BENCH,
+    fixes_active,
+    in_stock_first_window,
+    invalidation_holds,
+    lane_context,
+    shadow_flags,
+    trigger_gap,
 )
 from .models import ET, Snapshot
 from .resilience import gap_is_bridgeable, note_feed_time
@@ -44,12 +56,20 @@ class Engine:
         self.finalb_rearmed = set()
         self.finalb_last = {}
         self._cycle_shadow = []
+        # Latest SPY/QQQ snapshot. Names in the deep set are not ordered first,
+        # so a symbol evaluated earlier in the cycle uses the previous snapshot
+        # when it is at most 90 seconds old.
+        self.bench = {}
+        self._lane_alerts = []
 
     def process(self, snapshots: list[Snapshot]) -> list[dict]:
         ready = []
         cfg = self.settings
         self._cycle_shadow = []
+        self._lane_alerts = []
         for snap in snapshots:
+            if snap.symbol in {"SPY", "QQQ"} and snap.bars:
+                self.bench[snap.symbol] = snap
             note_feed_time(snap.at)
             key = (snap.day, snap.symbol)
             if key not in self.history:
@@ -78,8 +98,14 @@ class Engine:
                 continue
             self.last_bar[key] = snap.bars[-1].end
             gap_seconds = (snap.at - history[-1].at).total_seconds() if history else 0.0
-            evaluated = candidates(snap, history, cfg)
+            bench = self._bench_view(snap)
+            token = BENCH.set(bench)
+            try:
+                evaluated = candidates(snap, history, cfg)
+            finally:
+                BENCH.reset(token)
             self.store.record_candidates(snap, evaluated, cfg)
+            self._log_fix_shadow(snap, evaluated)
             history.append(snap)
             self.history[key] = [s for s in history if snap.at - s.at <= timedelta(minutes=25)]
             valid = [c for c in evaluated if c.qualifying]
@@ -95,6 +121,11 @@ class Engine:
                         self.rearmed.add(key)
                 else:
                     self.cool_since.pop(key, None)
+                if not evaluated and cfg.stock_first_mode >= 1:
+                    try:
+                        self._lane_alerts.extend(self._stock_first(snap, bench))
+                    except Exception:
+                        LOG.exception("stock-first lane failed for %s; live path unchanged", snap.symbol)
                 self.store.decision(snap, "COOLING" if self.store.last_alert(*key) else "DISCOVERY",
                                     "; ".join(best.blockers) if best else "options history, liquidity, or neighboring-strike activity unavailable", best)
                 self._note_shadow(snap, evaluated, key, False)
@@ -194,7 +225,7 @@ class Engine:
             fired.add((snap.day, snap.symbol))
             alerts.append({"id": ident, "phase": phase, "parent_id": parent_id, "payload": payload})
         self._flush_shadow(fired)
-        return alerts
+        return alerts + self._lane_alerts
 
     def _clear_confirmation(self, key):
         for score_key in list(self.qualified_since):
@@ -257,12 +288,10 @@ class Engine:
         ready, gate_reason, best_cooldown = self._shadow_gate(snap, key, best, evaluated)
         last = self.store.last_alert(*key)
         fb_last = prior_fb
-        # Two ATR gates on this re-arm only. Absent unless the flag is on and this
-        # fire is a new HOD/LOD inside the 10-minute cooldown. Never feeds the gate.
-        variant = None
-        if (ready and best is not None and best_cooldown is not None and best_cooldown[1]
-                and cfg.rearm_atr_mode == 1):
-            variant = rearm_atr_variant(snap.at, fb_last, best.option.side, snap, cfg)
+        # ATR gates on every same-side FINAL-B re-fire. Logging only; never feeds the gate.
+        measured = None
+        if ready and best is not None and cfg.rearm_atr_mode == 1 and fb_last:
+            measured = rearm_atr_measure(snap.at, fb_last, best.option.side, snap)
         picked = best.option.symbol if best is not None else ""
         rows = []
         for candidate in evaluated:
@@ -295,8 +324,18 @@ class Engine:
                 "cooldown_state": json.dumps(cooldown),
                 "contract": candidate.option.symbol,
             }
-            if candidate is best and variant is not None:
-                row["rearm_atr_010"], row["rearm_atr_015"] = variant
+            if candidate is best and measured is not None:
+                dist, elapsed, in_window = measured
+                bits = (int(dist >= .10), int(dist >= .15))
+                if in_window:
+                    variant = rearm_atr_variant(snap.at, fb_last, side, snap, cfg)
+                    if variant is not None and variant != bits:
+                        LOG.error("rearm ATR measure disagrees with rearm_atr_variant for %s", snap.symbol)
+                        bits = variant
+                row["rearm_atr_010"], row["rearm_atr_015"] = bits
+                row["rearm_atr_dist"] = dist
+                row["rearm_elapsed_min"] = elapsed
+                row["rearm_in_window"] = in_window
             rows.append(row)
         self.store.record_finalb_shadow(rows)
         if live_fired and not ready:
@@ -409,6 +448,172 @@ class Engine:
         }
         self.finalb_rearmed.discard(key)
         return True, None, cooldown
+
+    def _bench_view(self, snap):
+        found = {}
+        for symbol in ("SPY", "QQQ"):
+            if snap.symbol == symbol:
+                found[symbol] = snap
+                continue
+            prior = self.bench.get(symbol)
+            if prior is not None and 0 <= (snap.at - prior.at).total_seconds() <= 90:
+                found[symbol] = prior
+        return found
+
+    def _log_fix_shadow(self, snap, evaluated):
+        if not evaluated or not fixes_active(self.settings):
+            return
+        best = {}
+        for candidate in evaluated:
+            side = candidate.option.side
+            current = best.get(side)
+            if current is None or candidate.score > current.score:
+                best[side] = candidate
+        rows = []
+        for candidate in best.values():
+            state = candidate.fix_state or {}
+            rows.append({
+                "ts": snap.at.isoformat(),
+                "ticker": snap.symbol,
+                "side": candidate.option.side,
+                "contract": candidate.option.symbol,
+                "live_decision": "pass" if candidate.qualifying else "block",
+                "setup": candidate.setup.name if candidate.setup else "",
+                "lm_ext_atr": state.get("lm_ext_atr"),
+                "lm_hb": state.get("lm_hb"),
+                "lm_fresh_lvl": state.get("lm_fresh_lvl"),
+                "lm_rv2": state.get("lm_rv2"),
+                "lm_block": state.get("lm_block") if self.settings.late_move_mode >= 1 else None,
+                "mkt5": state.get("mkt5"),
+                "mkt10": state.get("mkt10"),
+                "mkt15": state.get("mkt15"),
+                "mkt_state": state.get("mkt_state"),
+                "mg_block": state.get("mg_block") if self.settings.mkt_gate_mode >= 1 else None,
+                "fix_flags": shadow_flags(self.settings, state),
+            })
+        try:
+            self.store.record_fix_shadow(rows)
+        except Exception:
+            LOG.exception("fix shadow log failed for %s; live path unchanged", snap.symbol)
+
+    def _stock_first(self, snap, bench):
+        """Options-history miss lane. Mode 1 logs. Mode 2 posts an ACTIVE card."""
+        cfg = self.settings
+        if not in_stock_first_window(snap.at):
+            return []
+        posted = []
+        for direction, side in ((1, "CALL"), (-1, "PUT")):
+            try:
+                metrics, parts = stock_features(snap, direction)
+            except ValueError:
+                continue
+            setup = detect_setup(snap, direction, metrics)
+            if setup is None or setup.building:
+                continue
+            gap = trigger_gap(snap, direction, setup)
+            if gap is None or not (-cfg.max_building_distance_atr <= gap <= cfg.max_entry_extension_atr):
+                continue
+            if not invalidation_holds(snap, direction, setup):
+                continue
+            ctx = lane_context(snap, side, cfg, bench)
+            extension = ctx.get("lm_ext_atr")
+            if extension is None or extension >= cfg.late_move_atr:
+                continue
+            if snap.symbol not in {"SPY", "QQQ", "SPX"} and ctx.get("mkt_state") != "aligned":
+                continue
+            cap_blocked, cooldown_blocked = self._lane_limits(snap, side)
+            option = self._lane_contract(snap, side)
+            no_contract = int(option is None)
+            removed = int(cfg.fast_run_mode == 2 and ctx.get("fr_block"))
+            flags = json.loads(shadow_flags(cfg, ctx))
+            flags["fr_removed"] = removed
+            self.store.record_stock_first([{
+                "ts": snap.at.isoformat(),
+                "ticker": snap.symbol,
+                "side": side,
+                "setup": setup.name,
+                "trigger": setup.trigger,
+                "contract": option.symbol if option else "",
+                "entry_bid": option.bid if option else None,
+                "entry_ask": option.ask if option else None,
+                "lm_ext_atr": extension,
+                "mkt_state": ctx.get("mkt_state"),
+                "cap_blocked": cap_blocked,
+                "cooldown_blocked": cooldown_blocked,
+                "no_contract": no_contract,
+                "fix_flags": json.dumps(flags, separators=(",", ":")),
+            }])
+            if cap_blocked or cooldown_blocked or no_contract or removed or cfg.stock_first_mode < 2:
+                continue
+            if self._lane_over_budget(snap):
+                continue
+            metrics = dict(metrics)
+            metrics["quality_tier"] = "STOCK_FIRST"
+            metrics["lm_ext_atr"] = extension
+            metrics["mkt_state"] = ctx.get("mkt_state")
+            candidate = Candidate(
+                snap, option, round(sum(parts.values()), 2), parts, metrics,
+                [f"Stock-first {setup.name}"], True, state="IGNITION", setup=setup)
+            payload = alert_payload(candidate, "ACTIVE")
+            extreme = session_extreme(snap, side) if cfg.cooldown_mode == 2 else None
+            ident = self.store.queue(candidate, payload, self.dry_run, "ACTIVE", session_extreme=extreme)
+            self.rearmed.discard((snap.day, snap.symbol))
+            self.store.decision(snap, "IGNITION", f"active alert {ident}", candidate)
+            posted.append({"id": ident, "phase": "ACTIVE", "parent_id": None, "payload": payload})
+        return posted
+
+    def _lane_over_budget(self, snap) -> bool:
+        cfg = self.settings
+        if cfg.max_alerts_per_day and self.store.count(snap.day) >= cfg.max_alerts_per_day:
+            return True
+        if cfg.max_alerts_per_ticker and self.store.count(snap.day, snap.symbol) >= cfg.max_alerts_per_ticker:
+            return True
+        return False
+
+    def _lane_limits(self, snap, side):
+        cfg = self.settings
+        since5 = (snap.at - timedelta(minutes=5)).isoformat()
+        last = self.store.last_alert(snap.day, snap.symbol)
+        cooldown = False
+        if last is not None:
+            cooldown = live_cooldown_blocks(
+                snap.at, datetime.fromisoformat(last["at"]), last["side"], side,
+                (snap.day, snap.symbol) in self.rearmed, cfg)
+        alert_times = {
+            row["at"] for row in self.store.db.execute(
+                "SELECT at FROM alerts WHERE day=? AND symbol=? AND side=? AND at>=?",
+                (snap.day, snap.symbol, side, since5))
+        }
+        fires = 0
+        for row in self.store.db.execute(
+                """SELECT ts, cap_blocked, cooldown_blocked, no_contract, fix_flags
+                   FROM stock_first_shadow WHERE ticker=? AND side=? AND ts>=?""",
+                (snap.symbol, side, since5)):
+            if row["cap_blocked"] or row["cooldown_blocked"] or row["no_contract"] or row["ts"] in alert_times:
+                continue
+            try:
+                flags = json.loads(row["fix_flags"] or "{}")
+            except ValueError:
+                flags = {}
+            if flags.get("fr_removed"):
+                continue
+            fires += 1
+        cap_blocked = len(alert_times) + fires >= cfg.stock_first_cap
+        return int(cap_blocked), int(cooldown)
+
+    def _lane_contract(self, snap, side):
+        day = snap.at.astimezone(ET).date()
+        found = []
+        for option in snap.options:
+            if option.side != side:
+                continue
+            if not 0 <= (option.expiry - day).days <= self.settings.max_dte:
+                continue
+            if contract_ok(option, snap, self.settings):
+                found.append(option)
+        if not found:
+            return None
+        return min(found, key=lambda option: (abs(abs(option.delta) - 0.30), option.symbol))
 
 
 def bars_confirm_after_gap(snap, candidate) -> bool:
