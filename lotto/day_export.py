@@ -105,7 +105,11 @@ def _schema_rows(conn):
     ).fetchall()
 
 
-def _time_column(names):
+def _time_column(names, table=None):
+    # New shadow tables are stamped `ts`. Recognize that only for them so the
+    # existing finalb_shadow export, which also uses `ts`, stays a full copy.
+    if table in {"fix_shadow", "stock_first_shadow", "l2_shadow"} and "ts" in names:
+        return "ts"
     for name in _TIME_COLUMNS:
         if name in names:
             return name
@@ -143,7 +147,7 @@ def _copy_table(src, dest, table, columns, day, copy_batch):
             last = found[-1][0]
             total += _insert_rowids(src, dest, table, len(names), [row[0] for row in found])
         return total
-    time_col = _time_column(names)
+    time_col = _time_column(names, table)
     if time_col is None:
         last = 0
         while True:

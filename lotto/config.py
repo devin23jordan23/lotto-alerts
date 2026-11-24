@@ -4,6 +4,15 @@ from math import isfinite
 STRATEGY_VERSION = "phase1-three-bar-opening-drive-2026-10-14"
 
 
+def _valid_hhmm(value) -> bool:
+    if not isinstance(value, str) or len(value) != 5 or value[2] != ":":
+        return False
+    hour, minute = value.split(":")
+    if not (hour.isdigit() and minute.isdigit()):
+        return False
+    return 0 <= int(hour) <= 23 and 0 <= int(minute) <= 59
+
+
 @dataclass(frozen=True)
 class Settings:
     # Research defaults, not fitted probabilities or proven thresholds.
@@ -74,6 +83,38 @@ class Settings:
     # this never changes a live card, a Discord post, the 30-minute cooldown, or
     # any other FINAL-B mode. Env: LOTTO_REARM_ATR_MODE.
     rearm_atr_mode: int = 0
+    # Scanner fixes (SCANNER-FIXES-1124). Each mode is 0 off, 1 shadow, 2 on.
+    # Env: LOTTO_<FIELD>. Flag values are left out of recorded_settings.
+    # late_move_override_mode 1 keeps a fresh PM/PD break on 1.5x 2-bar volume.
+    late_move_mode: int = 0
+    late_move_atr: float = 1.1
+    late_move_override_mode: int = 1
+    late_move_override_rvol: float = 1.5
+    mkt_gate_mode: int = 0
+    mkt_gate_th5: float = 0.05
+    mkt_gate_th10: float = 0.075
+    mkt_gate_th15: float = 0.10
+    stock_first_mode: int = 0
+    stock_first_cap: int = 2
+    fast_run_mode: int = 0
+    fast_run_mkt: str = "alone"
+    fast_run_atr: float = 0.20
+    fast_run_straight: float = 0.60
+    # After this clock, a non-index card needs a completed-bar HOD/LOD, PM, or PD break.
+    afternoon_level_mode: int = 0
+    afternoon_level_start: str = "12:30"
+    # Ops. 1 and 2 both enable the direct-refresh fallback, the 10-minute repeat
+    # notice, and the 20-minute self-restart. Schwab reads the same env var.
+    token_fallback_mode: int = 0
+    # Latency (SCANNER-LATENCY-1124). Defaults stay off. 1 logs, 2 is live for the
+    # bar-close cycle and the options-history seed. Persistence is not changed.
+    latency_log: int = 0
+    bar_close_eval_mode: int = 0
+    bar_close_delay_s: int = 3
+    hot_max: int = 12
+    schwab_rps: float = 1.8
+    oh_seed_mode: int = 0
+    oh_seed_max_gap_s: int = 200
     # Operational only. The loader casts with type(default)(raw); bool("0") is True.
     day_export: int = 0
     day_export_hour: int = 16
@@ -89,7 +130,8 @@ class Settings:
     db_prune_allow_pre_export: int = 0
 
     def __post_init__(self):
-        if any(not isfinite(value) for value in vars(self).values()):
+        if any(not isfinite(value) for value in vars(self).values()
+               if isinstance(value, (int, float)) and not isinstance(value, bool)):
             raise ValueError("Settings must be finite")
         if not 0 < self.min_score <= 100 or min(self.min_pace_rvol,self.min_local_rvol,self.min_local_acceleration,self.min_range_atr,self.min_option_acceleration) <= 0:
             raise ValueError("Invalid score or RVOL threshold")
@@ -136,13 +178,61 @@ class Settings:
             raise ValueError("space_cleanup must be 0 or 1")
         if type(self.rearm_atr_mode) is not int or self.rearm_atr_mode not in (0, 1):
             raise ValueError("rearm_atr_mode must be 0 or 1")
+        fix_modes = ("late_move_mode", "mkt_gate_mode", "stock_first_mode", "fast_run_mode",
+                     "token_fallback_mode", "afternoon_level_mode")
+        if any(type(getattr(self, name)) is not int or getattr(self, name) not in (0, 1, 2) for name in fix_modes):
+            raise ValueError("scanner fix modes must be 0, 1 or 2")
+        if type(self.late_move_override_mode) is not int or self.late_move_override_mode not in (0, 1):
+            raise ValueError("late_move_override_mode must be 0 or 1")
+        if type(self.stock_first_cap) is not int or self.stock_first_cap <= 0:
+            raise ValueError("stock_first_cap must be a positive integer")
+        if self.fast_run_mkt not in ("all", "spiked", "alone"):
+            raise ValueError("fast_run_mkt must be all, spiked, or alone")
+        if not _valid_hhmm(self.afternoon_level_start):
+            raise ValueError("afternoon_level_start must be HH:MM in ET")
+        if not (self.late_move_atr > 0 and self.late_move_override_rvol > 0 and self.fast_run_atr > 0
+                and 0 < self.fast_run_straight <= 1 and self.mkt_gate_th5 > 0
+                and self.mkt_gate_th10 > 0 and self.mkt_gate_th15 > 0):
+            raise ValueError("Invalid scanner-fix threshold")
+        if type(self.latency_log) is not int or self.latency_log not in (0, 1):
+            raise ValueError("latency_log must be 0 or 1")
+        if type(self.bar_close_eval_mode) is not int or self.bar_close_eval_mode not in (0, 1, 2):
+            raise ValueError("bar_close_eval_mode must be 0, 1 or 2")
+        if type(self.oh_seed_mode) is not int or self.oh_seed_mode not in (0, 1, 2):
+            raise ValueError("oh_seed_mode must be 0, 1 or 2")
+        if type(self.bar_close_delay_s) is not int or not 0 <= self.bar_close_delay_s < 60:
+            raise ValueError("bar_close_delay_s must be a whole number of seconds under 60")
+        if type(self.hot_max) is not int or self.hot_max <= 0:
+            raise ValueError("hot_max must be a positive integer")
+        if type(self.oh_seed_max_gap_s) is not int or self.oh_seed_max_gap_s < 150:
+            raise ValueError("oh_seed_max_gap_s must be at least 150")
+        if not 0 < self.schwab_rps <= (1 / 0.55) + 1e-9:
+            raise ValueError("schwab_rps cannot exceed today's request rate")
         if type(self.db_prune_keep_days) is not int or self.db_prune_keep_days < 0:
             raise ValueError("db_prune_keep_days must be a non-negative integer")
         if type(self.db_prune_allow_pre_export) is not int or self.db_prune_allow_pre_export not in (0, 1):
             raise ValueError("db_prune_allow_pre_export must be 0 or 1")
 
 
+# Mode flags are operational. A Railway change must not rewrite the settings hash
+# stored on candidate rows. Thresholds stay, so a shadow row still records the cutoff.
+_UNRECORDED_FLAGS = {
+    "rearm_atr_mode",
+    "late_move_mode",
+    "late_move_override_mode",
+    "mkt_gate_mode",
+    "stock_first_mode",
+    "fast_run_mode",
+    "fast_run_mkt",
+    "token_fallback_mode",
+    "afternoon_level_mode",
+    "latency_log",
+    "bar_close_eval_mode",
+    "oh_seed_mode",
+}
+
+
 def recorded_settings(settings: Settings) -> dict:
-    """Strategy thresholds stored on candidate rows. Export flags stay operational."""
+    """Strategy thresholds stored on candidate rows. Export and mode flags stay operational."""
     return {key: value for key, value in asdict(settings).items()
-            if key != "rearm_atr_mode" and not key.startswith(("day_export", "space_cleanup", "db_prune"))}
+            if key not in _UNRECORDED_FLAGS and not key.startswith(("day_export", "space_cleanup", "db_prune"))}

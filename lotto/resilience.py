@@ -15,6 +15,10 @@ LOTTO_FAILED_CYCLE_RETRY_SECONDS 0 keeps the normal poll interval after a failed
 LOTTO_HEALTH_FAST_MODE           1: outage notice once failures have lasted LOTTO_HEALTH_ALERT_SECONDS
                                     (default 45) instead of after three failed cycles (~3 min).
 LOTTO_HEALTH_WEBHOOK             optional separate ops webhook (e.g. Hawk); default = the lotto webhook.
+LOTTO_TOKEN_FALLBACK_MODE        1 or 2: if the broker is down after the cached token expires, refresh
+                                    once with the on-disk Schwab refresh token. Also repeats the outage
+                                    notice every 10 minutes and exits after LOTTO_TOKEN_SELF_RESTART_MINUTES
+                                    (default 20) so the platform restarts the worker. 0 off.
 """
 import os
 from datetime import timedelta

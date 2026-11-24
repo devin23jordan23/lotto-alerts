@@ -41,7 +41,8 @@ class Store:
                 finalb_decision TEXT NOT NULL, finalb_block_reasons TEXT NOT NULL,
                 live_score REAL, finalb_score REAL, rule_flags TEXT NOT NULL,
                 cooldown_state TEXT NOT NULL, contract TEXT NOT NULL,
-                rearm_atr_010 INTEGER, rearm_atr_015 INTEGER);
+                rearm_atr_010 INTEGER, rearm_atr_015 INTEGER,
+                rearm_atr_dist REAL, rearm_elapsed_min REAL, rearm_in_window INTEGER);
             CREATE INDEX IF NOT EXISTS finalb_shadow_ts ON finalb_shadow(ts);
             CREATE TABLE IF NOT EXISTS milestones (
                 alert_id TEXT, percent INTEGER, at TEXT, PRIMARY KEY(alert_id, percent));
@@ -60,7 +61,29 @@ class Store:
             CREATE INDEX IF NOT EXISTS chain_coverage_day ON chain_coverage(day, symbol);
             CREATE TABLE IF NOT EXISTS health_incidents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, opened_at TEXT NOT NULL, reason TEXT NOT NULL,
-                notified_at TEXT, recovered_at TEXT);
+                notified_at TEXT, recovered_at TEXT, last_notified_at TEXT);
+            CREATE TABLE IF NOT EXISTS fix_shadow (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL, ticker TEXT NOT NULL, side TEXT NOT NULL, contract TEXT NOT NULL,
+                live_decision TEXT, setup TEXT,
+                lm_ext_atr REAL, lm_hb INTEGER, lm_fresh_lvl INTEGER, lm_rv2 REAL, lm_block INTEGER,
+                mkt5 REAL, mkt10 REAL, mkt15 REAL, mkt_state TEXT, mg_block INTEGER,
+                fix_flags TEXT);
+            CREATE INDEX IF NOT EXISTS fix_shadow_ts ON fix_shadow(ts);
+            CREATE TABLE IF NOT EXISTS stock_first_shadow (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL, ticker TEXT NOT NULL, side TEXT NOT NULL, setup TEXT,
+                trigger REAL, contract TEXT, entry_bid REAL, entry_ask REAL,
+                lm_ext_atr REAL, mkt_state TEXT,
+                cap_blocked INTEGER, cooldown_blocked INTEGER, no_contract INTEGER,
+                fix_flags TEXT);
+            CREATE INDEX IF NOT EXISTS stock_first_shadow_ts ON stock_first_shadow(ts);
+            CREATE TABLE IF NOT EXISTS l2_shadow (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL, mode TEXT NOT NULL, ticker TEXT NOT NULL,
+                side TEXT, setup TEXT, contract TEXT, live_at TEXT,
+                hot_rank INTEGER, would_eval_at TEXT);
+            CREATE INDEX IF NOT EXISTS l2_shadow_ts ON l2_shadow(ts);
             CREATE TABLE IF NOT EXISTS candidate_evaluations (
                 day TEXT, symbol TEXT, at TEXT, contract TEXT, strategy TEXT,
                 qualifying INTEGER, score REAL, features TEXT,
@@ -74,6 +97,8 @@ class Store:
         # as active trades when the phase distinction did not exist yet.
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(alerts)")}
         shadow_columns = {row[1] for row in self.db.execute("PRAGMA table_info(finalb_shadow)")}
+        health_columns = {row[1] for row in self.db.execute("PRAGMA table_info(health_incidents)")}
+        alert_columns = columns
         with self.db:
             if "phase" not in columns:
                 self.db.execute("ALTER TABLE alerts ADD COLUMN phase TEXT NOT NULL DEFAULT 'LEGACY'")
@@ -88,6 +113,21 @@ class Store:
                 self.db.execute("ALTER TABLE finalb_shadow ADD COLUMN rearm_atr_010 INTEGER")
             if "rearm_atr_015" not in shadow_columns:
                 self.db.execute("ALTER TABLE finalb_shadow ADD COLUMN rearm_atr_015 INTEGER")
+            if "rearm_atr_dist" not in shadow_columns:
+                self.db.execute("ALTER TABLE finalb_shadow ADD COLUMN rearm_atr_dist REAL")
+            if "rearm_elapsed_min" not in shadow_columns:
+                self.db.execute("ALTER TABLE finalb_shadow ADD COLUMN rearm_elapsed_min REAL")
+            if "rearm_in_window" not in shadow_columns:
+                self.db.execute("ALTER TABLE finalb_shadow ADD COLUMN rearm_in_window INTEGER")
+            if "last_notified_at" not in health_columns:
+                self.db.execute("ALTER TABLE health_incidents ADD COLUMN last_notified_at TEXT")
+            for name, kind in (
+                ("break_bar_close", "TEXT"), ("qual_bar_close", "TEXT"), ("first_qual_at", "TEXT"),
+                ("eval_start", "TEXT"), ("snapshot_bar_close", "TEXT"), ("card_created", "TEXT"),
+                ("delivered_at", "TEXT"), ("setup_trigger", "REAL"), ("delivery_attempts", "INTEGER"),
+            ):
+                if name not in alert_columns:
+                    self.db.execute(f"ALTER TABLE alerts ADD COLUMN {name} {kind}")
 
     def record(self, snap: Snapshot) -> None:
         with self.db:
@@ -111,17 +151,21 @@ class Store:
                   int(r["promoted"]), r["contracts"], r["spot"], r["flow_side"], r["flow_cluster"])
                  for r in rows])
 
-    def decision(self, snap: Snapshot, state: str, reason: str, candidate: Candidate | None = None):
+    def decision(self, snap: Snapshot, state: str, reason: str, candidate: Candidate | None = None, latency=None):
+        features = {"strategy": STRATEGY_VERSION, "parts": candidate.parts, "metrics": candidate.metrics,
+                    "score_change": candidate.score_change,
+                    "setup": asdict(candidate.setup) if candidate.setup else None,
+                    "side": candidate.option.side, "contract": candidate.option.symbol,
+                    "spot": snap.spot, "entry_ask": candidate.option.ask,
+                    "blockers": candidate.blockers} if candidate else {}
+        if latency:
+            for key in ("eval_start", "snapshot_bar_close", "would_qualify_seeded"):
+                if key in latency and latency[key] is not None:
+                    features[key] = latency[key]
         with self.db:
             self.db.execute("INSERT INTO decisions VALUES (?, ?, ?, ?, ?, ?)",
                             (snap.symbol, snap.at.isoformat(), state, reason,
-                             candidate.score if candidate else None,
-                             json.dumps({"strategy": STRATEGY_VERSION, "parts": candidate.parts, "metrics": candidate.metrics,
-                                         "score_change": candidate.score_change,
-                                         "setup": asdict(candidate.setup) if candidate.setup else None,
-                                         "side": candidate.option.side, "contract": candidate.option.symbol,
-                                         "spot": snap.spot, "entry_ask": candidate.option.ask,
-                                         "blockers": candidate.blockers} if candidate else {})))
+                             candidate.score if candidate else None, json.dumps(features)))
 
     def record_candidates(self, snap, candidates, settings):
         """Preserve both directions/expiries, including groups that lose ranking."""
@@ -228,12 +272,39 @@ class Store:
             self.db.executemany("""INSERT INTO finalb_shadow
                 (ts, ticker, side, live_decision, live_block_reasons, finalb_decision,
                  finalb_block_reasons, live_score, finalb_score, rule_flags, cooldown_state, contract,
-                 rearm_atr_010, rearm_atr_015)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 rearm_atr_010, rearm_atr_015, rearm_atr_dist, rearm_elapsed_min, rearm_in_window)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [(r["ts"], r["ticker"], r["side"], r["live_decision"], r["live_block_reasons"],
                   r["finalb_decision"], r["finalb_block_reasons"], r["live_score"], r["finalb_score"],
                   r["rule_flags"], r["cooldown_state"], r["contract"],
-                  r.get("rearm_atr_010"), r.get("rearm_atr_015")) for r in rows])
+                  r.get("rearm_atr_010"), r.get("rearm_atr_015"),
+                  r.get("rearm_atr_dist"), r.get("rearm_elapsed_min"), r.get("rearm_in_window")) for r in rows])
+
+    def record_fix_shadow(self, rows):
+        if not rows:
+            return
+        with self.db:
+            self.db.executemany("""INSERT INTO fix_shadow
+                (ts, ticker, side, contract, live_decision, setup, lm_ext_atr, lm_hb, lm_fresh_lvl,
+                 lm_rv2, lm_block, mkt5, mkt10, mkt15, mkt_state, mg_block, fix_flags)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(r["ts"], r["ticker"], r["side"], r["contract"], r.get("live_decision"), r.get("setup"),
+                  r.get("lm_ext_atr"), r.get("lm_hb"), r.get("lm_fresh_lvl"), r.get("lm_rv2"), r.get("lm_block"),
+                  r.get("mkt5"), r.get("mkt10"), r.get("mkt15"), r.get("mkt_state"), r.get("mg_block"),
+                  r.get("fix_flags")) for r in rows])
+
+    def record_stock_first(self, rows):
+        if not rows:
+            return
+        with self.db:
+            self.db.executemany("""INSERT INTO stock_first_shadow
+                (ts, ticker, side, setup, trigger, contract, entry_bid, entry_ask, lm_ext_atr, mkt_state,
+                 cap_blocked, cooldown_blocked, no_contract, fix_flags)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(r["ts"], r["ticker"], r["side"], r.get("setup"), r.get("trigger"), r.get("contract"),
+                  r.get("entry_bid"), r.get("entry_ask"), r.get("lm_ext_atr"), r.get("mkt_state"),
+                  r.get("cap_blocked"), r.get("cooldown_blocked"), r.get("no_contract"), r.get("fix_flags"))
+                 for r in rows])
 
     def record_finalb_discovery(self, report):
         """One RANK row per scored name. Discovery is not a card, so side is RANK."""
@@ -266,8 +337,17 @@ class Store:
             })
         self.record_finalb_shadow(rows)
 
+    def record_shadow_card(self, row):
+        with self.db:
+            self.db.execute("""INSERT INTO l2_shadow
+                (ts, mode, ticker, side, setup, contract, live_at, hot_rank, would_eval_at)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (row["ts"], row["mode"], row["ticker"], row.get("side"), row.get("setup"),
+                 row.get("contract"), row.get("live_at"), row.get("hot_rank"), row.get("would_eval_at")))
+
     def queue(self, candidate: Candidate, payload: dict, dry_run: bool,
-              phase: str, parent_id: str | None = None, session_extreme: float | None = None) -> str:
+              phase: str, parent_id: str | None = None, session_extreme: float | None = None,
+              latency=None) -> str:
         if phase not in {"POTENTIAL", "ACTIVE"}:
             raise ValueError("Alert phase must be POTENTIAL or ACTIVE")
         snap, option = candidate.snapshot, candidate.option
@@ -286,6 +366,12 @@ class Store:
                  option.bid / option.ask - 1, option.bid / option.ask - 1,
                  option.bid / option.ask - 1, option.quote_time.isoformat(),
                  phase, parent_id, thesis_id, session_extreme))
+            if latency:
+                self.db.execute("""UPDATE alerts SET break_bar_close=?, qual_bar_close=?, first_qual_at=?,
+                    eval_start=?, snapshot_bar_close=?, card_created=?, setup_trigger=? WHERE id=?""",
+                    (latency.get("break_bar_close"), latency.get("qual_bar_close"), latency.get("first_qual_at"),
+                     latency.get("eval_start"), latency.get("snapshot_bar_close"), latency.get("card_created"),
+                     latency.get("setup_trigger"), ident))
         return ident
 
     def track(self, snap: Snapshot, settings) -> list[dict]:

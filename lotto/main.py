@@ -22,6 +22,7 @@ from .health import check
 from .audit import audit_store, diagnose_symbols, audit_coil_burst_hypothesis
 from .forensics import export_case, export_window_closed
 from .space import maybe_space_cleanup
+from .latency import cycle_wait_seconds, hot_names
 from .resilience import flag
 from .operations import HealthMonitor
 
@@ -201,8 +202,28 @@ def main():
         try:
             today = datetime.now(ET).date().isoformat()
             tracked = store.active_options(today)
+            cfg = engine.settings
+            hot = None
+            on_snapshot = None
+            if cfg.bar_close_eval_mode >= 1:
+                recent_cut = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+                ignition_cut = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+                recent_cards = [row[0] for row in store.db.execute(
+                    "SELECT symbol FROM alerts WHERE at>=? AND phase IN ('ACTIVE','POTENTIAL') ORDER BY at DESC",
+                    (recent_cut,))]
+                ignitions = [row[0] for row in store.db.execute(
+                    "SELECT symbol FROM decisions WHERE at>=? AND state='IGNITION' ORDER BY at DESC",
+                    (ignition_cut,))]
+                hot = hot_names(engine.qualified_since, recent_cards, ignitions,
+                                sorted(client.discovery.always_deep), cfg.hot_max)
+                engine.planned_hot = hot
+            early_alerts = []
+            if cfg.bar_close_eval_mode == 2:
+                on_snapshot = lambda snap: early_alerts.extend(engine.process([snap]))
+            on_seed = engine.remember_seed if cfg.oh_seed_mode >= 1 else None
             frame = client.poll(sorted(set(symbols) | set(tracked)), tracked, engine.settings.max_dte,
-                                engine.settings)
+                                engine.settings, hot=hot if cfg.bar_close_eval_mode == 2 else None,
+                                on_snapshot=on_snapshot, on_seed=on_seed)
             store.record_discovery(client.discovery.observations)
             report = getattr(client.discovery, "finalb_shadow_report", None)
             if report:
@@ -214,11 +235,11 @@ def main():
             # Poll latency cannot turn an old candidate into a current alert.
             now = datetime.now(timezone.utc)
             frame = [s for s in frame if 0 <= (now - s.at).total_seconds() <= 90]
-            alerts = engine.process(frame)
+            alerts = early_alerts + engine.process(frame)
             for alert in alerts:
                 LOG.info("%s setup %s: %s", alert["phase"], alert["id"], alert["payload"]["embeds"][0]["description"])
             if live_delivery:
-                deliver_pending(store, webhook)
+                deliver_pending(store, webhook, engine.settings.latency_log)
             with store.db:
                 # Expire intraday trackers after the session even if no further quotes arrive.
                 store.db.execute("UPDATE alerts SET closed=1 WHERE day < ? AND closed=0", (today,))
@@ -257,6 +278,7 @@ def main():
                         LOG.info("Operational outage notice delivered")
                 except Exception as notice_exc:
                     LOG.warning("Operational outage notice unavailable (%s)",type(notice_exc).__name__)
+                health_monitor.exit_if_token_outage(datetime.now(timezone.utc), reason)
         # Flag 0 returns before any database or network work. Failures stay off the scan loop.
         maybe_day_export(engine.settings, database, datetime.now(timezone.utc))
         # Both flags 0 return at once. Outside market hours, once after startup and once each
@@ -266,7 +288,8 @@ def main():
             break
         retry_seconds = flag("LOTTO_FAILED_CYCLE_RETRY_SECONDS")
         cycle_seconds = min(poll_seconds, max(5, retry_seconds)) if cycle_failed and retry_seconds > 0 else poll_seconds
-        wait = max(1, cycle_seconds - (time.monotonic() - began))
+        wait = cycle_wait_seconds(datetime.now(timezone.utc), began, time.monotonic(), cycle_seconds,
+                                  engine.settings.bar_close_eval_mode, engine.settings.bar_close_delay_s)
         deadline = time.monotonic() + wait
         while not stop and time.monotonic() < deadline:
             time.sleep(max(0, min(1, deadline - time.monotonic())))

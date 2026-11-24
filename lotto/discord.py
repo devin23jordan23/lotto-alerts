@@ -23,7 +23,8 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
     peers = next((reason for reason in candidate.reasons if reason.startswith("Peers: ")), None)
     score_context = " · ".join(part for part in (context, peers) if part)
     displayed_score = round(candidate.score)
-    title = ("👀 POTENTIAL TRADE WATCH" if phase == "POTENTIAL"
+    title = ("STOCK-FIRST IDEA (options history thin)" if candidate.metrics.get("quality_tier") == "STOCK_FIRST"
+             else "👀 POTENTIAL TRADE WATCH" if phase == "POTENTIAL"
              else "⚡ RISKY OPENING DRIVE · ACTIVE TRADE IDEA" if candidate.metrics.get("opening_fast_lane")
                   and candidate.setup and candidate.setup.name == "OPENING_DRIVE"
              else "⚡ RISKY OPENING BREAK · ACTIVE TRADE IDEA" if candidate.metrics.get("opening_fast_lane")
@@ -44,7 +45,7 @@ def alert_payload(candidate: Candidate, phase: str, parent_id: str | None = None
     }]}
 
 
-def deliver_pending(store, webhook: str) -> None:
+def deliver_pending(store, webhook: str, latency_log: int = 0) -> None:
     parsed = urlparse(webhook)
     if (parsed.scheme != "https" or parsed.hostname not in {"discord.com", "discordapp.com"}
             or not parsed.path.startswith("/api/webhooks/")):
@@ -70,10 +71,19 @@ def deliver_pending(store, webhook: str) -> None:
         except HTTPError as exc:
             status = "pending" if exc.code == 429 else "failed" if 400 <= exc.code < 500 else "uncertain"
             LOG.warning("Discord delivery %s: HTTP %s (%s)", row["id"], exc.code, status)
+            if latency_log == 1 and exc.code == 429:
+                with store.db:
+                    store.db.execute(
+                        "UPDATE alerts SET delivery_attempts=COALESCE(delivery_attempts,0)+1 WHERE id=?",
+                        (row["id"],))
         except (URLError, TimeoutError, OSError):
             status = "uncertain"
             LOG.warning("Discord delivery %s uncertain; check channel before any manual resend", row["id"])
         with store.db:
-            store.db.execute("UPDATE alerts SET delivery=? WHERE id=?", (status, row["id"]))
+            if latency_log == 1 and status == "sent":
+                store.db.execute("UPDATE alerts SET delivery=?, delivered_at=? WHERE id=?",
+                                 (status, datetime.now(timezone.utc).isoformat(), row["id"]))
+            else:
+                store.db.execute("UPDATE alerts SET delivery=? WHERE id=?", (status, row["id"]))
         if status != "sent":
             break
