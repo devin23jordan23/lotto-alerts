@@ -115,6 +115,14 @@ class Settings:
     schwab_rps: float = 1.8
     oh_seed_mode: int = 0
     oh_seed_max_gap_s: int = 200
+    # 1 logs the time a card would have been posted. 2 posts it as soon as it is built.
+    inline_delivery: int = 0
+    # 1 and 2 both honor Discord retry_after instead of stopping the send loop.
+    discord_429_retry: int = 0
+    # 1 logs a parallel hot fetch. 2 fetches hot names with at most 4 workers.
+    hot_parallel_mode: int = 0
+    # 1 and 2 keep the pre-open baseline warmup running when the nightly review fails.
+    warmup_independent_mode: int = 0
     # Operational only. The loader casts with type(default)(raw); bool("0") is True.
     day_export: int = 0
     day_export_hour: int = 16
@@ -179,7 +187,8 @@ class Settings:
         if type(self.rearm_atr_mode) is not int or self.rearm_atr_mode not in (0, 1):
             raise ValueError("rearm_atr_mode must be 0 or 1")
         fix_modes = ("late_move_mode", "mkt_gate_mode", "stock_first_mode", "fast_run_mode",
-                     "token_fallback_mode", "afternoon_level_mode")
+                     "token_fallback_mode", "afternoon_level_mode", "inline_delivery",
+                     "discord_429_retry", "hot_parallel_mode", "warmup_independent_mode")
         if any(type(getattr(self, name)) is not int or getattr(self, name) not in (0, 1, 2) for name in fix_modes):
             raise ValueError("scanner fix modes must be 0, 1 or 2")
         if type(self.late_move_override_mode) is not int or self.late_move_override_mode not in (0, 1):
@@ -229,6 +238,10 @@ _UNRECORDED_FLAGS = {
     "latency_log",
     "bar_close_eval_mode",
     "oh_seed_mode",
+    "inline_delivery",
+    "discord_429_retry",
+    "hot_parallel_mode",
+    "warmup_independent_mode",
 }
 
 

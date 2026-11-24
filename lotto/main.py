@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .config import Settings, STRATEGY_VERSION
 from .demo import demo_frames
-from .discord import deliver_pending
+from .discord import deliver_pending, publish_ready, stamp_would_send
 from .engine import Engine
 from .models import ET, Snapshot
 from .schwab import Schwab
@@ -37,6 +37,30 @@ DEFAULT_UNIVERSE = (
 )
 
 REQUIRED_UNIVERSE = {"CSCO", "HPE", "SPX", "SPCX"}
+
+
+def handle_hot_snapshot(snap, engine, early_alerts, mode, live, deliver, stamp):
+    """Build a card the moment its snapshot arrives, then post or note that time."""
+    found = engine.process([snap])
+    early_alerts.extend(found)
+    publish_ready(found, mode, live, deliver, stamp)
+    return found
+
+
+def review_then_warm(store, client, symbols, directory, now, independent):
+    """Flag 0 keeps today's behavior: a nightly failure skips the baseline warmup."""
+    if independent:
+        try:
+            maybe_nightly(store, client, symbols, directory, now, fail_soft=True)
+        except Exception as exc:
+            LOG.warning("Nightly review failed (%s); baseline warmup still runs", type(exc).__name__)
+        try:
+            client.warm_universe(symbols, now)
+        except Exception as exc:
+            LOG.warning("Baseline warmup failed (%s)", type(exc).__name__)
+        return
+    maybe_nightly(store, client, symbols, directory, now)
+    client.warm_universe(symbols, now)
 
 
 def universe_symbols(raw: str) -> list[str]:
@@ -218,8 +242,16 @@ def main():
                                 sorted(client.discovery.always_deep), cfg.hot_max)
                 engine.planned_hot = hot
             early_alerts = []
+
+            def send_pending():
+                deliver_pending(store, webhook, cfg.latency_log, cfg.discord_429_retry)
+
+            def stamp(found):
+                stamp_would_send(store, found)
+
             if cfg.bar_close_eval_mode == 2:
-                on_snapshot = lambda snap: early_alerts.extend(engine.process([snap]))
+                on_snapshot = lambda snap: handle_hot_snapshot(
+                    snap, engine, early_alerts, cfg.inline_delivery, live_delivery, send_pending, stamp)
             on_seed = engine.remember_seed if cfg.oh_seed_mode >= 1 else None
             frame = client.poll(sorted(set(symbols) | set(tracked)), tracked, engine.settings.max_dte,
                                 engine.settings, hot=hot if cfg.bar_close_eval_mode == 2 else None,
@@ -235,11 +267,16 @@ def main():
             # Poll latency cannot turn an old candidate into a current alert.
             now = datetime.now(timezone.utc)
             frame = [s for s in frame if 0 <= (now - s.at).total_seconds() <= 90]
-            alerts = early_alerts + engine.process(frame)
+            late = engine.process(frame)
+            if cfg.inline_delivery == 1:
+                stamp(late)
+            elif cfg.inline_delivery >= 2 and live_delivery:
+                send_pending()
+            alerts = early_alerts + late
             for alert in alerts:
                 LOG.info("%s setup %s: %s", alert["phase"], alert["id"], alert["payload"]["embeds"][0]["description"])
-            if live_delivery:
-                deliver_pending(store, webhook, engine.settings.latency_log)
+            if live_delivery and cfg.inline_delivery < 2:
+                deliver_pending(store, webhook, engine.settings.latency_log, cfg.discord_429_retry)
             with store.db:
                 # Expire intraday trackers after the session even if no further quotes arrive.
                 store.db.execute("UPDATE alerts SET closed=1 WHERE day < ? AND closed=0", (today,))
@@ -264,8 +301,7 @@ def main():
                                      ((now-timedelta(minutes=5)).isoformat(),)).fetchall()
             if counts:
                 LOG.info("Recent decision reasons: %s", "; ".join(f"{r['n']}× {r['reason']}" for r in counts))
-            maybe_nightly(store,client,symbols,data_dir,now)
-            client.warm_universe(symbols, now)
+            review_then_warm(store, client, symbols, data_dir, now, cfg.warmup_independent_mode >= 1)
         except Exception as exc:
             detail = str(exc) if type(exc) is RuntimeError else type(exc).__name__
             LOG.error("Cycle failed (%s); retaining state for retry", detail)

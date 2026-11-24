@@ -27,6 +27,16 @@ SECTORS = {**dict.fromkeys(("TSM", "NVDA", "AMD", "ARM", "INTC", "MU", "AVGO", "
            **dict.fromkeys(("COIN", "HOOD", "MSTR"), "IBIT"), "MRNA": "XBI"}
 
 
+HOT_PARALLEL_CAP = 4
+
+
+def hot_worker_count(mode: int, names: int) -> int:
+    """Mode 2 overlaps hot HTTP. Starts stay spaced by the shared request gap."""
+    if mode < 2 or names < 2:
+        return 1
+    return min(HOT_PARALLEL_CAP, names)
+
+
 def benchmark_for(symbol):
     return "SPY" if symbol in {"SPX", "QQQ", "SMH", "SOXX", "XLK"} else SECTORS.get(symbol, "QQQ")
 
@@ -66,6 +76,7 @@ class Schwab:
         self._fallback_token = ""
         self._fallback_until = 0.0
         self._gap_lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self._request_gap = 0.55
         self.request_count = 0
         self.fetch_trace = []
@@ -263,8 +274,12 @@ class Schwab:
     def baseline(self, symbol: str, now: datetime):
         day = now.astimezone(ET).date()
         key = (symbol, day)
-        if key in self.baselines:
-            return self.baselines[key]
+        if not hasattr(self, "_state_lock"):
+            self._state_lock = threading.Lock()
+        with self._state_lock:
+            cached = self.baselines.get(key)
+        if cached is not None:
+            return cached
         data = self.candles(symbol, now - timedelta(days=45), now)
         daily = defaultdict(list)
         for raw in data.get("candles", []):
@@ -279,15 +294,12 @@ class Schwab:
             if previous:
                 ranges.append(max(high-low, abs(high-previous), abs(low-previous)))
             previous = rows[-1]["close"]
-        if not hasattr(self, "atrs"):
-            self.atrs = {}
-        self.atrs[key] = sum(ranges[-14:])/14 if len(ranges) >= 14 else None
-        if not hasattr(self,"levels"):
-            self.levels = {}
+        atr = sum(ranges[-14:])/14 if len(ranges) >= 14 else None
+        level_update = {}
         if daily:
             prior = daily[max(daily)]
-            self.levels.setdefault(key,{}).update(prior_high=max(r["high"] for r in prior),
-                                                  prior_low=min(r["low"] for r in prior))
+            level_update = {"prior_high": max(r["high"] for r in prior),
+                            "prior_low": min(r["low"] for r in prior)}
         profiles = defaultdict(dict)
         for raw in data.get("candles", []):
             at = epoch(raw.get("datetime"))
@@ -311,10 +323,20 @@ class Schwab:
             # Schwab index candles have zero volume; use traded SPY volume only
             # for volume-based signals while retaining SPX prices and ATR.
             baseline = self.baseline("SPY", now)
-        if not baseline:
-            LOG.warning("%s has fewer than ten usable historical sessions; no alerts until baseline is available", symbol)
-        self.baselines[key] = baseline
-        return baseline
+        with self._state_lock:
+            if key in self.baselines:
+                return self.baselines[key]
+            if not hasattr(self, "atrs"):
+                self.atrs = {}
+            if not hasattr(self, "levels"):
+                self.levels = {}
+            self.atrs[key] = atr
+            if level_update:
+                self.levels.setdefault(key, {}).update(level_update)
+            if not baseline:
+                LOG.warning("%s has fewer than ten usable historical sessions; no alerts until baseline is available", symbol)
+            self.baselines[key] = baseline
+            return baseline
 
     def bars(self, symbol: str, now: datetime, with_baseline=True) -> tuple[Bar, ...]:
         opening = now.astimezone(ET).replace(hour=9, minute=30, second=0, microsecond=0)
@@ -331,8 +353,12 @@ class Schwab:
                      and opening.replace(hour=4)<=at<opening and at+timedelta(minutes=1)<=now
                      and number(c.get("high")) is not None and number(c.get("low")) is not None]
         if premarket:
-            self.levels.setdefault((symbol,opening.date()),{}).update(
-                premarket_high=max(c["high"] for c in premarket),premarket_low=min(c["low"] for c in premarket))
+            if not hasattr(self, "_state_lock"):
+                self._state_lock = threading.Lock()
+            with self._state_lock:
+                self.levels.setdefault((symbol, opening.date()), {}).update(
+                    premarket_high=max(c["high"] for c in premarket),
+                    premarket_low=min(c["low"] for c in premarket))
         bars = {}
         for candle in raw.get("candles", []):
             start = epoch(candle.get("datetime"))
@@ -430,17 +456,27 @@ class Schwab:
         result = []
         began = time.monotonic()
 
-        def consume(symbol):
+        def chain_params(symbol):
+            return {"symbol": api_symbol(symbol), "contractType": "ALL", "strategy": "SINGLE",
+                    "includeUnderlyingQuote": "true", "strikeCount": 80,
+                    "fromDate": now.astimezone(ET).date().isoformat(),
+                    "toDate": (now.astimezone(ET).date() + timedelta(days=max_dte)).isoformat()}
+
+        def load_hot(symbol):
+            bars = self.bars(symbol, datetime.now(timezone.utc))
+            return bars, self.get("/chains", chain_params(symbol))
+
+        def consume(symbol, prefetched=None):
             if not hasattr(self, "last_polled"):
                 self.last_polled = {}
             self.last_polled[symbol] = time.monotonic()
             self.fetch_trace.append(f"deep:{symbol}")
             try:
-                bars = self.bars(symbol, datetime.now(timezone.utc))
-                data = self.get("/chains", {"symbol": api_symbol(symbol), "contractType": "ALL", "strategy": "SINGLE",
-                                            "includeUnderlyingQuote": "true", "strikeCount": 80,
-                                            "fromDate": now.astimezone(ET).date().isoformat(),
-                                            "toDate": (now.astimezone(ET).date() + timedelta(days=max_dte)).isoformat()})
+                if prefetched is None:
+                    bars = self.bars(symbol, datetime.now(timezone.utc))
+                    data = self.get("/chains", chain_params(symbol))
+                else:
+                    bars, data = prefetched
                 options = list(self.parse_chain(data, allow_spx=symbol == "SPX"))
                 if data.get("isDelayed") is not True:
                     self.coverage.observe(symbol, datetime.now(timezone.utc), options,
@@ -495,13 +531,44 @@ class Schwab:
                 return False
 
         hot_done = set()
-        for symbol in hot_first:
-            if time.monotonic() - began >= 54:
-                LOG.warning("Deep chain time budget reached; remaining candidates resume next cycle")
-                break
-            if consume(symbol) and on_snapshot is not None:
-                on_snapshot(result[-1])
-            hot_done.add(symbol)
+        parallel = settings.hot_parallel_mode if settings is not None else 0
+        workers = hot_worker_count(parallel, len(hot_first))
+        if parallel == 1 and len(hot_first) > 1:
+            LOG.info("Hot parallel would use %d workers for %d names", min(HOT_PARALLEL_CAP, len(hot_first)), len(hot_first))
+        if workers > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            LOG.info("Hot parallel fetch: %d names, %d workers", len(hot_first), workers)
+            try:
+                self.token()
+            except Exception:
+                LOG.warning("Hot parallel token warmup skipped")
+            pending = {}
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(load_hot, symbol): symbol for symbol in hot_first}
+                for fut in as_completed(futures):
+                    symbol = futures[fut]
+                    try:
+                        pending[symbol] = fut.result()
+                    except Exception as exc:
+                        pending[symbol] = exc
+            for symbol in hot_first:
+                loaded = pending.get(symbol)
+                if not isinstance(loaded, tuple):
+                    LOG.warning("%s skipped (%s)", symbol, type(loaded).__name__ if loaded else "missing")
+                    self.fetch_trace.append(f"deep:{symbol}")
+                    hot_done.add(symbol)
+                    continue
+                if consume(symbol, prefetched=loaded) and on_snapshot is not None:
+                    on_snapshot(result[-1])
+                hot_done.add(symbol)
+        else:
+            for symbol in hot_first:
+                if time.monotonic() - began >= 54:
+                    LOG.warning("Deep chain time budget reached; remaining candidates resume next cycle")
+                    break
+                if consume(symbol) and on_snapshot is not None:
+                    on_snapshot(result[-1])
+                hot_done.add(symbol)
         self.fetch_trace.append("sweep")
         sweep_limit = max(1, int(os.getenv("LOTTO_SWEEP_PER_CYCLE", "26")))
         sweep_targets = self.coverage.due(symbols, now, selected, sweep_limit)
