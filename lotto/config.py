@@ -4,6 +4,15 @@ from math import isfinite
 STRATEGY_VERSION = "phase1-three-bar-opening-drive-2026-10-14"
 
 
+def _valid_hhmm(value) -> bool:
+    if not isinstance(value, str) or len(value) != 5 or value[2] != ":":
+        return False
+    hour, minute = value.split(":")
+    if not (hour.isdigit() and minute.isdigit()):
+        return False
+    return 0 <= int(hour) <= 23 and 0 <= int(minute) <= 59
+
+
 @dataclass(frozen=True)
 class Settings:
     # Research defaults, not fitted probabilities or proven thresholds.
@@ -91,6 +100,9 @@ class Settings:
     fast_run_mkt: str = "alone"
     fast_run_atr: float = 0.20
     fast_run_straight: float = 0.60
+    # After this clock, a non-index card needs a completed-bar HOD/LOD, PM, or PD break.
+    afternoon_level_mode: int = 0
+    afternoon_level_start: str = "12:30"
     # Ops. 1 and 2 both enable the direct-refresh fallback, the 10-minute repeat
     # notice, and the 20-minute self-restart. Schwab reads the same env var.
     token_fallback_mode: int = 0
@@ -166,7 +178,8 @@ class Settings:
             raise ValueError("space_cleanup must be 0 or 1")
         if type(self.rearm_atr_mode) is not int or self.rearm_atr_mode not in (0, 1):
             raise ValueError("rearm_atr_mode must be 0 or 1")
-        fix_modes = ("late_move_mode", "mkt_gate_mode", "stock_first_mode", "fast_run_mode", "token_fallback_mode")
+        fix_modes = ("late_move_mode", "mkt_gate_mode", "stock_first_mode", "fast_run_mode",
+                     "token_fallback_mode", "afternoon_level_mode")
         if any(type(getattr(self, name)) is not int or getattr(self, name) not in (0, 1, 2) for name in fix_modes):
             raise ValueError("scanner fix modes must be 0, 1 or 2")
         if type(self.late_move_override_mode) is not int or self.late_move_override_mode not in (0, 1):
@@ -175,6 +188,8 @@ class Settings:
             raise ValueError("stock_first_cap must be a positive integer")
         if self.fast_run_mkt not in ("all", "spiked", "alone"):
             raise ValueError("fast_run_mkt must be all, spiked, or alone")
+        if not _valid_hhmm(self.afternoon_level_start):
+            raise ValueError("afternoon_level_start must be HH:MM in ET")
         if not (self.late_move_atr > 0 and self.late_move_override_rvol > 0 and self.fast_run_atr > 0
                 and 0 < self.fast_run_straight <= 1 and self.mkt_gate_th5 > 0
                 and self.mkt_gate_th10 > 0 and self.mkt_gate_th15 > 0):
@@ -210,6 +225,7 @@ _UNRECORDED_FLAGS = {
     "fast_run_mode",
     "fast_run_mkt",
     "token_fallback_mode",
+    "afternoon_level_mode",
     "latency_log",
     "bar_close_eval_mode",
     "oh_seed_mode",

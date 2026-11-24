@@ -27,11 +27,14 @@ FR_KEYS = (
 LATE_MOVE_CHECK = "late move: HOD/LOD break >= {atr:g} ATR from LOD/HOD"
 MKT_CHECK = "SPY/QQQ chop on a breakout"
 FAST_RUN_CHECK = "fast straight run into a level"
+AFTERNOON_CHECK = "afternoon: needs a completed HOD/LOD or PM/PD break"
+AFTERNOON_INDEX = frozenset({"SPY", "QQQ", "IWM", "SPX"})
 
 
 def fixes_active(settings) -> bool:
     return any(getattr(settings, name) >= 1 for name in (
-        "late_move_mode", "mkt_gate_mode", "stock_first_mode", "fast_run_mode"))
+        "late_move_mode", "mkt_gate_mode", "stock_first_mode", "fast_run_mode",
+        "afternoon_level_mode"))
 
 
 def late_move_check(settings) -> str:
@@ -322,8 +325,64 @@ def fast_run(snap, side: str, settings, bench) -> dict:
     }
 
 
+def _beyond(close, level, side) -> bool:
+    return close > level if side == "CALL" else close < level
+
+
+def _crossed_recent(bars, level, side, window) -> bool:
+    """A completed close crossed the level inside the last `window` bars and is still beyond it."""
+    if level is None or not isfinite(level) or len(bars) < 2:
+        return False
+    if not _beyond(bars[-1].close, level, side):
+        return False
+    start = max(1, len(bars) - window)
+    for index in range(start, len(bars)):
+        if _beyond(bars[index].close, level, side) and not _beyond(bars[index - 1].close, level, side):
+            return True
+    return False
+
+
+def _hod_lod_break(bars, side) -> bool:
+    """One of the last 3 completed closes is beyond the earlier session high or low, and the last close still is."""
+    if len(bars) <= 3:
+        return False
+    earlier, last = bars[:-3], bars[-3:]
+    if side == "CALL":
+        level = max(bar.high for bar in earlier)
+    else:
+        level = min(bar.low for bar in earlier)
+    if not _beyond(bars[-1].close, level, side):
+        return False
+    return any(_beyond(bar.close, level, side) for bar in last)
+
+
+def afternoon_level(snap, side, settings) -> dict:
+    """After the start clock, a non-index name needs a completed-bar break.
+
+    Uses completed RTH bars only. The live spot, which can sit in a still-forming
+    minute, does not count. HOD/LOD, premarket, and prior-day levels all qualify.
+    """
+    hour, minute = settings.afternoon_level_start.split(":")
+    start = time(int(hour), int(minute))
+    local = snap.at.astimezone(ET).time()
+    active = local >= start
+    index = snap.symbol in AFTERNOON_INDEX
+    hod = _hod_lod_break(snap.bars, side)
+    pm_level = snap.premarket_high if side == "CALL" else snap.premarket_low
+    pd_level = snap.prior_high if side == "CALL" else snap.prior_low
+    pm = _crossed_recent(snap.bars, pm_level, side, 5)
+    pd = _crossed_recent(snap.bars, pd_level, side, 5)
+    blocked = active and not index and not (hod or pm or pd)
+    return {
+        "al_block": int(blocked),
+        "al_hodlod": int(hod),
+        "al_pm": int(pm),
+        "al_pd": int(pd),
+    }
+
+
 def evaluate_fixes(snap, side, setup, settings, bench) -> dict | None:
-    """Compute every enabled fix. None when all four modes are 0."""
+    """Compute every enabled fix. None when every mode is 0."""
     if not fixes_active(settings):
         return None
     state = {}
@@ -337,6 +396,8 @@ def evaluate_fixes(snap, side, setup, settings, bench) -> dict | None:
         state.update(gate)
     if settings.fast_run_mode >= 1:
         state.update(fast_run(snap, side, settings, bench))
+    if settings.afternoon_level_mode >= 1:
+        state.update(afternoon_level(snap, side, settings))
     return state
 
 
@@ -357,6 +418,8 @@ def apply_scanner_fixes(snap, side, setup, metrics, checks, settings, bench) -> 
         checks[MKT_CHECK] = not bool(state.get("mg_block"))
     if settings.fast_run_mode == 2:
         checks[FAST_RUN_CHECK] = not bool(state.get("fr_block"))
+    if settings.afternoon_level_mode == 2:
+        checks[AFTERNOON_CHECK] = not bool(state.get("al_block"))
     return state
 
 
@@ -400,9 +463,12 @@ def shadow_flags(settings, state) -> str:
         "sf": settings.stock_first_mode,
         "fr": settings.fast_run_mode,
         "fr_mkt": settings.fast_run_mkt,
+        "al": settings.afternoon_level_mode,
     }}
     if settings.fast_run_mode >= 1 and state:
         payload["fr"] = {key: _compact(state.get(key)) for key in FR_KEYS}
+    if settings.afternoon_level_mode >= 1 and state:
+        payload["al"] = {key: state.get(key) for key in ("al_block", "al_hodlod", "al_pm", "al_pd")}
     return json.dumps(payload, separators=(",", ":"))
 
 

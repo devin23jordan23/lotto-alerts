@@ -21,6 +21,7 @@ from .latency import break_bar_close
 from .patterns import detect_setup
 from .scanner_fixes import (
     BENCH,
+    afternoon_level,
     fixes_active,
     in_stock_first_window,
     invalidation_holds,
@@ -629,8 +630,12 @@ class Engine:
             option = self._lane_contract(snap, side)
             no_contract = int(option is None)
             removed = int(cfg.fast_run_mode == 2 and ctx.get("fr_block"))
+            afternoon = afternoon_level(snap, side, cfg) if cfg.afternoon_level_mode >= 1 else None
+            afternoon_blocked = int(cfg.afternoon_level_mode == 2 and afternoon["al_block"])
             flags = json.loads(shadow_flags(cfg, ctx))
             flags["fr_removed"] = removed
+            if afternoon is not None:
+                flags["al"] = afternoon
             self.store.record_stock_first([{
                 "ts": snap.at.isoformat(),
                 "ticker": snap.symbol,
@@ -647,7 +652,7 @@ class Engine:
                 "no_contract": no_contract,
                 "fix_flags": json.dumps(flags, separators=(",", ":")),
             }])
-            if cap_blocked or cooldown_blocked or no_contract or removed or cfg.stock_first_mode < 2:
+            if cap_blocked or cooldown_blocked or no_contract or removed or afternoon_blocked or cfg.stock_first_mode < 2:
                 continue
             if self._lane_over_budget(snap):
                 continue
