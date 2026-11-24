@@ -125,6 +125,7 @@ class Store:
                 ("break_bar_close", "TEXT"), ("qual_bar_close", "TEXT"), ("first_qual_at", "TEXT"),
                 ("eval_start", "TEXT"), ("snapshot_bar_close", "TEXT"), ("card_created", "TEXT"),
                 ("delivered_at", "TEXT"), ("setup_trigger", "REAL"), ("delivery_attempts", "INTEGER"),
+                ("inline_would_send_at", "TEXT"),
             ):
                 if name not in alert_columns:
                     self.db.execute(f"ALTER TABLE alerts ADD COLUMN {name} {kind}")

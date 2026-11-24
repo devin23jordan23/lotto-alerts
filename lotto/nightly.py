@@ -275,7 +275,7 @@ def phase_opportunity_summary(alerts, rows, phase, group=None):
             "by_setup":{setup:dict(counts) for setup,counts in setups.items()}}
 
 
-def run_nightly(store, day, directory, symbols=(), client=None):
+def run_nightly(store, day, directory, symbols=(), client=None, fail_soft=False):
     root = Path(directory)/"nightly"/day
     root.mkdir(parents=True, exist_ok=True)
     research, errors, tape = [], [], {}
@@ -414,8 +414,15 @@ def run_nightly(store, day, directory, symbols=(), client=None):
     }
     path = root/"report.json"
     temporary = root/"report.tmp"
-    temporary.write_text(json.dumps(result,indent=2))
-    temporary.replace(path)
+    try:
+        temporary.write_text(json.dumps(result,indent=2))
+        temporary.replace(path)
+    except OSError as exc:
+        # A full disk must not delete the previous report or anything else.
+        LOG.warning("Nightly report not written (%s)", type(exc).__name__)
+        if not fail_soft:
+            raise
+        return None
     # An offline report must not suppress the live full-universe nightly scan.
     if client is not None:
         with store.db:
@@ -424,7 +431,7 @@ def run_nightly(store, day, directory, symbols=(), client=None):
     return path
 
 
-def maybe_nightly(store, client, symbols, directory, now):
+def maybe_nightly(store, client, symbols, directory, now, fail_soft=False):
     session = client.session(now)
     today = now.astimezone(ET).date().isoformat()
     day = today if session and now>=session[1]+timedelta(minutes=5) else None
@@ -437,5 +444,8 @@ def maybe_nightly(store, client, symbols, directory, now):
         if session and session[0]<=now<session[1]:
             return
         LOG.info("Nightly universe review starting: %s, %d names",day,len(symbols))
-        path = run_nightly(store,day,directory,symbols,client)
+        path = run_nightly(store,day,directory,symbols,client,fail_soft=fail_soft)
+        if path is None:
+            LOG.warning("Nightly universe review did not save a report")
+            return
         LOG.info("Nightly universe review saved: %s",path)

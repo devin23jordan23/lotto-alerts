@@ -665,7 +665,8 @@ class Engine:
                 [f"Stock-first {setup.name}"], True, state="IGNITION", setup=setup)
             payload = alert_payload(candidate, "ACTIVE")
             extreme = session_extreme(snap, side) if cfg.cooldown_mode == 2 else None
-            ident = self.store.queue(candidate, payload, self.dry_run, "ACTIVE", session_extreme=extreme)
+            ident = self.store.queue(candidate, payload, self.dry_run, "ACTIVE", session_extreme=extreme,
+                                     latency=self._card_latency(candidate))
             self.rearmed.discard((snap.day, snap.symbol))
             self._decide(snap, "IGNITION", f"active alert {ident}", candidate)
             posted.append({"id": ident, "phase": "ACTIVE", "parent_id": None, "payload": payload})
